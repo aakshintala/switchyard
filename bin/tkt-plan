@@ -5,7 +5,7 @@ set -euo pipefail
 # limit; the exemption is derived from recorded state below.
 
 usage() {
-  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--ruling <id>]\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
+  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--ruling <ruling comment id>]\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
   printf '       tkt-plan <state> triaged --comment <id>\n' >&2
   printf '       tkt-plan <state> rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>\n' >&2
   printf '       tkt-plan <state> rule-questions --comment <id>\n' >&2
@@ -969,7 +969,7 @@ do_grant() {
   fi
   if [ -n "$granted_by" ] && [ -z "$ruling" ]; then
     recorded_comment="$(t get granted_comment 2>/dev/null || true)"
-    echo "tkt-plan: grant already recorded: $granted_by:$recorded_comment: a later grant needs a ruling: use --ruling <comment id>" >&2
+    echo "tkt-plan: grant already recorded: $granted_by:$recorded_comment: a later grant needs a ruling: use --ruling <ruling comment id>" >&2
     exit 2
   fi
   if [ -n "$ruling" ] && t list grant 2>/dev/null | awk -v wanted="ruling=$ruling" '{ for (i = 1; i <= NF; i++) if ($i == wanted) found = 1 } END { exit !found }'; then
@@ -987,6 +987,14 @@ do_grant() {
   grant_ruling_json="$tmp.grant-ruling.json"
   grant_ruling_error="$tmp.grant-ruling-error"
   printf -v grant_comment_arg '%q' "$comment"
+  if [ -n "$ruling" ]; then
+    case "$ruling" in
+      *[!0-9]*)
+        grant_set_route "$grant_comment_arg" '<ruling comment id>'
+        emit "GRANT-REFUSED reason=ruling-id" 1 "grant-round --ruling takes the ruling comment's numeric id (for example --ruling 6879037718)" "$grant_route"
+        ;;
+    esac
+  fi
   printf -v grant_ruling_arg '%q' "$ruling"
   grant_set_route "$grant_comment_arg" "$grant_ruling_arg"
   if ! fetch_issue_comment "$comment" "$grant_comment_json" "$grant_comment_error"; then
