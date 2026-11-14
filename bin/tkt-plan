@@ -239,6 +239,12 @@ triaged_snapshot_unavailable_route() {
   printf '%s\n' "$route"
 }
 
+triaged_lines_snapshot_missing_route() {
+  local state="$1" route
+  printf -v route 'the LINES verdict has no saved plan snapshot; run one Verifier pass: tkt-plan %q verify' "$state"
+  printf '%s\n' "$route"
+}
+
 grant_pending() {
   local granted_by granted_used
   granted_by="$(t get granted_by 2>/dev/null || true)"
@@ -1159,8 +1165,7 @@ do_triaged() {
   accepted_diff=""
 
   if [ "$stored_verdict" = lines ] && [ -z "$stored_hash" ]; then
-    printf -v verify_route 'the LINES verdict has no saved plan snapshot; run one Verifier pass: tkt-plan %q verify' "$state"
-    emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "$verify_route"
+    emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "$(triaged_lines_snapshot_missing_route "$state")"
   fi
   if [ -n "$stored_hash" ] && [ "$stored_hash" != "$current_hash" ]; then
     case "$stored_hash" in
