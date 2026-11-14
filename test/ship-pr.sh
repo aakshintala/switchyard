@@ -778,6 +778,14 @@ git -C "$WT" push -q --force-with-lease origin HEAD:refs/heads/feature
 ship; expect 4 "pushed head whose patch-id differs from --reviewed exits 4"
 no_merge "pushed head with a changed patch"
 
+# A legacy FIX-OK followed by a newer since-carrying CHANGES at the same patch stays refused.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '(
+  [{created_at:"2026-11-04T10:00:00Z",id:132,author_association:"OWNER",body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK legacy approval")},
+   {created_at:"2026-11-04T11:00:00Z",id:133,author_association:"OWNER",body:("review-pr: patch-id " + $pid + ", head " + $head + ", since " + $head + "\n\n## standards (test)\n\nVERDICT standards: CHANGES")}])' >"$ST/review-comments"
+ship; expect 5 "legacy FIX-OK followed by newer CHANGES refuses merge"; expect_refused REVIEW; no_merge "legacy FIX-OK followed by newer CHANGES"
+
 # ===== the last review-pr verdict for --reviewed must approve before merge
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"

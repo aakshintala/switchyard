@@ -292,7 +292,7 @@ verify_comment_has_fix_ok() {
 verify_posted_rounds() {
   # verify_posted_rounds REPO PR SINCE: print sorted comments from the newest
   # matching --since comment onward, and refuse a stale base behind FIX-OK.
-  local repo="$1" pr="$2" since="$3" rows row created id header body64 comment_head
+  local repo="$1" pr="$2" since="$3" rows row created id header body64 comment_head comment_since
   local since_index=-1 start_index i body
   local -a comment_rows=()
   rows="$(review_comments_sorted "$repo" "$pr")" || return 1
@@ -317,6 +317,11 @@ verify_posted_rounds() {
       comment_head="$(printf '%s' "$header" | sed -n 's/^review-pr: patch-id [^,]*, head \([0-9a-f]\{40\}\).*/\1/p')"
       body="$(printf '%s' "$body64" | jq -Rr '@base64d')"
       if [ -n "$comment_head" ] && verify_comment_has_fix_ok "$body"; then
+        if [[ "$header" != *", since "* ]]; then
+          echo "review-pr: skipping legacy FIX-OK verify at head $comment_head (comment $id): its header has no since" >&2
+          i=$((i + 1))
+          continue
+        fi
         echo "review-pr: --since $since is behind FIX-OK verify at head $comment_head; pass --since $comment_head instead" >&2
         return 2
       fi
@@ -476,7 +481,7 @@ cmd_start() {
   case "$pr" in -*|"") usage;; esac
 
   repo=""; clone=""; issues=(); issue_count=0; specn=""; model=""; omodel=""; model_ruling=""
-  verify=""; since=""; wdoc=""; head=""; axes=""; axes_given=""; context_files=(); ticket_state=""
+  verify=""; since=""; since_full=""; wdoc=""; head=""; axes=""; axes_given=""; context_files=(); ticket_state=""
   patch_id=""
   full_rereview=""; full_rereview_given=""
   while [ $# -gt 0 ]; do
@@ -1077,6 +1082,7 @@ cmd_start() {
       printf 'pr=%s\n' "$pr"
       printf 'sha=%s\n' "$sha"
       printf 'patch_id=%s\n' "$patch_id"
+      if [ -n "$since_full" ]; then printf 'since=%s\n' "$since_full"; fi
       if [ -n "$full_rereview_given" ]; then
         printf 'full_rereview=%s\n' "$full_rereview"
       fi
@@ -1514,9 +1520,17 @@ cmd_collect() {
     group_sha="$(state_get "$first_state" sha)"
     group_patch_id="$(state_get "$first_state" patch_id)"
     group_full_rereview="$(state_get "$first_state" full_rereview)"
+    group_since="$(state_get "$first_state" since)"
     body="$tmp/comment-$gi.md"
     {
-      if [ -n "$group_full_rereview" ]; then
+      if [ -n "$group_since" ]; then
+        if [ -n "$group_full_rereview" ]; then
+          printf 'review-pr: patch-id %s, head %s, since %s, full-rereview: %s\n' \
+            "${group_patch_id:-none}" "${group_sha:-unknown}" "$group_since" "$group_full_rereview"
+        else
+          printf 'review-pr: patch-id %s, head %s, since %s\n' "${group_patch_id:-none}" "${group_sha:-unknown}" "$group_since"
+        fi
+      elif [ -n "$group_full_rereview" ]; then
         printf 'review-pr: patch-id %s, head %s, full-rereview: %s\n' \
           "${group_patch_id:-none}" "${group_sha:-unknown}" "$group_full_rereview"
       else

@@ -73,7 +73,7 @@ Phases: plan, build.
 - Outside-plan paths need no plan or fence-grant update. List each in the PR body's "Outside-plan files" section with a one-line reason; ask first for the contract-change stop-list above.
 
 Preflight and plan:
-- `Flaky test:` tickets (owner ruling 2026-10-15, #1460 comment 6205839732): the ticket's repro is the plan. Take the determined path: no planner, no Verifier, report "plan: skipped (determined)". "Cause: open" in the body is deliberate: the repro test decides between the candidates. At most one review; CI checks the rest. Flakes in one crate share a lane.
+- `Flaky test:` and `Flaky tests:` tickets (owner ruling 2026-10-15, #1460 comment 6205839732): the ticket's repro is the plan. Take the determined path: no planner, no Verifier, report "plan: skipped (determined)". "Cause: open" in the body is deliberate: the repro test decides between the candidates. At most one review; CI checks the rest. Flakes in one crate share a lane.
 - "Determined, no plan" skips step 3, never step 2. A posted plan whose fenced path changed goes back through the Verifier only.
 - Always, skip path included: the output-text grep covers `*.snap`, `copy_package(` and `package("<name>"` for provider packages, and `crates/main/src/completion_tests.rs` for CLI or completion.
 - A plan carries a `Base: <full sha>` line (planning skill). Its Files sweep adds binary tests pinning event-kind lists for a new per-session event; a new dependency gets `cargo deny check` on a scratch branch in preflight.

@@ -2878,6 +2878,8 @@ grep -q '\.review-context/1-pr-body\.md' "$T/state/prompt-verify.md" || fail "ve
 grep -q '\.review-context/plan\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the context file"
 grep -q '\.review-context/1-plan\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the collision copy"
 bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify --context collect exits 0"
+grep -Fxq "review-pr: patch-id $EXPECTED_PID, head $FAKE_SHA, since $FAKE_SHA" "$T/state/comment.md" || \
+  fail "posted verify header records the resolved full since base"
 
 # --- case: a missing --context file exits 1 before creating a worktree
 reset_state
@@ -3338,7 +3340,7 @@ VERIFY_C_SHA="$(git -C "$T/clone" rev-parse HEAD)"
 git -C "$T/clone" checkout -q main
 printf '%s\n' "$VERIFY_C_SHA" >"$T/state/heads.txt"
 printf 'P1 finding X: earlier reviewed behavior\n' >"$T/findings.txt"
-plant_comment "2026-10-09T12:00:00Z" 222 "review-pr: patch-id $EXPECTED_NEW_PID, head $VERIFY_C_SHA
+plant_comment "2026-10-09T12:00:00Z" 222 "review-pr: patch-id $EXPECTED_NEW_PID, head $VERIFY_C_SHA, since $OLD_SHA
 
 ## verify (M)
 
@@ -3357,6 +3359,32 @@ grep -Fq -- "pass --since $VERIFY_C_SHA instead" <<<"$err" || \
   fail "stale verify refusal names the FIX-OK head: [$err]"
 [ ! -e "$T/state/runs.txt" ] || fail "stale verify refusal starts no job"
 [ ! -e "$TMPDIR/review-pr/job-verify" ] || fail "stale verify refusal saves no job state"
+
+# --- case: a legacy FIX-OK without since is retained as context but does not refuse
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf '%s\n' "$VERIFY_C_SHA" >"$T/state/heads.txt"
+printf 'P1 finding legacy: repair the current commit\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK all repaired
+STATUS: DONE" 0
+plant_comment "2026-10-09T10:00:00Z" 241 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+VERDICT standards: CHANGES"
+plant_comment "2026-10-09T12:00:00Z" 242 "review-pr: patch-id $EXPECTED_NEW_PID, head $VERIFY_C_SHA
+
+## verify (M)
+
+FIX-OK legacy comment without a recorded since base"
+start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$OLD_SHA" --head "$VERIFY_C_SHA" >/dev/null 2>"$T/legacy-skip-stderr.txt" || \
+  { cat "$T/legacy-skip-stderr.txt" >&2; fail "legacy FIX-OK does not refuse verify"; }
+grep -Fxq "review-pr: skipping legacy FIX-OK verify at head $VERIFY_C_SHA (comment 242): its header has no since" "$T/legacy-skip-stderr.txt" || \
+  fail "legacy FIX-OK skip names comment and head"
+grep -Fq 'FIX-OK legacy comment without a recorded since base' "$T/state/prompt-verify.md" || \
+  fail "legacy FIX-OK remains in the posted-round context"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "legacy FIX-OK context verify collects"
 
 # --- case: an unmatched --since warns and includes every posted round
 reset_state

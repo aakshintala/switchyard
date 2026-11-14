@@ -32,6 +32,12 @@ if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
 fi
 if [ "${1:-}" = api ]; then
   case "${2:-}" in
+    --paginate)
+      endpoint="${3:-}"
+      [ "$endpoint" = repos/switchyard/issues/17/comments ] || exit 2
+      [ -r "$T/comments.json" ] || { printf '[]\n'; exit 0; }
+      cat "$T/comments.json"
+      exit 0;;
     repos/switchyard/issues/comments/*)
       comment_id="${2##*/}"
       [ -r "$T/comment-$comment_id.json" ] || exit 1
@@ -56,6 +62,10 @@ case "$(cat "$T/vermode")" in
   ok) printf 'FIX-OK\n';;
   incomplete) printf 'FIX-INCOMPLETE round=1\nP1 src/main.sh:1 — finding remains open\n';;
   fail) printf 'review-pr failed\n' >&2; exit 7;;
+  behind)
+    refusal_head="$(cat "$REFUSAL_HEAD")"
+    echo "review-pr: --since $OLD is behind FIX-OK verify at head $refusal_head; pass --since $refusal_head instead" >&2
+    exit 2;;
   no-verdict) printf 'review completed without a FIX verdict\n';;
   worktree-moves)
     printf 'moved during review\n' >"$WT/moved.txt"
@@ -82,7 +92,8 @@ setup_case() {
   S="$CASE_DIR/tkt.state"
   F="$CASE_DIR/findings.md"
   PR_HEAD="$CASE_DIR/pr-head"
-  export WT BARE BRANCH PR_HEAD
+  REFUSAL_HEAD="$CASE_DIR/refusal-head"
+  export WT BARE BRANCH PR_HEAD REFUSAL_HEAD OLD HEAD
   mkdir -p "$CASE_DIR" "$RUN"
   git init --quiet --bare "$BARE" || fail "init bare origin ($1)"
   git init --quiet -b "$BRANCH" "$WT" || fail "init worktree ($1)"
@@ -99,6 +110,7 @@ setup_case() {
   HEAD="$(git -C "$WT" rev-parse HEAD)"
   git -C "$WT" push --quiet --set-upstream origin "$BRANCH" || fail "push fixture ($1)"
   git --git-dir="$BARE" symbolic-ref HEAD "refs/heads/$BRANCH"
+  git -C "$WT" update-ref refs/remotes/origin/main "$OLD"
   printf '%s\n' "$HEAD" >"$PR_HEAD"
   printf 'P1 src/main.sh:1 — initial finding\n' >"$F"
   {
@@ -178,6 +190,29 @@ expect_grant_refused() {
   [ "$(read_state round)" = "$initial_round" ] || fail "$name changed round"
 }
 
+write_review_comment() {
+  local id="$1" patch_id="$2" comment_head="$3" comment_since="$4" verdict="$5" association="${6:-OWNER}"
+  local header
+  if [ "$comment_since" = none ]; then
+    header="review-pr: patch-id $patch_id, head $comment_head"
+  else
+    header="review-pr: patch-id $patch_id, head $comment_head, since $comment_since"
+  fi
+  jq -n --argjson id "$id" --arg header "$header" --arg verdict "$verdict" \
+    --arg assoc "$association" \
+    '[{id:$id,created_at:"2026-11-14T00:00:00Z",author_association:$assoc,body:($header + "\n\n## verify (test)\n\n" + $verdict)}]' \
+    >"$T/comments.json"
+}
+
+append_review_comment() {
+  local id="$1" patch_id="$2" comment_head="$3" comment_since="$4" verdict="$5"
+  local header="review-pr: patch-id $patch_id, head $comment_head, since $comment_since"
+  jq --argjson id "$id" --arg header "$header" --arg verdict "$verdict" \
+    '. + [{id:$id,created_at:"2026-11-14T00:00:01Z",author_association:"OWNER",body:($header + "\n\n## verify (test)\n\n" + $verdict)}]' \
+    "$T/comments.json" >"$T/comments.next.json"
+  mv "$T/comments.next.json" "$T/comments.json"
+}
+
 # FIX-OK records the exact reviewed head and the command passes the findings delta.
 setup_case fix-ok
 run_verify
@@ -197,6 +232,124 @@ grep -Eq '^verdict_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "
 [ "$(read_state fix_round.1.history)" = "$(read_state findings_history)" ] || fail "FIX-OK did not associate history with its slot"
 grep -Fq -- "--head $HEAD --model state-verify-model --verify $F --since $OLD" "$T/calls.log" || fail "review-pr did not receive the expected head, model, findings and since"
 grep -Fq "tkt-verify FIX-OK reviewed=$HEAD" "${S%.state}.journal" || fail "FIX-OK was not journalled"
+
+# An existing, proven FIX-OK at the exact head is adopted through normal bookkeeping.
+setup_case adopt-fix-ok
+printf 'behind\n' >"$T/vermode"
+write_review_comment 500 "$(git -C "$WT" diff "origin/main...$HEAD" | git patch-id --stable | awk '{print $1}')" "$HEAD" "$OLD" 'FIX-OK all findings repaired'
+printf '%s\n' "$HEAD" >"$REFUSAL_HEAD"
+run_verify
+[ "$RC" = 0 ] || fail "adopted FIX-OK exited $RC: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-OK 'adopted FIX-OK'
+[ "$(read_state reviewed)" = "$HEAD" ] || fail "adoption did not advance reviewed"
+[ "$(read_state head)" = "$HEAD" ] || fail "adoption did not preserve exact head"
+[ "$(read_state round)" = 1 ] || fail "adoption did not count the P-line round"
+[ "$(read_state fixslot)" = 1 ] || fail "adoption did not close the fix-round slot"
+[ "$(read_state fix_round.1.start)" = "$OLD" ] || fail "adoption recorded the wrong slot start"
+[ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "adoption recorded the wrong slot head"
+[ "$(read_state fix_round.1.findings)" = "$F" ] || fail "adoption recorded the wrong findings file"
+[ -r "$(read_state findings_history)" ] || fail "adoption did not write findings history"
+grep -Eq "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z tkt-verify ADOPT FIX-OK head=$HEAD since=$OLD comment=500$" "${S%.state}.journal" || fail "adoption journal line differs from the required format"
+[ "$(grep -Fc 'tkt-verify ADOPT FIX-OK ' "${S%.state}.journal")" = 1 ] || fail "adoption wrote more than one ADOPT journal line"
+
+# A since-base from an earlier recorded verdict is valid even when it is not `reviewed`.
+setup_case adopt-recorded-since
+recorded_base="$(git -C "$WT" rev-list --max-parents=0 HEAD)"
+set_state reviewed "$recorded_base"
+set_state fixslot 1
+set_state fix_round.1.head "$OLD"
+set_state fix_round.1.history "$RUN/prior-history.md"
+printf 'prior verified findings\n' >"$RUN/prior-history.md"
+printf 'behind\n' >"$T/vermode"
+actual_pid="$(git -C "$WT" diff "origin/main...$HEAD" | git patch-id --stable | awk '{print $1}')"
+write_review_comment 506 "$actual_pid" "$HEAD" "$OLD" 'FIX-OK all findings repaired'
+printf '%s\n' "$HEAD" >"$REFUSAL_HEAD"
+run_verify
+[ "$RC" = 0 ] || fail "FIX-OK with a recorded fix-round since-base exited $RC: $OUT $(cat "$T/stderr")"
+[ "$(read_state reviewed)" = "$HEAD" ] || fail "recorded since-base adoption did not advance reviewed"
+[ "$(read_state fixslot)" = 2 ] || fail "recorded since-base adoption did not allocate the next slot"
+grep -Fq "tkt-verify ADOPT FIX-OK head=$HEAD since=$OLD comment=506" "${S%.state}.journal" || fail "recorded since-base adoption journal is missing"
+
+# A granted adoption still consumes the granted round like an ordinary FIX-OK.
+setup_case adopt-granted
+set_state round 2
+write_ruling_comment 980 'grants: round 3'
+printf 'behind\n' >"$T/vermode"
+actual_pid="$(git -C "$WT" diff "origin/main...$HEAD" | git patch-id --stable | awk '{print $1}')"
+write_review_comment 507 "$actual_pid" "$HEAD" "$OLD" 'FIX-OK all findings repaired'
+printf '%s\n' "$HEAD" >"$REFUSAL_HEAD"
+run_verify_ruling 980
+[ "$RC" = 0 ] || fail "granted adoption exited $RC: $OUT $(cat "$T/stderr")"
+[ "$(read_state round)" = 3 ] || fail "granted adoption did not count round 3"
+[ "$(read_state grant.3)" = '980 https://github.com/switchyard/switchyard/issues/1756#issuecomment-980' ] || fail "granted adoption did not record grant.3"
+grep -Fq "tkt-verify ADOPT FIX-OK head=$HEAD since=$OLD comment=507" "${S%.state}.journal" || fail "granted adoption journal is missing"
+
+expect_adoption_refused() {
+  local name="$1" detail="$2"
+  run_verify
+  [ "$RC" = 1 ] || fail "$name exited $RC, want VERIFY-FAIL: $OUT $(cat "$T/stderr")"
+  assert_first_verdict 'VERIFY-FAIL rc=2' "$name"
+  grep -Fq "failed check: $detail" <<<"$OUT" || fail "$name did not name failed proof $detail: $OUT"
+  grep -Fq 'next command:' <<<"$OUT" || fail "$name did not give a next command: $OUT"
+  [ "$(read_state reviewed)" = "$OLD" ] || fail "$name changed reviewed"
+  [ "$(read_state round)" = 0 ] || fail "$name counted a failed adoption"
+}
+
+# Adoption refuses a different comment head, wrong patch-id, non-FIX-OK, bad base and legacy header.
+setup_case adopt-newer-verdict-after-legacy
+printf 'behind\n' >"$T/vermode"
+actual_pid="$(git -C "$WT" diff "origin/main...$HEAD" | git patch-id --stable | awk '{print $1}')"
+write_review_comment 508 "$actual_pid" "$HEAD" none 'FIX-OK legacy approval'
+append_review_comment 509 "$actual_pid" "$HEAD" "$OLD" 'VERDICT spec: CHANGES'
+printf '%s\n' "$HEAD" >"$REFUSAL_HEAD"
+run_verify
+[ "$RC" = 1 ] || fail "newer CHANGES after legacy FIX-OK exited $RC: $OUT $(cat "$T/stderr")"
+grep -Fq 'failed check: newer verdict at head:' <<<"$OUT" || fail "newer CHANGES after legacy FIX-OK did not name newer verdict: $OUT"
+[ "$(read_state reviewed)" = "$OLD" ] || fail "newer CHANGES after legacy FIX-OK advanced reviewed"
+
+setup_case adopt-newer-incomplete
+printf 'behind\n' >"$T/vermode"
+actual_pid="$(git -C "$WT" diff "origin/main...$HEAD" | git patch-id --stable | awk '{print $1}')"
+write_review_comment 510 "$actual_pid" "$HEAD" "$OLD" 'FIX-OK all repaired'
+append_review_comment 511 "$actual_pid" "$HEAD" "$OLD" 'FIX-INCOMPLETE findings remain'
+printf '%s\n' "$HEAD" >"$REFUSAL_HEAD"
+run_verify
+[ "$RC" = 1 ] || fail "newer FIX-INCOMPLETE after FIX-OK exited $RC: $OUT $(cat "$T/stderr")"
+grep -Fq 'failed check: newer verdict at head:' <<<"$OUT" || fail "newer FIX-INCOMPLETE did not name newer verdict: $OUT"
+[ "$(read_state reviewed)" = "$OLD" ] || fail "newer FIX-INCOMPLETE after FIX-OK advanced reviewed"
+
+setup_case adopt-head-mismatch
+printf 'behind\n' >"$T/vermode"
+write_review_comment 501 "$(git -C "$WT" diff "origin/main...$OLD" | git patch-id --stable | awk '{print $1}')" "$OLD" "$OLD" 'FIX-OK all repaired'
+printf '%s\n' "$OLD" >"$REFUSAL_HEAD"
+expect_adoption_refused head-mismatch 'header head'
+
+setup_case adopt-patch-mismatch
+printf 'behind\n' >"$T/vermode"
+write_review_comment 502 'ffffffffffffffffffffffffffffffffffffffff' "$HEAD" "$OLD" 'FIX-OK all repaired'
+printf '%s\n' "$HEAD" >"$REFUSAL_HEAD"
+expect_adoption_refused patch-id-mismatch 'patch-id mismatch'
+
+setup_case adopt-non-fix-ok
+printf 'behind\n' >"$T/vermode"
+actual_pid="$(git -C "$WT" diff "origin/main...$HEAD" | git patch-id --stable | awk '{print $1}')"
+write_review_comment 503 "$actual_pid" "$HEAD" "$OLD" 'FIX-INCOMPLETE findings remain'
+printf '%s\n' "$HEAD" >"$REFUSAL_HEAD"
+expect_adoption_refused non-fix-ok 'non-FIX-OK verdict'
+
+setup_case adopt-since-gap
+printf 'behind\n' >"$T/vermode"
+actual_pid="$(git -C "$WT" diff "origin/main...$HEAD" | git patch-id --stable | awk '{print $1}')"
+write_review_comment 504 "$actual_pid" "$HEAD" "$HEAD" 'FIX-OK all repaired'
+printf '%s\n' "$HEAD" >"$REFUSAL_HEAD"
+expect_adoption_refused since-gap 'since-base gap'
+
+setup_case adopt-legacy-no-since
+printf 'behind\n' >"$T/vermode"
+actual_pid="$(git -C "$WT" diff "origin/main...$HEAD" | git patch-id --stable | awk '{print $1}')"
+write_review_comment 505 "$actual_pid" "$HEAD" none 'FIX-OK all repaired'
+printf '%s\n' "$HEAD" >"$REFUSAL_HEAD"
+expect_adoption_refused legacy-no-since 'header has no since'
 
 # An explicit model replaces model.verify.
 setup_case model-override

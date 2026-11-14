@@ -61,7 +61,7 @@ Briefs you send:
 - One `delegate watch` per Bash call. `delegate` has no `result` subcommand: `delegate status <id>` prints state without waiting, `delegate watch <id>` prints state and result. Inventing a subcommand exits 2 and the harness reports the wait as failed even when the job finished.
 
 Preflight and plan:
-- `Flaky test:` tickets (owner ruling 2026-10-15, #1460 comment 6205839732): the ticket's repro is the plan. Take the determined path: no planner, no Verifier, report "plan: skipped (determined)". "Cause: open" in the body is deliberate: the repro test decides between the candidates. At most one review; CI checks the rest. Flakes in one crate share a lane.
+- `Flaky test:` and `Flaky tests:` tickets (owner ruling 2026-10-15, #1460 comment 6205839732): the ticket's repro is the plan. Take the determined path: no planner, no Verifier, report "plan: skipped (determined)". "Cause: open" in the body is deliberate: the repro test decides between the candidates. At most one review; CI checks the rest. Flakes in one crate share a lane.
 - "Determined, no plan" skips step 3, never step 2. A posted plan whose fenced path changed goes back through the Verifier only.
 - Always, skip path included: the output-text grep covers `*.snap`, `copy_package(` and `package("<name>"` for provider packages, and `crates/main/src/completion_tests.rs` for CLI or completion.
 - A plan carries a `Base: <full sha>` line (planning skill). Its Files sweep adds binary tests pinning event-kind lists for a new per-session event; a new dependency gets `cargo deny check` on a scratch branch in preflight.
