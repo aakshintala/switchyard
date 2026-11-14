@@ -862,6 +862,21 @@ jq -e '[.[].body] | join("\\n") | contains("/srv/lanes") | not' \
   "$ST/created-issues" >/dev/null || fail "P3 issue bodies have no lane prefix"
 ! grep -Fq "/$p3_top/" "$ST/comment.txt" || fail "P3 PR comment has no home prefix"
 ! grep -Fq '/srv/lanes' "$ST/comment.txt" || fail "P3 PR comment has no lane prefix"
+jq -e --arg prefix "/$p3_top/" '[.[].title] | join("\\n") | (contains($prefix) or contains("/srv/lanes")) | not' \
+  "$ST/created-issues" >/dev/null || fail "P3 issue titles have no host path prefix"
+! grep -E '^gh issue list' "$ST/gh.log" | grep -Fq -e "/$p3_top/" -e '/srv/lanes' \
+  || fail "P3 issue search query has no host path prefix"
+# A rerun finds the issue it filed (whose body holds the redacted finding) instead of a duplicate.
+cp "$ST/issues" "$T/p3-issues-after-first-run"
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+cp "$T/p3-issues-after-first-run" "$ST/issues"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" --arg finding "$p3_finding" '[
+  {created_at:"2026-11-04T11:00:00Z",id:118,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE path findings\n" + $finding)}
+]' >"$ST/review-comments"
+ship; expect 0 "P3 rerun with host paths reuses its issue"
+[ "$(jq 'length' "$ST/created-issues" 2>/dev/null || echo 0)" = 0 ] \
+  || fail "P3 rerun with host paths files no duplicate: [$(cat "$ST/created-issues")]"
 
 # A decorated verify heading is normalised the same way as review-pr's parser.
 setup

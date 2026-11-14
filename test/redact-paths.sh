@@ -31,6 +31,7 @@ run=work/fiber-worktrees/flywheel/run
   printf 'lanes %s/%s-worktrees/%s/src/main.rs and %s/sy-wt/%s/docs/readme.md\n' \
     "$lanes" "$repo" "$worktree" "$lanes" "$worktree"
   printf 'bare lane `%s/%s-worktrees/%s`\n' "$lanes" "$repo" "$worktree"
+  printf 'box lane %s/box-layout/%s/x and %s/box-layout/%s.\n' "$lanes" "$worktree" "$lanes" "$worktree"
   printf 'homes %s/project/file.txt %s/project/file.txt %s/etc/config\n' \
     "$mac_home" "$linux_home" "$root_home"
   printf 'bare homes %s, `%s` and %s.\n' "$mac_home" "$linux_home" "$root_home"
@@ -44,6 +45,7 @@ root run run/root-log.txt
 bare run `run` and run.
 lanes <lane worktree>/src/main.rs and <lane worktree>/docs/readme.md
 bare lane `<lane worktree>`
+box lane <lane worktree>/x and <lane worktree>.
 homes ~/project/file.txt ~/project/file.txt ~/etc/config
 bare homes ~, `~` and ~.
 other cache ~/.cache/agents/run/x.md

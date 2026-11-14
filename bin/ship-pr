@@ -1337,6 +1337,10 @@ file_p3_findings() {
   : >"$links_file"
   while IFS= read -r finding || [ -n "$finding" ]; do
     [ -n "$finding" ] || continue
+    # Redact once, so the title, the search query, the dedup match and the
+    # posted body all see the same text.
+    finding="$(printf '%s\n' "$finding" | "$here/lib/redact-paths")" \
+      || die_after_ready 1 "cannot redact P3 finding"
     detail="${finding#P3 }"
     title="$detail"
     if [ "${#title}" -gt 220 ]; then title="${title:0:217}..."; fi
