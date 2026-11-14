@@ -809,6 +809,10 @@ if [ "$fix_gate_rc" -eq 0 ]; then
 fi
 record_round_findings
 if [ "$recover_unpushed" -eq 1 ]; then
+  # Recovery replaces this run's dispatch, so a --resume on it never runs.
+  if [ -n "$resume" ]; then
+    printf 'tkt-fix: warning: --resume %s was not run: this run pushes the unpushed commits of closed slot %s instead; rerun tkt-fix with --resume %s --prompt <file> to deliver it\n' "$resume" "$slot" "$resume" >&2
+  fi
   # Re-run the plan gate before publishing a commit left by a closed job.
   env_prefix=""
   if e="$(t get env 2>/dev/null)" && [ -n "$e" ]; then env_prefix="$e "; fi

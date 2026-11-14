@@ -2054,6 +2054,29 @@ grep -q 'DRIFT\|RECOVER' <<<"$out" && fail "recover-push-fail recovery reported 
 grep -q '^job|' "$T/calls.log" && fail "recover-push-fail dispatched another fix job"
 fi
 
+# A --resume passed on a closed-slot recovery run is named in a warning, not dropped silently.
+if want recover-drops-resume; then
+setup_case recover-drops-resume
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+cat >"$CDIR/origin.git/hooks/pre-receive" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$CDIR/origin.git/hooks/pre-receive"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "recover-drops-resume first run exited $run_rc, want PUSH-FAIL 1: $(head -n 1 <<<"$out")"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+write_job_record j1 "$OLD" "$NEW"
+rm "$CDIR/origin.git/hooks/pre-receive"
+printf 'answer\n' >"$T/resume-answer.md"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$T/resume-answer.md" 2>"$T/stderr")" || fail "recover-drops-resume recovery exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "recover-drops-resume recovery verdict missing: $(head -n 1 <<<"$out")"
+grep -q 'warning: --resume j1 was not run' "$T/stderr" || fail "recover-drops-resume did not warn about the dropped resume: $(cat "$T/stderr")"
+[ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-529)" = "$NEW" ] || fail "recover-drops-resume did not push NEW to origin"
+grep -q '^job|' "$T/calls.log" && fail "recover-drops-resume dispatched the resume alongside recovery"
+fi
+
 # CI-WAIT rc=2 leaves the same closed fix job recoverable without another wait failure.
 if want recover-ci-wait-2; then
 setup_case recover-ci-wait-2
