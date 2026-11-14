@@ -82,8 +82,6 @@ tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"; r
 plangate="$bin_dir/plan-gate"
 fbrief="$HOME/.agents/skills/review-loop/briefs/fix.md"
 t() { "$tkt_state" "$state" "$@"; }
-# history_path K: the findings-history file for fix slot K.
-history_path() { printf '%s' "$run/$namebase$part_suffix-findings-history-r$1.md"; }
 
 ruling_match_begin() {
   ruling_match_seen=()

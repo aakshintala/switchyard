@@ -99,7 +99,7 @@ mkdir -p "$run"
 issue="$(t get issue 2>/dev/null || true)"
 if [ -n "$issue" ]; then set_namebase "$repo" "$issue"; else namebase="${repo##*/}"; fi
 part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
-history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
+history_file="$(history_path "$knum")"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-verify.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --model "$verifymodel" --verify "$findings" --since "$reviewed")
