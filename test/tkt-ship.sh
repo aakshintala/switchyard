@@ -181,6 +181,10 @@ expect_logfile() {
   [ -f "$log" ] || fail "$1: missing log file [$log]"
 }
 
+gate_hash() {
+  printf '%s' "${1:+$1 }$2" | shasum -a 256 | awk '{print $1}'
+}
+
 # --- a missing state file is not reported as a running ship ---
 reset_stub; setup_case missing-state
 missing_state="missing/state"
@@ -1034,6 +1038,92 @@ grep -Fq "tkt-ship: tkt-gate last passed at $OLD but PR head is $H; gated diff c
 cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-earlier: body changed after an older PASS"
 ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-earlier: no body edit after an older PASS"
 [ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gateship-earlier: did not invoke ship-pr after refusing"
+
+# A fix-job credit at the PR head and for the required full gate replaces an
+# older tkt-gate PASS and writes the same Local gate body line as a current PASS.
+reset_stub; setup_case gateship-fix-credit
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\nenv=RUN_CHECKS=1\n' "$CDIR/plan.md" >>"$S"
+OLD_GATE=1111111111111111111111111111111111111111
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$OLD_GATE" || fail "gateship-fix-credit: journal an older gate PASS"
+CREDIT_HASH="$(gate_hash RUN_CHECKS=1 'bash test/gate.sh')"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-fix gate PASS head=$H cmd=$CREDIT_HASH" || fail "gateship-fix-credit: journal fix-job credit"
+printf 'Title\n\nSome text.\nImplemented by: m/a\n' >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-fix-credit: exit $RC: $OUT $(cat "$CDIR/stderr")"
+expect_line1 "MERGED sha=" gateship-fix-credit
+cat >"$CDIR/body-expected" <<EOF
+Title
+
+Some text.
+Local gate: pass at $H (bash test/gate.sh)
+Implemented by: m/a
+EOF
+cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-fix-credit: matching fix-job credit did not insert Local gate line: [$(cat "$T/prbody")]"
+grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-fix-credit: did not write body after matching credit"
+! grep -q 'GATE-STALE' "$CDIR/stderr" || fail "gateship-fix-credit: matching credit was refused: [$(cat "$CDIR/stderr")]"
+
+# A credit with a different command hash is ignored and leaves GATE-STALE active.
+reset_stub; setup_case gateship-fix-credit-hash
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+OLD_GATE=1111111111111111111111111111111111111111
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$OLD_GATE" || fail "gateship-fix-credit-hash: journal older gate PASS"
+GOOD_HASH="$(gate_hash '' 'bash test/gate.sh')"
+BAD_HASH="$(printf 'wrong command' | shasum -a 256 | awk '{print $1}')"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-fix gate PASS head=$H cmd=$BAD_HASH" || fail "gateship-fix-credit-hash: journal mismatched credit"
+run_ship
+[ "$RC" -eq 1 ] || fail "gateship-fix-credit-hash: exit $RC"
+expect_line1 "GATE-STALE gate=$OLD_GATE head=$H" gateship-fix-credit-hash
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gateship-fix-credit-hash: invoked ship-pr after stale refusal"
+[ "$GOOD_HASH" != "$BAD_HASH" ] || fail "gateship-fix-credit-hash fixture hashes unexpectedly match"
+
+# A credit at another head is ignored even when its command hash matches.
+reset_stub; setup_case gateship-fix-credit-head
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+OLD_GATE=1111111111111111111111111111111111111111
+OTHER_HEAD=2222222222222222222222222222222222222222
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$OLD_GATE" || fail "gateship-fix-credit-head: journal older gate PASS"
+CREDIT_HASH="$(gate_hash '' 'bash test/gate.sh')"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-fix gate PASS head=$OTHER_HEAD cmd=$CREDIT_HASH" || fail "gateship-fix-credit-head: journal other-head credit"
+run_ship
+[ "$RC" -eq 1 ] || fail "gateship-fix-credit-head: exit $RC"
+expect_line1 "GATE-STALE gate=$OLD_GATE head=$H" gateship-fix-credit-head
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gateship-fix-credit-head: invoked ship-pr after stale refusal"
 
 # A full PASS at B overrides an older Local gate body line without warning.
 reset_stub; setup_case gateship-pass-current-stale-body
