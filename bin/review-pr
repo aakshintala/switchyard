@@ -35,7 +35,8 @@
 #     posts the one PR comment with the patch-id, prints the verdict digest,
 #     writes the open findings (or "no open findings") to PATH when asked,
 #     removes finished worktrees and keeps each UNFINISHED job's worktree and
-#     state file. An UNFINISHED job's `resume:` line ends with `then run
+#     state file. Collect also acks each job whose result it successfully reads.
+#     An UNFINISHED job's `resume:` line ends with `then run
 #     review-pr collect <id>`. Run resume on the named host. `delegate resume
 #     <id>` creates a new delegate job id and links it from the original record
 #     with `supersededBy`; collect accepts either id and follows the resumed
@@ -1564,6 +1565,8 @@ cmd_collect() {
   cat "$unknown_f" >>"$unfinished_f"
   unfinished="$(wc -l <"$unknown_f" | tr -d ' ')"
   bad=0
+  ack_ids=()
+  ack_state_ids=()
   for jid in ${id_list[@]+"${id_list[@]}"}; do
     sf="$state_dir/$jid"
     role="$(state_get "$sf" role)"
@@ -1573,6 +1576,17 @@ cmd_collect() {
       status="$(jq -r '.status // "MISSING"' "$rec" 2>/dev/null || echo MISSING)"
       gate="$(jq -r '.result.gateResult.exitCode // "none"' "$rec" 2>/dev/null || echo none)"
       text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
+    fi
+    if { [ "$status" = "DONE" ] || [ "$status" = "DONE_WITH_CONCERNS" ]; } && [[ "$text" =~ [^[:space:]] ]]; then
+      # Ack the latest record that was actually read, not a superseded parent.
+      ack_id=""
+      while IFS=$'\t' read -r walked_id walked_rec; do
+        [ -f "$walked_rec" ] && ack_id="$walked_id"
+      done < <(job_walk "$jid" supersededBy)
+      if [ -n "$ack_id" ]; then
+        ack_ids[${#ack_ids[@]}]="$ack_id"
+        ack_state_ids[${#ack_state_ids[@]}]="$jid"
+      fi
     fi
     std_ok=""; spec_ok=""; ob_ok=""; fix_ok=""; role_bad=""
     if [ -n "$text" ]; then
@@ -1632,6 +1646,25 @@ cmd_collect() {
         cleanup_keep[${#cleanup_keep[@]}]="$sf"
         unfinished=$((unfinished + 1))
       fi
+    fi
+  done
+  # Ack only results read successfully above. Keep the clone alive until each
+  # guard-checked acknowledgement has run; a failure must not change verdicts.
+  for ai in ${!ack_ids[@]}; do
+    ack_id="${ack_ids[$ai]}"
+    ack_state="$state_dir/${ack_state_ids[$ai]}"
+    ack_clone="$(state_get "$ack_state" clone 2>/dev/null || true)"
+    # An empty clone would leave cd in place and DELEGATE_CALLER_CWD unset, so
+    # delegate would check the ack against collect's own cwd instead.
+    if [ -z "$ack_clone" ] || [ ! -d "$ack_clone" ]; then
+      printf 'review-pr: warning: no clone for job %s; not acked\n' "$ack_id" >&2
+      continue
+    fi
+    ack_error="$tmp/ack-error.txt"
+    if ! (cd "$ack_clone" && DELEGATE_CALLER_CWD="$ack_clone" delegate ack "$ack_id") \
+      >/dev/null 2>"$ack_error"; then
+      printf 'review-pr: warning: delegate ack failed for job %s\n' "$ack_id" >&2
+      cat "$ack_error" >&2
     fi
   done
   # Preserve unrequested siblings' state and worktrees while cleaning their
