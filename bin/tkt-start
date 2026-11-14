@@ -193,14 +193,10 @@ fi
 if [ "$no_preflight" -eq 0 ] && [ "$takeover_given" -eq 0 ]; then
   planner_available="$planner_flag_available"
   if [ "$planner_flag_seen" -eq 0 ] && state_has_planner_model; then planner_available=1; fi
-  if [ "$planner_available" -eq 0 ]; then
-    case "$stored_plan" in
-      "takeover "*) ;;
-      *)
-        echo "tkt-start: missing required role: model.planner" >&2
-        exit 2
-        ;;
-    esac
+  # A stored plan of any kind never runs the planner again, so only a state with no plan needs one (#1818).
+  if [ "$planner_available" -eq 0 ] && [ -z "${stored_plan//[[:space:]]/}" ]; then
+    echo "tkt-start: missing required role: model.planner" >&2
+    exit 2
   fi
 fi
 mkdir -p "$run"
