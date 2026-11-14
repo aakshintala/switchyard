@@ -9,8 +9,8 @@ DRIVER="$ROOT/bin/tkt-drive"
 STATE_BIN="$ROOT/bin/tkt-state"
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-drive.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/home" "$T/tmp" "$T/bin"
-export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" PATH="$T/bin:$PATH"
+mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/inbox"
+export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" PATH="$T/bin:$PATH" TKT_STOP_INBOX="$T/inbox" TKT_STOP_INBOX_HOST=
 export TEST_STATE_BIN="$STATE_BIN" TEST_CALLS="$T/calls.log"
 export TEST_PLAN_VERDICT="$T/plan-verdict" TEST_POST_VERDICT="$T/post-verdict"
 export TEST_BUILD_VERDICT="$T/build-verdict" TEST_SHIP_VERDICT="$T/ship-verdict"
@@ -167,6 +167,7 @@ reset_case() {
   local name="$1"
   CASE_DIR="$T/$name"
   mkdir -p "$CASE_DIR/run"
+  rm -rf "$T/inbox" && mkdir -p "$T/inbox"
   STATE="$CASE_DIR/ticket.state"
   PLAN="$CASE_DIR/plan.md"
   cat >"$PLAN" <<'PLANEOF'
@@ -258,6 +259,7 @@ run_drive
 [ "$RC" -eq 1 ] || fail "mixed existing/new plan should grant then stop at fake BLOCKED (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
 assert_fence_args 'src/existing.txt,src/new.snap' 'src/new.snap' ''
 grep -q '^.* tkt-drive fence-grant GRANT ' "${STATE%.state}.journal" || fail 'mixed existing/new plan did not record GRANT'
+[ "$(find "$T/inbox" -type f | wc -l | tr -d ' ')" -eq 0 ] || fail 'ordinary tkt-drive STOP does not send a stop report'
 assert_no_merge
 
 reset_case all-new-writes
@@ -421,6 +423,20 @@ for marker in owner_held surveyor_sequence; do
   [ "$(grep -c '^tkt-ship|' "$TEST_CALLS" || true)" -eq 0 ] || fail "$marker called tkt-ship"
   assert_no_merge
 done
+
+# A STOP whose tool verdict carries LANE-ERROR sends one report to the stop inbox.
+reset_case lane-error-report
+printf 'LANE-ERROR id=drive-job-1472\n' >"$TEST_BUILD_VERDICT"
+run_drive
+[ "$RC" -eq 1 ] || fail "LANE-ERROR tool stop preserves exit 1 (rc=$RC; out=$(cat "$OUT"))"
+grep -q 'tkt-drive STOP tool=tkt-build verdict=LANE-ERROR trigger=' "${STATE%.state}.journal" || fail 'LANE-ERROR keeps the original tkt-drive STOP journal line'
+drive_reports="$(find "$T/inbox" -type f -name 'tkt-drive-*.md' | wc -l | tr -d ' ')"
+[ "$drive_reports" -eq 1 ] || fail "LANE-ERROR sends one tkt-drive report (count=$drive_reports)"
+drive_report="$(find "$T/inbox" -type f -name 'tkt-drive-*.md' -print -quit)"
+grep -Fq 'Ticket: #1472' "$drive_report" || fail 'LANE-ERROR report names the ticket'
+grep -Fq 'Job ID: drive-job-1472' "$drive_report" || fail 'LANE-ERROR report names the job'
+grep -Fq 'Status: STOP' "$drive_report" || fail 'LANE-ERROR report names the STOP status'
+grep -Fq 'LANE-ERROR id=drive-job-1472' "$drive_report" || fail 'LANE-ERROR report carries the stopped tool digest'
 
 # tkt-drive never invokes tkt-ship, even when a previous APPROVE or verify
 # verdict and review_status would otherwise select it.

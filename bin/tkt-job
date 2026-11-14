@@ -120,6 +120,10 @@ fi
 fw_lib="$script_dir/lib/fw-lib.sh"
 if [ ! -r "$fw_lib" ]; then echo "tkt-job: cannot read shared lib: $fw_lib" >&2; exit 2; fi
 . "$fw_lib"
+stop_report_lib="$script_dir/lib/stop-report.sh"
+if [ ! -r "$stop_report_lib" ]; then echo "tkt-job: cannot read shared lib: $stop_report_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$stop_report_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 if [ -n "${TKT_BIN:-}" ]; then delegate="$TKT_BIN/delegate"; else delegate=delegate; fi
 fillbrief="$bin_dir/fill-brief"
@@ -661,5 +665,13 @@ printf '%s\n' "$output" >"$logpath"
 printf '%s\n' "$output"
 if [ "$fresh" -eq 1 ]; then
   tkt journal "tkt-job $verdict"
+  stop_status="${verdict%% *}"
+  if stop_report_is_stop "$stop_status"; then
+    if [ -n "$out_file" ] && [ -s "$out_file" ]; then
+      stop_report_notify "$state" "$issue" tkt-job "$jobid" "$stop_status" <"$out_file"
+    else
+      stop_report_notify "$state" "$issue" tkt-job "$jobid" "$stop_status" <<<"$digest"
+    fi
+  fi
 fi
 exit "$ec"

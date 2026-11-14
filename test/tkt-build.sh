@@ -22,8 +22,8 @@ fail() {
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-build.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
-export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
+mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases" "$T/inbox"
+export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" TKT_STOP_INBOX="$T/inbox" TKT_STOP_INBOX_HOST=
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
 unset DELEGATE_JOBS_DIR
@@ -358,6 +358,7 @@ git -C "$CASE_TEMPLATE/wt" remote set-url origin ../origin.git
 setup_case() {
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR"
+  rm -rf "$T/inbox" && mkdir -p "$T/inbox"
   cp -R "$CASE_TEMPLATE/." "$CDIR/"
   mkdir -p "$CDIR/run"
   WT="$CDIR/wt"
@@ -657,6 +658,17 @@ grep -q "which scope rules the retry?" <<<"$OUT" || fail "ask: the digest holds 
 grep -q "^gate|" "$T/calls.log" && fail "ask: the gate never runs"
 grep -q "^review-start|" "$T/calls.log" && fail "ask: review never starts"
 bash "$TKT_STATE" "$S" get head >/dev/null 2>&1 && fail "ask: pr and head stay unset"
+build_reports="$(find "$T/inbox" -type f -name 'tkt-build-*.md' | wc -l | tr -d ' ')"
+[ "$build_reports" -eq 1 ] || fail "ask sends one tkt-build stop report (count=$build_reports)"
+build_report="$(find "$T/inbox" -type f -name 'tkt-build-*.md' -print -quit)"
+grep -Fq 'Ticket: #528' "$build_report" || fail "ask report names the ticket"
+grep -Fq 'Job ID: stub-1' "$build_report" || fail "ask report names the job"
+grep -Fq 'Status: ASK' "$build_report" || fail "ask report names the status"
+grep -Fq 'which scope rules the retry?' "$build_report" || fail "ask report includes the job digest"
+run_build
+[ "$RC" -eq 1 ] || fail "ask rerun exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-build ASK id=stub-1* log=*" "ask rerun"
+[ "$(find "$T/inbox" -type f -name 'tkt-build-*.md' | wc -l | tr -d ' ')" -eq 1 ] || fail "ask rerun does not send a duplicate tkt-build report"
 
 # --- a CONCERNS lane continues through the gate and passes its file to reviews ---
 setup_case concerns-lane

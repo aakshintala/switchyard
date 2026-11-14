@@ -42,6 +42,8 @@ When the ticket's spec is another issue, pass its number with `tkt-start --spec-
 
 The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `verifier-rN` and `verifier-rN-drift` → `verifier`, `confirm` → `verifier`, `planner` → `planner`, and `fixN` → `fix`. `verifier` is the plan Verifier; `verify` is review-loop's scoped verify.
 
+`tkt-job`, `tkt-build`, and `tkt-drive` send journaled stop reports to `TKT_STOP_INBOX`; when unset, it defaults to `$HOME/.cache/agents/inbox/flywheel`, while an explicitly empty value disables sending and records a warning. `TKT_STOP_INBOX_HOST` optionally selects the SSH host used for that inbox.
+
 | Tool | Driver behavior / next action | Stop verdicts to route |
 | --- | --- | --- |
 | `tkt-start` | `CURRENT`; `SKIPPED` with `--no-preflight`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `DUPLICATE`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |

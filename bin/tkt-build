@@ -50,6 +50,10 @@ claim_lib="$script_dir/lib/tkt-claims.sh"
 if [ ! -r "$claim_lib" ]; then echo "tkt-build: cannot read shared lib: $claim_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$claim_lib"
+stop_report_lib="$script_dir/lib/stop-report.sh"
+if [ ! -r "$stop_report_lib" ]; then echo "tkt-build: cannot read shared lib: $stop_report_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$stop_report_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"
 quota_bin="$bin_dir/quota"; models_file="$script_dir/../delegate/config/models.json"
@@ -69,7 +73,7 @@ quota_line=""
 emit() {
   local verdict="$1" ec="$2"; shift 2
   local rdir="${run:-$(dirname "$state")}"; mkdir -p "$rdir" 2>/dev/null || true
-  local twelve="nohead"
+  local twelve="nohead" status job_id
   [ -z "${worktree:-}" ] || twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
   local logpath="$rdir/${slug:-build}-${issue:-0}-tkt-build-$twelve-$(date +%H%M%S).log"
   local out="TKT tkt-build $verdict log=$logpath"
@@ -81,6 +85,11 @@ $(printf '%s\n' "$@" | head -n "$max_lines")"
 $quota_line"; fi
   printf '%s\n' "$out" | tee -a "$logpath"
   tkt journal "tkt-build $verdict" 2>/dev/null || true
+  status="${verdict%% *}"
+  if stop_report_is_stop "$status"; then
+    job_id="$(stop_report_job_id "$verdict")"
+    stop_report_notify "$state" "${issue:-}" tkt-build "$job_id" "$status" <<<"$out"
+  fi
   exit "$ec"
 }
 repair_hint() {

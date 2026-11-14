@@ -17,8 +17,8 @@ fail() {
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-job.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/home/.agents/bin" "$T/tmp" "$T/bin" "$T/records" "$T/cases"
-export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
+mkdir -p "$T/home/.agents/bin" "$T/tmp" "$T/bin" "$T/records" "$T/cases" "$T/inbox"
+export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" TKT_STOP_INBOX="$T/inbox" TKT_STOP_INBOX_HOST=
 export STUB_JOBSDIR="$T/tmp/delegate-jobs"
 export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
 mkdir -p "$T/home/.agents/bin"
@@ -164,6 +164,7 @@ setup_case() {
   unset DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR/run"
+  rm -rf "$T/inbox" && mkdir -p "$T/inbox"
   H="$(fresh_tree "$CDIR/wt")"
   WT="$CDIR/wt"
   S="$CDIR/tkt.state"
@@ -633,7 +634,7 @@ jq -j -r '.result.text' "$T/records/stub-1.json" | cmp - "$CDIR/run/switchyard-5
 # --- NEEDS_CONTEXT with --out-file writes the full report ---
 setup_case ask
 reset_stub
-make_record stub-1 NEEDS_CONTEXT none 0 3 0
+make_record stub-1 NEEDS_CONTEXT none 0 30 0
 run_job --slot lane --template "$T/tmpl-basic.md" --out-file "$CDIR/report.md"
 [ "$RC" -eq 1 ] || fail "ASK exits 1"
 expect_verdict "TKT tkt-job ASK id=stub-1 report=result\\ line\\ 1 log=*" "ASK"
@@ -643,7 +644,62 @@ run_job --slot lane --template "$T/tmpl-basic.md"
 expect_verdict "TKT tkt-job ASK id=stub-1 reused=stub-1 stale-head=bbbb now=* log=*" "ASK rerun"
 grep -q -- "--resume stub-1" <<<"$OUT" || fail "reused ASK digest names --resume"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "ASK rerun dispatches nothing new"
+[ "$(find "$T/inbox" -type f -name 'tkt-job-*.md' | wc -l | tr -d ' ')" -eq 1 ] || fail "ASK rerun does not send a second report"
 cmp "$CDIR/report.md" <(jq -j -r '.result.text' "$T/tmp/delegate-jobs/stub-1.json") || fail "--out-file writes result.text in full"
+stop_reports="$(find "$T/inbox" -type f -name 'tkt-job-*.md' | wc -l | tr -d ' ')"
+[ "$stop_reports" -eq 1 ] || fail "ASK sends exactly one stop report (count=$stop_reports)"
+stop_report="$(find "$T/inbox" -type f -name 'tkt-job-*.md' -print -quit)"
+grep -Fq 'Ticket: #502' "$stop_report" || fail "ASK stop report names the ticket"
+grep -Fq 'Job ID: stub-1' "$stop_report" || fail "ASK stop report names the job"
+grep -Fq 'Status: ASK' "$stop_report" || fail "ASK stop report names the status"
+grep -Fq 'result line 11' "$stop_report" || fail "ASK stop report keeps the last 20 report lines"
+grep -Fq 'result line 30' "$stop_report" || fail "ASK stop report includes the final report line"
+grep -Fq 'result line 10' "$stop_report" && fail "ASK stop report omits lines older than the last 20"
+stop_report_lines="$(sed -n '/^Last report lines/,$p' "$stop_report" | tail -n +2 | wc -l | tr -d ' ')"
+[ "$stop_report_lines" -le 20 ] || fail "ASK stop report has at most 20 report lines (got $stop_report_lines)"
+
+# --- a non-stop job status sends no report ---
+setup_case report-nonstop
+reset_stub
+make_record stub-1 DONE none 0 2 0
+run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 0 ] || fail "non-stop DONE exits 0 (rc=$RC)"
+[ "$(find "$T/inbox" -type f | wc -l | tr -d ' ')" -eq 0 ] || fail "non-stop DONE sends no report"
+! grep -q 'stop-report attempt' "${S%.state}.journal" || fail "non-stop DONE records no stop-report attempt"
+
+# --- an explicitly unset stop inbox warns without changing the stop ---
+setup_case report-unset-inbox
+reset_stub
+make_record stub-1 BLOCKED none 0 2 0
+TKT_STOP_INBOX=
+run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 1 ] || fail "unset inbox keeps BLOCKED exit 1 (rc=$RC)"
+expect_verdict "TKT tkt-job BLOCKED id=stub-1 log=*" "unset inbox"
+[ "$(find "$T/inbox" -type f | wc -l | tr -d ' ')" -eq 0 ] || fail "unset inbox sends no report"
+grep -q 'tkt-job BLOCKED id=stub-1' "${S%.state}.journal" || fail "unset inbox keeps the original journal stop"
+grep -q 'stop-report WARN inbox unset' "${S%.state}.journal" || fail "unset inbox journals a warning"
+TKT_STOP_INBOX="$T/inbox"
+
+# --- an inbox-send failure preserves the verdict and exit code ---
+setup_case report-send-fails
+reset_stub
+make_record stub-1 BLOCKED none 0 2 0
+mkdir -p "$T/sshbin"
+cat >"$T/sshbin/ssh" <<'SSH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SSH_STUB_LOG"
+exit 42
+SSH
+chmod +x "$T/sshbin/ssh"
+SSH_STUB_LOG="$T/ssh.log" TKT_STOP_INBOX_HOST=unreachable-test PATH="$T/sshbin:$PATH" \
+  run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 1 ] || fail "failed inbox-send keeps BLOCKED exit 1 (rc=$RC)"
+expect_verdict "TKT tkt-job BLOCKED id=stub-1 log=*" "failed inbox-send"
+grep -q ' tkt-job BLOCKED id=stub-1$' "${S%.state}.journal" || fail "failed inbox-send keeps the original journal line"
+grep -q 'stop-report WARN inbox-send exit 42' "${S%.state}.journal" || fail "failed inbox-send journals its exit code"
+grep -q '^' "$T/ssh.log" || fail "failed inbox-send exercised ssh"
+[ "$(find "$T/inbox" -type f | wc -l | tr -d ' ')" -eq 0 ] || fail "failed inbox-send creates no local report"
+TKT_STOP_INBOX_HOST=
 
 # --- BLOCKED ---
 setup_case blocked

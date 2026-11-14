@@ -28,16 +28,42 @@ if [ ! -r "$tokens_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$tokens_lib"
+stop_report_lib="$script_dir/lib/stop-report.sh"
+if [ ! -r "$stop_report_lib" ]; then
+  echo "tkt-drive: cannot read shared lib: $stop_report_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$stop_report_lib"
 t() { "$tkt_state" "$state" "$@"; }
 get() { t get "$1" 2>/dev/null || true; }
+
+drive_stop_job_id() {
+  local text="$*" job_id
+  job_id="$(stop_report_job_id "$text")"
+  if [ -z "$job_id" ]; then
+    case "$text" in
+      *tkt-build*) job_id="$(get job.lane)" ;;
+    esac
+  fi
+  [ -n "$job_id" ] || job_id=unknown
+  printf '%s\n' "$job_id"
+}
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-drive.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 trigger=state
 
 internal_stop() {
-  local detail="$1" code="${2:-2}" fields="${3:-}"
+  local detail="$1" code="${2:-2}" fields="${3:-}" job_id
   t journal "tkt-drive STOP${fields:+ $fields} trigger=$trigger" 2>/dev/null || true
+  case "$fields" in
+    *LANE-ERROR*)
+      job_id="$(drive_stop_job_id "$fields" "$detail")"
+      stop_report_notify "$state" "${issue:-}" tkt-drive "$job_id" STOP <<<"$fields
+$detail"
+      ;;
+  esac
   printf 'TKT tkt-drive STOP%s\n' "${fields:+ $fields}"
   [ -z "$detail" ] || printf '%s\n' "$detail" >&2
   exit "$code"
@@ -45,10 +71,17 @@ internal_stop() {
 
 # Keep the stopped tool's stdout byte-for-byte at the start of our output.
 stop_with_tool() {
-  local tool="$1" verdict="$2" code="$3" out="$4" err="$5"
+  local tool="$1" verdict="$2" code="$3" out="$4" err="$5" job_id tool_line
   cat "$out"
   [ ! -s "$err" ] || cat "$err" >&2
   t journal "tkt-drive STOP tool=$tool verdict=$verdict trigger=$trigger" 2>/dev/null || true
+  tool_line="$(head -n 1 "$out" 2>/dev/null || true)"
+  case "$verdict $tool_line" in
+    *LANE-ERROR*)
+      job_id="$(drive_stop_job_id "$tool $verdict" "$tool_line" "$(cat "$out")")"
+      stop_report_notify "$state" "${issue:-}" tkt-drive "$job_id" STOP <"$out"
+      ;;
+  esac
   printf 'TKT tkt-drive STOP tool=%s verdict=%s\n' "$tool" "$verdict"
   exit "$code"
 }
