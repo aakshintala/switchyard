@@ -447,6 +447,26 @@ fn assert_process_gone(pid: i32) {
 }
 
 #[test]
+fn start_drops_the_callers_job_chain() {
+    // #1753: a session can outlive the job that started it, so it starts chain-free.
+    let h = Harness::new();
+    let started = h.start(
+        b"HOLD",
+        false,
+        "",
+        &[
+            ("DELEGATE_JOB_ID", "parent-job"),
+            ("DELEGATE_JOB_CHAIN", "grand parent-job"),
+        ],
+    );
+    assert!(started.status.success(), "{started:?}");
+    assert_eq!(
+        std::fs::read_to_string(h.fake_dir.join("job-env.txt")).unwrap(),
+        "DELEGATE_JOB_ID=<unset>\nDELEGATE_JOB_CHAIN=<unset>\n"
+    );
+}
+
+#[test]
 fn start_validates_detaches_and_prints_shared_help() {
     let h = Harness::new();
     let started = h.start(b"HOLD", false, "", &[]);

@@ -299,6 +299,13 @@ def main():
     global STOP_READING, json
     os.makedirs(FAKE_DIR, exist_ok=True)
     write_file("argv.txt", "\n".join(sys.argv[1:]) + "\n")
+    write_file(
+        "job-env.txt",
+        "".join(
+            f"{name}={os.environ.get(name, '<unset>')}\n"
+            for name in ("DELEGATE_JOB_ID", "DELEGATE_JOB_CHAIN")
+        ),
+    )
     write_file("host.pid", str(os.getpid()) + "\n")
     probe_descriptors()
     input_fd = sys.stdin.fileno()
