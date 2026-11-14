@@ -1288,6 +1288,15 @@ run_start
   || fail "planner-takeover-resume: refused a stored takeover plan without a planner"
 want "CURRENT " 0 planner-takeover-resume
 
+# Resuming any stored plan, as a state made before model.planner was required (#1818), needs no planner.
+setup planner-plan-resume ONE AGAINST
+remove_model_role planner
+printf 'plan=%s\n' "$CDIR/plan.md" >"$RUN/widget-42.state"
+run_start
+! grep -qF 'tkt-start: missing required role: model.planner' "$CDIR/stderr" \
+  || fail "planner-plan-resume: refused a stored plan without a planner"
+want "CURRENT " 0 planner-plan-resume
+
 # A part may use a closing keyword, but tkt-start must warn rather than refuse it.
 setup part-closing-warning ONE AGAINST
 run_start --no-preflight --part 2
