@@ -27,9 +27,9 @@ gate_credit_check() {
   [ -r "$record" ] || { gate_credit_refuse "job record is not readable: $jobid"; return 1; }
   jq -e . "$record" >/dev/null 2>&1 || { gate_credit_refuse "job record is not valid JSON: $jobid"; return 1; }
   if ! jq -e '
-    .passed == true
-    and .refused != true
-    and .error == null
+    .result.gateResult.passed == true
+    and .result.gateResult.refused != true
+    and .result.gateResult.error == null
     and (.result.gateResult.exitCode | type) == "number"
     and .result.gateResult.exitCode == 0
   ' "$record" >/dev/null 2>&1; then

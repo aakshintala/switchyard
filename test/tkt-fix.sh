@@ -156,7 +156,7 @@ if [ -r "$T/job-credit-mode" ]; then
   mkdir -p "$TMPDIR/delegate-jobs"
   jq -n --arg head "\$head_after" --arg error "\$error" --argjson exit "\$exit_code" \\
     --argjson passed "\$passed" --argjson refused "\$refused" --argjson dirty "\$dirty" \\
-    '{status:"DONE",passed:\$passed,refused:\$refused,error:(if \$error == "" then null else \$error end),result:{status:"DONE",gateResult:{exitCode:\$exit},changeSet:{headAfter:\$head,dirtyAfter:\$dirty}}}' \\
+    '{status:"DONE",result:{status:"DONE",gateResult:({command:"bash gate.sh",exitCode:\$exit,passed:\$passed,outputTail:"ok"} + (if \$refused then {refused:true} else {} end) + (if \$error == "" then {} else {error:\$error} end)),changeSet:{headAfter:\$head,dirtyAfter:\$dirty}}}' \\
     >"$TMPDIR/delegate-jobs/\$jobid.json"
 fi
 exit 0
