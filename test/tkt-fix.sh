@@ -286,6 +286,28 @@ record_test_round() {
   bash "$TKT_STATE" "$S" set "fix_round.$n.head" "$head" >/dev/null
 }
 
+fixture_commit() {
+  local file="$1" contents="$2" message="$3"
+  printf '%s\n' "$contents" >"$WT/$file"
+  git -C "$WT" add "$file"
+  git -C "$WT" -c user.email=t@t -c user.name=t commit -qm "$message"
+}
+
+set_closed_round() {
+  local n="$1"
+  bash "$TKT_STATE" "$S" set round "$n" >/dev/null
+  bash "$TKT_STATE" "$S" set fixslot 2 >/dev/null
+  bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
+}
+
+write_job_record() {
+  local id="$1" before="$2" after="$3"
+  mkdir -p "$TMPDIR/delegate-jobs"
+  jq -n --arg hb "$before" --arg ha "$after" \
+    '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"recorded fix",changeSet:{headBefore:$hb,headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1}' \
+    >"$TMPDIR/delegate-jobs/$id.json" || fail "write $id record"
+}
+
 # Selector for the new cases below: empty or unset runs all of them.
 want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
 
@@ -828,6 +850,7 @@ bash "$TKT" "$S" 2>"$T/stderr" && fail "bare flags exited 0"
 rc=$?; [ "$rc" = "2" ] || fail "bare flags exited $rc, want 2"
 grep -Fq -- '--fix-model <id> overrides the stored model on --resume' "$T/stderr" || fail "usage does not explain --fix-model on resume: $(cat "$T/stderr")"
 # 7a. Round 2 refuses a fresh fix before any slot or dispatch; --resume still runs.
+if want R2; then
 setup_case round-limit
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "round 2 fix exited 0"
@@ -837,6 +860,8 @@ grep -q "tkt-fix .*--resume <job id> --prompt <file>" <<<"$out" || fail "ROUND-L
 grep -q "works with no open slot" <<<"$out" || fail "ROUND-LIMIT says resume needs no open slot"
 grep -q "job|" "$T/calls.log" && fail "round 2 fix dispatched a job"
 [ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "round moved on ROUND-LIMIT"
+fi
+if want R6; then
 setup_case round-resume
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
 printf 'resume brief\n' >"$CDIR/prompt.md"
@@ -845,6 +870,142 @@ head -n 1 <<<"$out" | grep -q "ROUND-LIMIT" && fail "resume at round 2 is refuse
 grep -q "job|.*--slot fix3.*--resume j9" "$T/calls.log" || fail "resume at round 2 does not dispatch on fix3"
 bash "$TKT" "$S" --verify --resume j9 2>/dev/null && fail "resume without prompt exited 0"
 rc=$?; [ "$rc" = "2" ] || fail "resume without prompt exited $rc, want 2"
+fi
+
+# R1: round 2 recovers and pushes a closed-slot commit owned by its job record.
+if want R1; then
+setup_case r1
+set_closed_round 2
+fixture_commit fix.txt "round two fix" "fix: round two"
+A="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+write_job_record j2 "$OLD" "$A"
+record_test_round 2 "$A"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "R1 exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$A" || fail "R1 bad verdict: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q "ROUND-LIMIT" && fail "R1 was blocked by ROUND-LIMIT"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A" ] || fail "R1 state head did not advance"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "0" ] || fail "R1 left fixopen set"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "3" ] || fail "R1 round did not advance from 2 to 3"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$A" ] || fail "R1 did not push the recovery commit"
+grep -q "job|" "$T/calls.log" && fail "R1 dispatched a fix job"
+fi
+
+# R3: a round-2 open-slot recovery remains behind ROUND-LIMIT.
+if want R3; then
+setup_case r3
+set_closed_round 2
+fixture_commit fix.txt "open round two fix" "fix: open round two"
+A="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+write_job_record j1 "$OLD" "$A"
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "R3 exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "R3 exited $rc, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "R3 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "R3 state head changed"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "1" ] || fail "R3 fixopen changed"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "R3 round changed"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "R3 pushed"
+grep -q "job|" "$T/calls.log" && fail "R3 dispatched a fix job"
+fi
+
+# R4: round-2 drift that cannot recover keeps the ROUND-LIMIT verdict.
+if want R4; then
+setup_case r4
+set_closed_round 2
+fixture_commit fix.txt "state-only head" "fix: state-only head"
+SHEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$SHEAD" >/dev/null
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "R4 exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "R4 exited $rc, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "R4 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "TKT tkt-fix DRIFT" <<<"$out" && fail "R4 returned DRIFT instead of ROUND-LIMIT"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$SHEAD" ] || fail "R4 state head changed"
+grep -q "job|" "$T/calls.log" && fail "R4 dispatched a fix job"
+fi
+
+# R5: a dirty closed-slot recovery remains behind ROUND-LIMIT.
+if want R5; then
+setup_case r5
+set_closed_round 2
+fixture_commit fix.txt "dirty round two fix" "fix: dirty round two"
+printf 'untracked\n' >"$WT/untracked.txt"
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "R5 exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "R5 exited $rc, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "R5 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "R5 state head changed"
+[ -f "$WT/untracked.txt" ] || fail "R5 dirty worktree changed"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "R5 pushed"
+grep -q "job|" "$T/calls.log" && fail "R5 dispatched a fix job"
+fi
+
+# R7: round 3 remains at ROUND-LIMIT even when the heads agree.
+if want R7; then
+setup_case r7
+bash "$TKT_STATE" "$S" set round 3 >/dev/null
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "R7 exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "R7 exited $rc, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=3" || fail "R7 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "R7 state head changed"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "3" ] || fail "R7 round changed"
+grep -q "job|" "$T/calls.log" && fail "R7 dispatched a fix job"
+fi
+
+# R8: round 3 refuses the same closed-slot recovery accepted at round 2.
+if want R8; then
+setup_case r8
+set_closed_round 3
+fixture_commit fix.txt "round three fix" "fix: round three"
+A="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+write_job_record j2 "$OLD" "$A"
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "R8 exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "R8 exited $rc, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=3" || fail "R8 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "R8 state head changed"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "R8 pushed"
+grep -q "job|" "$T/calls.log" && fail "R8 dispatched a fix job"
+fi
+
+# R9: a round-2 outside commit above the recorded head is not recoverable.
+if want R9; then
+setup_case r9
+set_closed_round 2
+fixture_commit fix.txt "round two own fix" "fix: round two own"
+A="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit outside.txt "outside commit" "outside: round two"
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+write_job_record j2 "$OLD" "$A"
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "R9 exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "R9 exited $rc, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "R9 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "R9 state head changed"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "R9 pushed"
+grep -q "job|" "$T/calls.log" && fail "R9 dispatched a fix job"
+fi
+
+# R10: round-2 closed-slot recovery without a job record remains limited.
+if want R10; then
+setup_case r10
+set_closed_round 2
+rm -f "$TMPDIR/delegate-jobs/j2.json"
+fixture_commit fix.txt "round two unrecorded fix" "fix: round two unrecorded"
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "R10 exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "R10 exited $rc, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "R10 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "R10 state head changed"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "R10 pushed"
+grep -q "job|" "$T/calls.log" && fail "R10 dispatched a fix job"
+fi
 
 # 7b. A takeover uses its recorded gate without a plan file.
 setup_case takeover
