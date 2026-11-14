@@ -59,6 +59,9 @@ printf '0' >"$T/jobcount"
 cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
 printf 'job|%s\n' "\$*" >>"$T/calls.log"
+for a in "\$@"; do
+  case "\$a" in FINDINGS=@*) cp "\${a#FINDINGS=@}" "$T/job-findings.md" || exit 2;; esac
+done
 state="\$1"
 slot=""; jobid="j1"; prev=""
 for a in "\$@"; do
@@ -601,6 +604,34 @@ head -n 1 <<<"$repair_out" | grep -q 'TKT tkt-fix FIX-OK' || fail "printed unkno
 [ -n "$ROUND2_HEAD" ] || fail "unknown-gap-round2 had no recorded round head"
 fi
 
+if want unknown-gap-fresh-prompt; then
+setup_case unknown-gap-fresh-prompt
+printf 'round one fix\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm 'fix: round one'
+ROUND1_HEAD="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" push -q origin tkt-529
+bash "$TKT_STATE" "$S" set head "$ROUND1_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+record_test_round 1 "$ROUND1_HEAD"
+printf 'hand commit\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm 'hand: before round two start'
+HAND_HEAD="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" push -q origin tkt-529
+bash "$TKT_STATE" "$S" set head "$HAND_HEAD" >/dev/null
+FRESH_CONTEXT="$CDIR/fresh-context.md"
+printf 'context for a fresh fix job\n' >"$FRESH_CONTEXT"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --prompt "$FRESH_CONTEXT" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "unknown-gap-fresh-prompt exited $run_rc, want 1: $out $(cat "$T/stderr")"
+grep -Fq "FINDINGS-UNACCOUNTED commits=$HAND_HEAD" <<<"$out" || fail "unknown-gap-fresh-prompt did not report the hand commit: $out"
+repair_command="$(sed -n 's/^repair command: //p' <<<"$out")"
+grep -Fq -- "tkt-fix $S --verify --since $OLD --resume j1 --prompt <file>" <<<"$repair_command" || fail "unknown-gap-fresh-prompt repair did not keep the prompt placeholder: $repair_command"
+[[ "$repair_command" != *"$FRESH_CONTEXT"* ]] || fail "unknown-gap-fresh-prompt was misused as a resume prompt: $repair_command"
+[ -s "$T/job-findings.md" ] || fail "unknown-gap-fresh-prompt did not deliver a fresh-job findings payload"
+fi
+
 if want round-ownership; then
 setup_case round-ownership
 # A prior commit is in the verify range, but round 1 has no ownership record.
@@ -812,6 +843,39 @@ out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/st
 grep -q "job|.*--resume j9.*--prompt $CDIR/prompt.md.*--gate-from-plan" "$T/calls.log" || fail "resume args not forwarded with --gate-from-plan"
 grep -q 'job|.*--model' "$T/calls.log" && fail "resume without --fix-model passed a model"
 
+# A fresh --prompt is appended to the findings value delivered to tkt-job.
+if want fresh-prompt; then
+setup_case fresh-prompt
+cat >"$CDIR/findings.md" <<'EOF'
+P1 original finding from review
+Additional findings detail
+EOF
+cat >"$CDIR/prompt.md" <<'EOF'
+Orchestrator context that must guide this fresh fix.
+A second context line.
+EOF
+out="$(bash "$TKT" "$S" --verify --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "fresh-prompt exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+expect_slot fix1
+grep -Fq "FINDINGS=@$CDIR/run/" "$T/calls.log" || fail "fresh-prompt did not pass a run-backed findings value to tkt-job: $(cat "$T/calls.log")"
+grep -q 'job|.*--template' "$T/calls.log" || fail "fresh-prompt did not dispatch a fresh template job"
+grep -q 'job|.*--resume' "$T/calls.log" && fail "fresh-prompt resumed a job"
+expected="$(cat <<'EOF'
+P1 original finding from review
+Additional findings detail
+
+## Context from the orchestrator
+
+Context, not findings: do not fix or report these lines as findings.
+
+Orchestrator context that must guide this fresh fix.
+A second context line.
+EOF
+)"
+actual="$(cat "$T/job-findings.md")"
+[ "$actual" = "$expected" ] || fail "fresh-prompt findings payload differs; got: $actual"
+[ "$(cat "$CDIR/findings.md")" = "$(printf 'P1 original finding from review\nAdditional findings detail')" ] || fail "fresh-prompt modified the source findings"
+fi
+
 # A plan-declared Fix gate substitutes the pre-fix HEAD for <since> and is
 # passed as both the job gate and the fresh fix brief's GATE value.
 if want fix-gate; then
@@ -932,8 +996,10 @@ printf 'resume brief\n' >"$CDIR/prompt.md"
 out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || true
 head -n 1 <<<"$out" | grep -q "ROUND-LIMIT" && fail "resume at round 2 is refused"
 grep -q "job|.*--slot fix3.*--resume j9" "$T/calls.log" || fail "resume at round 2 does not dispatch on fix3"
-bash "$TKT" "$S" --verify --resume j9 2>/dev/null && fail "resume without prompt exited 0"
-rc=$?; [ "$rc" = "2" ] || fail "resume without prompt exited $rc, want 2"
+# --resume without --prompt remains a usage error with exit 2.
+run_rc=0; bash "$TKT" "$S" --verify --resume j9 2>"$T/stderr" || run_rc=$?
+[ "$run_rc" = "2" ] || fail "resume without prompt exited $run_rc, want 2"
+grep -Fq 'usage: tkt-fix ' "$T/stderr" || fail "resume without prompt did not print usage: $(cat "$T/stderr")"
 fi
 
 # R1: round 2 recovers and pushes a closed-slot commit owned by its job record.
