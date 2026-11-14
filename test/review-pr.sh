@@ -876,7 +876,7 @@ collect: review-pr collect job-verify" ] || fail "verify with $flag prints the v
   run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-verify")"
   case ":$(cat "$T/state/path-verify"):" in *":$run_dir/cargo-slot:"*) ;; *) fail "verify delegate PATH includes cargo-slot" ;; esac
   [ -x "$run_dir/cargo-slot/cargo" ] || fail "verify run keeps its cargo-slot shim"
-  [ ! -e "$T/state/body-calls.txt" ] || fail "verify with $flag does not fetch the PR body"
+  [ "$(cat "$T/state/body-calls.txt")" = "7" ] || fail "verify with $flag fetches the PR body"
   bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with $flag collects"
 done
 reset_state
@@ -2569,6 +2569,61 @@ bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
 grep -Fq 'Files in .review-context/ for this verify: none' "$T/state/prompt-verify.md" || \
   fail "verify without --context lists no context files"
 
+# --- case: non-empty PR body is listed in verify context by default
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'The PR supports dry runs.\n' >"$T/state/pr-body.txt"
+printf 'no open findings\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || \
+  fail "verify start with a non-empty PR body exits 0"
+wt="$(worktree_for verify)"
+[ "$(cat "$T/state/body-calls.txt")" = "7" ] || fail "verify fetches the PR body"
+cmp -s "$T/state/pr-body.txt" "$wt/.review-context/pr-body.md" || \
+  fail "verify copies the PR body into its worktree"
+grep -Fq '.review-context/pr-body.md' "$T/state/prompt-verify.md" || \
+  fail "verify brief lists the PR body"
+run_out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || \
+  fail "verify collect with a non-empty PR body exits 0"
+grep -q '^FIX-OK$' <<<"$run_out" || fail "verify run prints FIX-OK"
+
+# --- case: a body-resolved finding can verify with an empty repair diff
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'The PR supports dry runs.\n' >"$T/state/pr-body.txt"
+printf 'P2 product.md:1 — missing statement — say the PR supports dry runs\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" 2>/dev/null)" || \
+  fail "verify of a body-resolved finding exits 0"
+grep -q '^FIX-OK$' <<<"$run_out" || fail "body-resolved finding reports FIX-OK"
+grep -q 'say the PR supports dry runs' "$T/state/prompt-verify.md" || \
+  fail "verify brief carries the body-resolved finding"
+grep -Fq '.review-context/pr-body.md' "$T/state/prompt-verify.md" || \
+  fail "body-resolved finding brief says where to read the PR body"
+grep -Fxq 'FIX-OK' "$T/state/comment.md" || fail "body-resolved finding posts FIX-OK"
+
+# --- case: verify body fetch failure stops before any worktree or job starts
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 product.md:1 — missing statement — add the PR body line\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+: >"$T/state/fail-body"
+st=0
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 1 ] || fail "verify body fetch failure exits 1 (got $st)"
+grep -Fxq 'review-pr: could not fetch the body of PR 7' <<<"$err" || \
+  fail "verify body fetch failure uses the review-mode message"
+[ "$(cat "$T/state/body-calls.txt")" = "7" ] || fail "verify attempts to fetch the PR body"
+[ ! -e "$T/state/runs.txt" ] || fail "verify body fetch failure starts no job"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || \
+  fail "verify body fetch failure creates no worktree"
+
 # --- case: a reprint of a collected job writes --findings-out too, and posts nothing
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
@@ -2598,18 +2653,27 @@ reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 printf 'P2 findings text\n- Evidence: refuted: this fixture exercises context copying\n' >"$T/findings.txt"
 mkdir -p "$T/ctx-a" "$T/ctx-b"
+printf 'PR body contents\n' >"$T/state/pr-body.txt"
+printf 'context pr-body contents\n' >"$T/ctx-a/pr-body.md"
 printf 'plan text\n' >"$T/ctx-a/plan.md"
 printf 'mutant list\n' >"$T/ctx-b/plan.md"
 write_record verify DONE "FIX-OK
 STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --model M \
   --verify "$T/findings.txt" --since "$FAKE_SHA" \
-  --context "$T/ctx-a/plan.md" --context "$T/ctx-b/plan.md" >/dev/null 2>&1 || fail "verify --context start exits 0"
+  --context "$T/ctx-a/plan.md" --context "$T/ctx-b/plan.md" \
+  --context "$T/ctx-a/pr-body.md" >/dev/null 2>&1 || fail "verify --context start exits 0"
 wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-verify")"
+[ -f "$wt/.review-context/pr-body.md" ] || fail "verify --context keeps the PR body under its default name"
+[ -f "$wt/.review-context/1-pr-body.md" ] || fail "verify --context disambiguates a context file named pr-body.md"
 [ -f "$wt/.review-context/plan.md" ] || fail "verify --context copies the file under its basename"
 [ -f "$wt/.review-context/1-plan.md" ] || fail "verify --context disambiguates a basename collision"
+cmp -s "$T/state/pr-body.txt" "$wt/.review-context/pr-body.md" || fail "verify --context preserves the PR body"
+cmp -s "$T/ctx-a/pr-body.md" "$wt/.review-context/1-pr-body.md" || fail "verify --context copies the pr-body.md context file"
 cmp -s "$T/ctx-a/plan.md" "$wt/.review-context/plan.md" || fail "verify --context copy matches the first file"
 cmp -s "$T/ctx-b/plan.md" "$wt/.review-context/1-plan.md" || fail "verify --context collision copy matches the second file"
+grep -q '\.review-context/pr-body\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the PR body"
+grep -q '\.review-context/1-pr-body\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the disambiguated pr-body.md context"
 grep -q '\.review-context/plan\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the context file"
 grep -q '\.review-context/1-plan\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the collision copy"
 bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify --context collect exits 0"
