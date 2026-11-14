@@ -5,6 +5,7 @@
 #   list <key>: print every value for the key, one per line.
 #   set <key> <value>: replace every line for the key with one line (not an append).
 #   unset head: remove every head line, journaling each removed value.
+#   unset grants: remove every grant.<digits> line, journaling each removed value.
 #   add <key> <value>: append one line for the key (the append form of set).
 #   journal <line>: append a timestamped line to the sibling .journal file.
 #   require <key>...: exit 2 naming the first missing key, exit 0 when all
@@ -20,6 +21,7 @@ set -euo pipefail
 locked=0
 tmpfile=""
 keptfile=""
+removedfile=""
 
 cleanup() {
   if [ -n "$tmpfile" ] && [ -e "$tmpfile" ]; then
@@ -27,6 +29,9 @@ cleanup() {
   fi
   if [ -n "$keptfile" ] && [ -e "$keptfile" ]; then
     rm -f "$keptfile"
+  fi
+  if [ -n "$removedfile" ] && [ -e "$removedfile" ]; then
+    rm -f "$removedfile"
   fi
   if [ "$locked" = "1" ]; then
     rm -rf "$lockdir"
@@ -42,6 +47,7 @@ usage() {
   echo "  list <key>" >&2
   echo "  set <key> <value>" >&2
   echo "  unset head" >&2
+  echo "  unset grants" >&2
   echo "  add <key> <value>" >&2
   echo "  journal <line>" >&2
   echo "  require <key>..." >&2
@@ -303,31 +309,71 @@ case "$cmd" in
     ;;
   unset)
     [ $# -eq 1 ] || usage
-    if [ "$1" != head ]; then
-      echo "tkt-state: unset accepts only head, not: $1" >&2
-      exit 2
-    fi
-    take_lock
-    if ! state_get head >/dev/null 2>&1; then
-      echo "tkt-state: missing key: head" >&2
-      exit 2
-    fi
-    old_values="$(state_list head)"
-    stage "$state"
-    keptfile="$(mktemp "$(dirname "$state")/.tkt-state.XXXXXX")"
-    while IFS= read -r line || [ -n "$line" ]; do
-      if split_line "$line" && [ "$prefix" = head ]; then
-        continue
-      fi
-      printf '%s\n' "$line" >>"$keptfile"
-    done <"$tmpfile"
-    mv "$keptfile" "$state"
-    keptfile=""
-    rm -f "$tmpfile"
-    tmpfile=""
-    while IFS= read -r old_value; do
-      append_journal_line "head $old_value -> <none>"
-    done <<<"$old_values"
+    case "$1" in
+      head)
+        take_lock
+        if ! state_get head >/dev/null 2>&1; then
+          echo "tkt-state: missing key: head" >&2
+          exit 2
+        fi
+        old_values="$(state_list head)"
+        stage "$state"
+        keptfile="$(mktemp "$(dirname "$state")/.tkt-state.XXXXXX")"
+        while IFS= read -r line || [ -n "$line" ]; do
+          if split_line "$line" && [ "$prefix" = head ]; then
+            continue
+          fi
+          printf '%s\n' "$line" >>"$keptfile"
+        done <"$tmpfile"
+        mv "$keptfile" "$state"
+        keptfile=""
+        rm -f "$tmpfile"
+        tmpfile=""
+        while IFS= read -r old_value; do
+          append_journal_line "head $old_value -> <none>"
+        done <<<"$old_values"
+        ;;
+      grants)
+        take_lock
+        stage "$state"
+        keptfile="$(mktemp "$(dirname "$state")/.tkt-state.XXXXXX")"
+        removedfile="$(mktemp "$(dirname "$state")/.tkt-state.XXXXXX")"
+        while IFS= read -r line || [ -n "$line" ]; do
+          remove_grant=0
+          if split_line "$line"; then
+            case "$prefix" in
+              grant.*)
+                grant_suffix="${prefix#grant.}"
+                case "$grant_suffix" in
+                  ""|*[!0-9]*) ;;
+                  *) remove_grant=1 ;;
+                esac
+                ;;
+            esac
+          fi
+          if [ "$remove_grant" = 1 ]; then
+            printf '%s\n' "$line" >>"$removedfile"
+          else
+            printf '%s\n' "$line" >>"$keptfile"
+          fi
+        done <"$tmpfile"
+        mv "$keptfile" "$state"
+        keptfile=""
+        rm -f "$tmpfile"
+        tmpfile=""
+        while IFS= read -r removed_line || [ -n "$removed_line" ]; do
+          if split_line "$removed_line"; then
+            append_journal_line "$prefix $rest -> <none>"
+          fi
+        done <"$removedfile"
+        rm -f "$removedfile"
+        removedfile=""
+        ;;
+      *)
+        echo "tkt-state: unset accepts only head or grants, not: $1" >&2
+        exit 2
+        ;;
+    esac
     ;;
   add)
     [ $# -eq 2 ] || usage

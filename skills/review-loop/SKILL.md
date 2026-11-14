@@ -33,7 +33,7 @@ Every verdict `APPROVE` and no open P1 or P2: the loop is done. Otherwise send e
 
 A **real bug** is a P1, or a behaviour defect a consumer of the change would see. When round one found no real bug, only missing tests, nits, style or docs, its fix round is the last. Step 3 is skipped. `ship-pr` takes the round-one head as `--reviewed`, with `--unverified-fixes <findings file>`, and CI, mutants included, still gates the new head.
 
-A finding that waits on a ruling leaves the loop: route it to the triage role (surveyor in fiber), then park the ticket when it touches the core outcome. To close a finding by a ruling, the orchestrator gets a comment on the ticket issue with a column-0 `refutes: P<n> <path>:<line>` line and passes its id to `tkt-fix <state> --verify --ruling <comment id>`. Only switchyard, flywheel, surveyor or the owner may post such a ruling; the lane running the fix asks its orchestrator and never posts one itself. The PR body's `Recorded rulings` list records those URLs as an audit trail, not a guard. For a truly novel decision, file one dashboard card (`owner-ask file ...`) and park; never ask in chat. Keep a ruling-waiting finding out of the findings file and the round count. The other findings go on.
+A finding that waits on a ruling leaves the loop: route it to the triage role (surveyor in fiber), then park the ticket when it touches the core outcome. To close a finding by a ruling, the orchestrator gets a comment on the ticket issue with a column-0 `refutes: P<n> <path>:<line>` line and passes its id to `tkt-fix <state> --verify --ruling <comment id>`. Only switchyard, flywheel, surveyor or the owner may post such a ruling; the lane running the fix asks its orchestrator and never posts one itself. At `ROUND-LIMIT`, an OWNER, MEMBER or COLLABORATOR may post a comment on the ticket or PR with exactly one column-0 `grants: round <n>` line; pass its id with `--ruling` to authorize exactly the next counted round. The PR body's `Recorded rulings` list records those URLs as an audit trail, not a guard. For a truly novel decision, file one dashboard card (`owner-ask file ...`) and park; never ask in chat. Keep a ruling-waiting finding out of the findings file and the round count. The other findings go on.
 
 A **reversal** is a finding that asks to undo a change an earlier round made (a split merged back, a helper cut, a type swapped back) and names no behaviour defect. Answer it on the PR with the earlier round's reason, and keep it out of the findings file and out of the round count: fixing it only invites the reverse finding next round. A reversal that shows a real bug is an ordinary finding.
 
@@ -66,7 +66,7 @@ Never set `reviewed` by hand: a direct `review-pr --verify` inside a tkt run doe
 
 The verify prints `review-pr: repair base <sha> (<since> replayed onto <base>)`: it replays the reviewed head onto the current base so the diff holds only the fix round, and needs no action. A line above it saying the head "does not replay cleanly" means the diff also holds the rebase's conflict resolution: judge that part as part of the repair.
 
-`FIX-OK`: the loop is done. `FIX-INCOMPLETE`: back to step 2 with the open findings, while the counter is below 2.
+`FIX-OK`: the loop is done. `FIX-INCOMPLETE`: back to step 2 with the open findings while the counter is below 2; at or above 2, stop unless a fresh grant authorizes the next counted round.
 
 A scoped verify stands for every axis: `FIX-OK` ends the loop and no full review pair follows, whichever axis raised the findings. A bare full pair on a PR that already has a review comment refuses (step 1). Run a full pair (step 1) only after a re-plan or take-back (step 4), or when the verify's new findings show the repair reached code outside the findings' bounds, passing `--full-rereview <reason>` for that full pair.
 
@@ -74,7 +74,7 @@ Done when the verify has printed `FIX-OK` or `FIX-INCOMPLETE` for the current pa
 
 ### 4. Stop at two
 
-After round 2, no round 3 runs.
+After round 2, no further round runs without a fresh grant; each accepted grant authorizes exactly one next counted round, after which the limit applies again.
 
 - Only P3 findings open: answer each on the PR with evidence, or with a `debt:` comment naming its ceiling and upgrade trigger. The loop is done. A P3 that a marker could close only by weakening a rule a doc, spec or ticket states counts as an open P2.
 - Any P1 or P2 open: the lane stops. Load `attack-the-premise`, post the assumption the fixes share, and rule one of:

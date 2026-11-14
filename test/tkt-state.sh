@@ -49,6 +49,23 @@ grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z head '"$UHEAD"
 grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z head '"$UHEAD2"' -> <none>$' "$JUS" \
   || fail "unset head journals every removed head value"
 [ "$(wc -l <"$JUS" | tr -d ' ')" = "2" ] || fail "unset head journals one line per removed head value"
+# unset grants removes only grant.<digits>, journals each value, and preserves the audit list.
+GS="$T/unset-grants.state"
+printf 'grant=plain\ngrant.2=202 old-url\ngranted_by=owner\ngranted_round=3\ngrant.foo=keep\ngrant.12=303 new-url\ngrant.2x=keep\nbody_has=Recorded ruling: https://example.invalid/old\n' >"$GS"
+bash "$TKT" "$GS" unset grants || fail "unset grants exits 0"
+printf 'grant=plain\ngranted_by=owner\ngranted_round=3\ngrant.foo=keep\ngrant.2x=keep\nbody_has=Recorded ruling: https://example.invalid/old\n' >"$T/unset-grants.expected"
+cmp -s "$T/unset-grants.expected" "$GS" || fail "unset grants clears only grant.<digits> and preserves other state"
+JGS="${GS%.state}.journal"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z grant[.]2 202 old-url -> <none>$' "$JGS" || fail "unset grants journals the first removed value with its key"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z grant[.]12 303 new-url -> <none>$' "$JGS" || fail "unset grants journals every removed value"
+[ "$(wc -l <"$JGS" | tr -d ' ')" = "2" ] || fail "unset grants journals one line per removed grant"
+GS_EMPTY="$T/unset-grants-empty.state"
+printf 'grant=plain\nbody_has=Recorded ruling: https://example.invalid/old\n' >"$GS_EMPTY"
+cp "$GS_EMPTY" "$T/unset-grants-empty.expected"
+bash "$TKT" "$GS_EMPTY" unset grants || fail "unset grants without grant keys is a safe no-op"
+cmp -s "$T/unset-grants-empty.expected" "$GS_EMPTY" || fail "unset grants without grant keys preserves state"
+[ ! -e "${GS_EMPTY%.state}.journal" ] || fail "unset grants without grant keys writes no journal"
+
 NGS="$T/unset-non-head.state"
 printf 'gate=required\nother=unchanged\n' >"$NGS"
 cp "$NGS" "$T/unset-non-head.expected"
@@ -207,7 +224,8 @@ grep -q 'usage' "$T/err-u1.txt" || fail "no args prints usage"
 for sub in get list set unset add journal require; do
   grep -q "^  $sub " "$T/err-u1.txt" || fail "no args usage lists the $sub subcommand"
 done
-grep -q '^  unset head$' "$T/err-u1.txt" || fail "usage names head as the unset key"
+grep -q '^  unset head$' "$T/err-u1.txt" || fail "usage documents unset head"
+grep -q '^  unset grants$' "$T/err-u1.txt" || fail "usage documents unset grants"
 bash "$TKT" "$S" >/dev/null 2>"$T/err-u4.txt"; [ "$?" = "2" ] || fail "a state file without a command exits 2"
 for sub in get list set unset add journal require; do
   grep -q "^  $sub " "$T/err-u4.txt" || fail "a state file without a command lists the $sub subcommand"
@@ -216,6 +234,7 @@ for sub in get list set unset add journal require; do
   grep -q "^#   $sub " "$TKT" || fail "header usage block names the $sub subcommand"
 done
 grep -q '^#   unset head:' "$TKT" || fail "header help names head as the unset key"
+grep -q '^#   unset grants:' "$TKT" || fail "header help names grants as the second unset form"
 # the header help text says set replaces every line and names add the append form
 grep -q 'replace every line' "$TKT" || fail "help says set replaces every line"
 grep -q 'the append form of set' "$TKT" || fail "help names add as the append form of set"

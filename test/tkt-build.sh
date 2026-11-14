@@ -509,6 +509,8 @@ grep -q "prompt=.*-map-" "$T/calls.log" && fail "happy: no map job without mutan
 [ -e "$CDIR/run/switchyard-528-mutants-${H:0:12}.txt" ] && fail "happy: no mutants file without mutant_job"
 expect_state reviewed "$H" happy
 expect_state review_status done happy
+[ -n "$(bash "$TKT_STATE" "$S" get verdict_at 2>/dev/null || true)" ] || fail "happy: review collection records verdict_at"
+grep -Eq '^verdict_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$S" || fail "happy: verdict_at is not a UTC timestamp"
 [ -f "$(bash "$TKT_STATE" "$S" get findings)" ] || fail "happy: findings file exists"
 expect_state round 0 happy
 [ "$(grep -F -c "claim --lane fiber-528 --diff $WT" "$T/file-claim.log")" -eq 1 ] || fail "happy: the lane push records its hunk claim exactly once"
@@ -1327,14 +1329,19 @@ expect_state reviewed "$H" "round-zero-unreviewed completes the first review"
 # --- a round-1 gate fix without a completed review can resume at either phase ---
 setup_case round-one-unreviewed-review
 bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "round-one-unreviewed-review: seed round"
+bash "$TKT_STATE" "$S" set grant.3 '900 https://example.invalid/old-grant' >/dev/null || fail "round-one-unreviewed-review: seed old grant"
+bash "$TKT_STATE" "$S" set body_has 'Recorded ruling: https://example.invalid/old-grant' >/dev/null || fail "round-one-unreviewed-review: seed ruling audit line"
 bash "$TKT_STATE" "$S" set pr 7 >/dev/null || fail "round-one-unreviewed-review: seed PR"
 bash "$TKT_STATE" "$S" set head "$H" >/dev/null || fail "round-one-unreviewed-review: seed head"
 run_build --from review
 [ "$RC" -eq 0 ] || fail "round-one-unreviewed-review proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "round-one-unreviewed-review"
 grep -q "^review-start|" "$T/calls.log" || fail "round-one-unreviewed-review starts review"
-# The completed first review resets the count, so the gate fix spends no review round (tkt-fix ROUND-LIMIT).
+# The completed first review resets the fix-round count, clears grant tokens,
+# and keeps the PR-body audit line (tkt-fix ROUND-LIMIT).
 expect_state round 0 "round-one-unreviewed-review resets the fix-round count"
+if grep -q '^grant[.]' "$S"; then fail "round-one-unreviewed-review leaves no grant token after reset"; fi
+expect_state body_has 'Recorded ruling: https://example.invalid/old-grant' "round-one-unreviewed-review preserves the ruling audit line"
 
 setup_case round-one-unreviewed-gate
 bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "round-one-unreviewed-gate: seed round"
@@ -2232,6 +2239,8 @@ expect_state plan_verdict_base "$H" "old skipped base refreshes with flag"
 # --- a plan with Outcome: measurement runs the gate, skips the PR, review
 # and CI steps, and ends MEASURED with exit 0 and no gh pr list call ---
 setup_case measured
+bash "$TKT_STATE" "$S" set grant.4 '901 https://example.invalid/measurement-grant' >/dev/null || fail "measured: seed grant token"
+bash "$TKT_STATE" "$S" set body_has 'Recorded ruling: https://example.invalid/measurement-grant' >/dev/null || fail "measured: seed ruling audit line"
 {
   printf 'Base: %s\nOutcome: measurement\n' "$H"
   printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
@@ -2247,6 +2256,8 @@ grep -q "prompt=.*-map-" "$T/calls.log" && fail "measured: no map job dispatches
 grep -q "^ghci|" "$T/calls.log" && fail "measured: no CI wait runs"
 expect_state reviewed "$H" measured
 expect_state round 0 measured
+if grep -q '^grant[.]' "$S"; then fail "measured: no grant token survives the round reset"; fi
+expect_state body_has 'Recorded ruling: https://example.invalid/measurement-grant' "measured: preserve ruling audit line"
 grep -q "tkt-build MEASURED" "$CDIR/tkt.journal" || fail "measured: the verdict is journaled"
 
 # --- a plan without the Outcome line still needs a PR when none exists ---
