@@ -13,3 +13,66 @@ job_walk_superseded() {
     id="$next"
   done
 }
+
+# job_gate_journal_match JOURNAL ID... takes chain ids oldest to newest and
+# stores the newest id with a tkt-job gate row in job_gate_journal_{found,id,cmd,env}.
+# A malformed or pre-cmd64 row still owns that id's match with empty evidence.
+job_gate_journal_match() {
+  local journal="$1" line payload rest slot recorded_id recorded_cmd64 recorded_env64
+  local recorded_cmd recorded_env index
+  shift
+  local -a ids=("$@") has_row=() commands=() environments=()
+  job_gate_journal_found=0
+  job_gate_journal_id=""
+  job_gate_journal_cmd=""
+  job_gate_journal_env=""
+  for index in "${!ids[@]}"; do
+    has_row[$index]=0
+    commands[$index]=""
+    environments[$index]=""
+  done
+  [ -r "$journal" ] || return 0
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    payload="${line#* }"
+    case "$payload" in "tkt-job gate slot="*) ;; *) continue ;; esac
+    rest="${payload#tkt-job gate slot=}"
+    case "$rest" in *" "*) ;; *) continue ;; esac
+    slot="${rest%% *}"
+    rest="${rest#* }"
+    case "$rest" in job=*) ;; *) continue ;; esac
+    recorded_id="${rest#job=}"
+    case "$recorded_id" in *" "*) ;; *) continue ;; esac
+    recorded_id="${recorded_id%% *}"
+    [ -n "$slot" ] || continue
+
+    for index in "${!ids[@]}"; do
+      [ "$recorded_id" = "${ids[$index]}" ] || continue
+      has_row[$index]=1
+      commands[$index]=""
+      environments[$index]=""
+      rest="${rest#* }"
+      case "$rest" in cmd64=*) ;; *) continue ;; esac
+      recorded_cmd64="${rest#cmd64=}"
+      case "$recorded_cmd64" in *" "*) recorded_cmd64="${recorded_cmd64%% *}" ;; *) continue ;; esac
+      rest="${rest#* }"
+      case "$rest" in env64=*) ;; *) continue ;; esac
+      recorded_env64="${rest#env64=}"
+      case "$recorded_env64" in *" "*) continue ;; esac
+      recorded_cmd="$(printf '%s' "$recorded_cmd64" | jq -Rrs '@base64d' 2>/dev/null)" || continue
+      recorded_env="$(printf '%s' "$recorded_env64" | jq -Rrs '@base64d' 2>/dev/null)" || continue
+      commands[$index]="$recorded_cmd"
+      environments[$index]="$recorded_env"
+      break
+    done
+  done <"$journal"
+
+  for ((index=${#ids[@]} - 1; index >= 0; index--)); do
+    [ "${has_row[$index]}" -eq 1 ] || continue
+    job_gate_journal_found=1
+    job_gate_journal_id="${ids[$index]}"
+    job_gate_journal_cmd="${commands[$index]}"
+    job_gate_journal_env="${environments[$index]}"
+    return 0
+  done
+}

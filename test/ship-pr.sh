@@ -797,6 +797,31 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
 ship; expect 0 "scoped FIX-OK. prose verdict permits merge"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "scoped FIX-OK still merges: [$OUT]"
 
+# A verify that repeats FIX-OK (a prose line, then a closing bare line) still approves.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:107,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK. No finding is open.\n\nFIX-OK")}
+]' >"$ST/review-comments"
+ship; expect 0 "repeated FIX-OK lines permit merge"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "repeated FIX-OK still merges: [$OUT]"
+
+# FIX-OK beside FIX-INCOMPLETE stays refused.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:108,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK. one repaired\n\nFIX-INCOMPLETE")}
+]' >"$ST/review-comments"
+ship; expect 5 "FIX-OK beside FIX-INCOMPLETE refuses merge"; expect_refused REVIEW; no_merge "FIX-OK beside FIX-INCOMPLETE"
+
+# FIX-OK beside an axis VERDICT line stays refused.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:109,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK\n\nVERDICT spec: APPROVE")}
+]' >"$ST/review-comments"
+ship; expect 5 "FIX-OK beside a VERDICT line refuses merge"; expect_refused REVIEW; no_merge "FIX-OK beside VERDICT"
+
 # One trailing period is valid on each full-review axis; a second is not.
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"

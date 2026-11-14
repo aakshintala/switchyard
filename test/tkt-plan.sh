@@ -990,7 +990,7 @@ grant_refusal_expect() {
   [ "$RC" -eq 1 ] || fail "$label refuses invalid comment (rc=$RC): $OUT"
   expect_verdict "TKT tkt-plan GRANT-REFUSED reason=$reason log=*" "$label"
   grep -Fq "$failed_detail" <<<"$OUT" || fail "$label names the failed id: $OUT"
-  grep -Fq "$route" <<<"$OUT" || fail "$label prints a runnable route: $OUT"
+  [ -z "$route" ] || grep -Fq "$route" <<<"$OUT" || fail "$label prints a runnable route: $OUT"
   [ "$(state_get granted_by)" = "$grant_before_by" ] || fail "$label changes granted_by"
   [ "$(state_get granted_comment)" = "$grant_before_comment" ] || fail "$label changes granted_comment"
   [ "$(bash "$TKT_STATE" "$S" list grant)" = "$grant_before_list" ] || fail "$label changes the grant list"
@@ -1028,6 +1028,49 @@ grant_refusal_setup grant-ruling-other-issue yes
 set_ruling_comment 'The ruling comment is on another issue.' 2099-01-01T00:00:00Z 519 NONE "$T/comment-9002.json"
 run_plan grant-round --by switchyard --comment 9001 --ruling 9002
 grant_refusal_expect 'grant-ruling-other-issue' ruling-issue 'ruling comment 9002 is not on switchyard#518' "post the grant and ruling as comments on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001 --ruling <new comment id>"
+
+grant_refusal_setup grant-ruling-before-verdict yes
+bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "grant-ruling-before-verdict seed plan verdict time"
+bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2010-01-01T00:00:00Z || fail "grant-ruling-before-verdict seed stop verdict time"
+set_ruling_comment 'A ruling comment posted at the stop verdict time.' 2010-01-01T00:00:00Z 518 OWNER "$T/comment-9002.json"
+: >"$T/gh.log"
+run_plan grant-round --by switchyard --comment 9001 --ruling 9002
+grant_refusal_expect 'grant-ruling-before-verdict' comment-time 'ruling comment 9002 does not postdate the latest plan or stop verdict' ''
+! grep -Fq 'then rerun:' <<<"$OUT" || fail "grant-ruling-before-verdict uses the same route as rule-ok"
+
+# A comment already recorded in a grant cannot be reused, even with a new ruling.
+grant_refusal_setup grant-comment-reused
+bash "$TKT_STATE" "$S" add grant 'round=2 by=previous via= comment=9001 ruling=' || fail "grant-comment-reused seed grant list"
+grant_before_by="$(state_get granted_by)"
+grant_before_comment="$(state_get granted_comment)"
+grant_before_list="$(bash "$TKT_STATE" "$S" list grant)"
+: >"$T/gh.log"
+run_plan grant-round --by switchyard --comment 9001 --ruling 9002
+grant_refusal_expect 'grant-comment-reused' comment-reused 'comment 9001 has already backed a grant' "post the grant and ruling as comments on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment <new comment id> --ruling 9002"
+[ ! -s "$T/gh.log" ] || fail "grant-comment-reused checks the reused id before fetching comments"
+
+# A shared prefix is not a reused comment id.
+setup_case grant-comment-prefix
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-comment-prefix seed confirm"
+bash "$TKT_STATE" "$S" add grant 'round=2 by=previous via= comment=12 ruling=' || fail "grant-comment-prefix seed grant list"
+: >"$T/gh.log"
+run_plan grant-round --by switchyard --comment 123
+[ "$RC" -eq 0 ] || fail "grant-comment-prefix accepts comment 123 after comment 12 (rc=$RC): $OUT"
+expect_verdict "TKT tkt-plan SET grant=switchyard:123 log=*" "grant-comment-prefix"
+[ -s "$T/gh.log" ] || fail "grant-comment-prefix fetches the distinct comment id"
+
+# A ruling comment posted after the latest stop verdict is accepted.
+setup_case grant-ruling-after-verdict
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-ruling-after-verdict seed confirm"
+bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "grant-ruling-after-verdict seed plan verdict time"
+bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2010-01-01T00:00:00Z || fail "grant-ruling-after-verdict seed stop verdict time"
+set_ruling_comment 'Fresh ruling comment.' 2011-01-01T00:00:00Z 518 OWNER "$T/comment-9002.json"
+run_plan grant-round --by switchyard --comment 9001 --ruling 9002
+[ "$RC" -eq 0 ] || fail "grant-ruling-after-verdict accepts a fresh ruling comment (rc=$RC): $OUT"
+expect_verdict "TKT tkt-plan SET grant=switchyard:9001 log=*" "grant-ruling-after-verdict"
+[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = 9001 ] || fail "grant-ruling-after-verdict records the grant comment"
 
 setup_case grant-invalid
 rebase_plan
@@ -1096,6 +1139,7 @@ grep -qi 'owner' "$CDIR/stderr.txt" && fail "used grant refusal has no owner wor
 setup_case grant-ruling
 rebase_plan
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-ruling seed confirm"
+bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "grant-ruling seed plan verdict time"
 bash "$TKT_STATE" "$S" set granted_by 'old:by' || fail "grant-ruling seed old grant author"
 bash "$TKT_STATE" "$S" set granted_comment 'x:y' || fail "grant-ruling seed old grant comment"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-ruling seed used"
@@ -1120,6 +1164,7 @@ grep -qi 'owner' "$CDIR/stderr.txt" && fail "third grant refusal has no owner wo
 setup_case grant-first-ruling
 rebase_plan
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-first-ruling seed confirm"
+bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "grant-first-ruling seed plan verdict time"
 run_plan grant-round --by switchyard --comment first --ruling 2002
 [ "$RC" -eq 0 ] || fail "first ruling grant exits 0 (rc=$RC)"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "first grant writes no granted_owner"
@@ -1129,6 +1174,7 @@ bash "$TKT_STATE" "$S" list grant | grep -q 'via=ruling.*ruling=2002' || fail "f
 setup_case grant-ruling-reused
 rebase_plan
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-ruling-reused seed confirm"
+bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "grant-ruling-reused seed plan verdict time"
 run_plan grant-round --by switchyard --comment first --ruling 21
 [ "$RC" -eq 0 ] || fail "grant-ruling-reused first grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-ruling-reused consume first grant"
@@ -1151,6 +1197,13 @@ grep -Fq 'ruling 2 has already backed a grant' <<<"$OUT" || fail "grant-ruling-r
 grep -Fq "post the grant and ruling as comments on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment third --ruling <new comment id>" <<<"$OUT" || fail "grant-ruling-reused prints the replacement route: $OUT"
 cmp -s "$CDIR/state.before-reused-ruling" "$S" || fail "grant-ruling-reused writes no state"
 [ ! -s "$T/gh.log" ] || fail "grant-ruling-reused checks the reused id before fetching comments"
+# An identical rerun (comment and ruling both recorded) still refuses with ruling-reused.
+: >"$T/gh.log"
+run_plan grant-round --by switchyard --comment first --ruling 21
+[ "$RC" -eq 1 ] || fail "grant-ruling-reused refuses an identical rerun (rc=$RC): $OUT"
+expect_verdict "TKT tkt-plan GRANT-REFUSED reason=ruling-reused log=*" "grant-ruling-reused identical rerun"
+cmp -s "$CDIR/state.before-reused-ruling" "$S" || fail "grant-ruling-reused identical rerun writes no state"
+[ ! -s "$T/gh.log" ] || fail "grant-ruling-reused identical rerun makes no gh call"
 
 # --- a second and a third grant with --ruling each re-arm the pending grant ---
 setup_case grant-ruling-repeat
@@ -1191,6 +1244,7 @@ rounds="$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | sed -n 's/^round=\([0-
 setup_case grant-second-ruling
 rebase_plan
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-second-ruling seed confirm"
+bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "grant-second-ruling seed plan verdict time"
 bash "$TKT_STATE" "$S" set granted_by fly || fail "grant-second-ruling seed grant author"
 bash "$TKT_STATE" "$S" set granted_comment c1 || fail "grant-second-ruling seed grant comment"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-second-ruling seed used"
