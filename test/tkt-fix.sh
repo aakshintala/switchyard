@@ -1169,6 +1169,23 @@ run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-old-job 2>"$T/stderr")
 grep -Fq 'started before fix slot head was recorded' <<<"$out" || fail "legacy start-time refusal names the ordering failure"
 [ -z "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job 2>/dev/null || true)" ] || fail "legacy early job writes no verify metadata"
 
+# A verify starting anywhere within the journal second is refused.
+prepare_legacy_collect_case legacy-collect-same-second legacy-same-second-job verify slot 1577836800500
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-same-second-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "legacy same-second verify exited $run_rc, want refusal: $out"
+grep -Fq 'started before fix slot head was recorded' <<<"$out" || fail "legacy same-second refusal names the ordering failure"
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job 2>/dev/null || true)" ] || fail "legacy same-second verify writes no verify metadata"
+
+# A verify starting at the first millisecond after the journal second is accepted.
+prepare_legacy_collect_case legacy-collect-next-second legacy-next-second-job verify slot 1577836801000
+legacy_head="$(bash "$TKT_STATE" "$S" get fix_round.3.head)"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-next-second-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 0 ] || fail "legacy next-second verify exited $run_rc: $out $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$legacy_head" || fail "legacy next-second verify did not apply FIX-OK: $out"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job)" = legacy-next-second-job ] || fail "legacy next-second verify records its job"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_head)" = "$legacy_head" ] || fail "legacy next-second verify records its head"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_slot)" = fix3 ] || fail "legacy next-second verify records its slot"
+
 # A delegate record without review-pr state must prove the run head itself.
 prepare_legacy_collect_case legacy-collect-no-head legacy-no-head-job verify '' 1700000000000
 rm -f "$TMPDIR/review-pr/legacy-no-head-job"

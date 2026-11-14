@@ -381,8 +381,8 @@ collect_verify_precheck() {
       journal_epoch="$(date -u -d "$journal_stamp" +%s 2>/dev/null || true)"
     fi
     case "$journal_epoch" in ''|*[!0-9]*) collect_verify_refuse "cannot parse journal time for fix_round.$slot_number.head";; esac
-    recorded_at_ms="$((journal_epoch * 1000))"
-    if ! awk -v started="$started_at_ms" -v recorded="$recorded_at_ms" 'BEGIN { exit !(started > recorded) }'; then
+    recorded_at_ms="$(((journal_epoch + 1) * 1000))"
+    if ! awk -v started="$started_at_ms" -v recorded="$recorded_at_ms" 'BEGIN { exit !(started >= recorded) }'; then
       collect_verify_refuse "verify $collect_verify_job started before fix slot head was recorded"
     fi
 
