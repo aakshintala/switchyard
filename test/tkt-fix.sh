@@ -351,13 +351,13 @@ write_job_record() {
 want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
 
 write_ruling_comment() {
-  local id="$1" body="$2" ruling_issue="${3:-$(bash "$TKT_STATE" "$S" get issue)}"
+  local id="$1" body="$2" ruling_issue="${3:-$(bash "$TKT_STATE" "$S" get issue)}" author_association="${4:-OWNER}"
   local ruling_repo
   ruling_repo="$(bash "$TKT_STATE" "$S" get repo)"
-  jq -n --arg body "$body" \
+  jq -n --arg body "$body" --arg author_association "$author_association" \
     --arg issue_url "https://api.github.com/repos/$ruling_repo/issues/$ruling_issue" \
     --arg html_url "https://github.com/switchyard/switchyard/issues/$ruling_issue#issuecomment-$id" \
-    '{body:$body, issue_url:$issue_url, html_url:$html_url, created_at:"2026-11-14T00:00:00Z"}' \
+    '{body:$body, author_association:$author_association, issue_url:$issue_url, html_url:$html_url, created_at:"2026-11-14T00:00:00Z"}' \
     >"$T/comment-$id.json"
 }
 
@@ -381,7 +381,7 @@ html_url="https://github.com/switchyard/switchyard/issues/$issue#issuecomment-99
 jq -n --arg body 'refutes: P2 fix.txt:2' \
   --arg issue_url "https://api.github.com/repos/$repo/issues/$issue" \
   --arg html_url "$html_url" \
-  '{body:$body, issue_url:$issue_url, html_url:$html_url, created_at:"2026-11-14T00:00:00Z"}' \
+  '{body:$body, author_association:"OWNER", issue_url:$issue_url, html_url:$html_url, created_at:"2026-11-14T00:00:00Z"}' \
   >"$T/comment-99.json"
 printf 'ruling' >"$T/vermode"
 run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || run_rc=$?
@@ -423,6 +423,43 @@ printf 'P2 a.sh:12 — x\n' >"$CDIR/findings.md"
 bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
 write_ruling_comment 99 'refutes: P2 a.sh:1'
 expect_ruling_refused ruling-prefix no-match 99
+fi
+
+if want ruling-bad-refutes-bare; then
+setup_case ruling-bad-refutes-bare
+write_ruling_comment 99 'refutes: P2'
+expect_ruling_refused ruling-bad-refutes-bare bad-refutes 99
+fi
+
+if want ruling-bad-refutes-no-line; then
+setup_case ruling-bad-refutes-no-line
+write_ruling_comment 99 'refutes: P2 fix.txt'
+expect_ruling_refused ruling-bad-refutes-no-line bad-refutes 99
+fi
+
+if want ruling-author-none; then
+setup_case ruling-author-none
+write_ruling_comment 99 'refutes: P1 base.txt:1' '' NONE
+expect_ruling_refused ruling-author-none author 99
+fi
+
+if want ruling-author-contributor; then
+setup_case ruling-author-contributor
+write_ruling_comment 99 'refutes: P1 base.txt:1' '' CONTRIBUTOR
+expect_ruling_refused ruling-author-contributor author 99
+fi
+
+if want ruling-crlf; then
+setup_case ruling-crlf
+printf 'P1 fix.txt:1 — a\nP2 fix.txt:2 — b\n' >"$CDIR/findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+write_ruling_comment 99 $'refutes: P2 fix.txt:2\r\nThis finding is not valid.\r\n'
+printf 'ruling' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "ruling-crlf exited $run_rc, want 1: $out $(cat "$T/stderr")"
+grep -Fq 'FIX-INCOMPLETE round=1' <<<"$out" || fail "ruling-crlf did not preserve the P1 finding: $out"
+history="$(bash "$TKT_STATE" "$S" get findings_history)"
+grep -Fq 'P2 fix.txt:2 — b' "$history" && grep -Fq 'status=closed in fix round 1' "$history" || fail "ruling-crlf did not close P2 in history"
 fi
 
 if want ruling-no-refutes; then

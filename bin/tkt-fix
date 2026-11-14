@@ -305,6 +305,7 @@ ruling_refuse() {
 
 if [ "${#ruling_requested[@]}" -gt 0 ]; then
   ruling_history_source="$(t get findings_history 2>/dev/null || true)"
+  ruling_refutes_pattern='^P[123] [^ ]+:[0-9]+$'
   for ruling_id in ${ruling_requested[@]+"${ruling_requested[@]}"}; do
     case "$ruling_id" in
       ''|*[!0-9]*) ruling_refuse bad-id "$ruling_id" ;;
@@ -322,10 +323,14 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
     grep '^refutes:' "$ruling_body" >"$ruling_refutes_file" || true
     [ -s "$ruling_refutes_file" ] || ruling_refuse no-refutes "$ruling_id"
     while IFS= read -r ruling_line; do
+      ruling_line="${ruling_line%$'\r'}"
       case "$ruling_line" in
         'refutes: '*) ruling_prefix="${ruling_line#refutes: }" ;;
         *) ruling_prefix="${ruling_line#refutes:}" ;;
       esac
+      if [[ ! "$ruling_prefix" =~ $ruling_refutes_pattern ]]; then
+        ruling_refuse bad-refutes "$ruling_id"
+      fi
       ruling_match_begin
       ruling_match_file "$ruling_prefix" "$ruling_history_source" history
       ruling_match_file "$ruling_prefix" "$findings" current

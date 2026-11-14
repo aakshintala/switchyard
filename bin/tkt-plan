@@ -987,6 +987,7 @@ do_rule_ok() {
     case "$ruling_comment_failure" in
       fetch) emit "RULE-OK-REFUSED reason=comment-fetch" 1 "could not verify that comment $comment belongs to $repo#$issue" ;;
       issue) emit "RULE-OK-REFUSED reason=comment-issue" 1 "comment $comment is not on $repo#$issue" ;;
+      author) emit "RULE-OK-REFUSED reason=ruling-author" 1 "comment $comment is not from a repository owner, member or collaborator" ;;
       time) emit "RULE-OK-REFUSED reason=comment-time" 1 "comment $comment does not postdate the latest plan or stop verdict" ;;
     esac
   fi
@@ -1019,6 +1020,7 @@ do_triaged() {
     case "$ruling_comment_failure" in
       fetch) emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "could not verify that comment $comment belongs to $repo#$issue" ;;
       issue) emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "comment $comment is not on $repo#$issue" ;;
+      author) emit "TRIAGED-REFUSED reason=ruling-author issue=$issue" 1 "comment $comment is not from a repository owner, member or collaborator" ;;
       time) emit "TRIAGED-REFUSED reason=ruling-stale" 1 "comment $comment does not postdate the latest plan verdict" ;;
     esac
   fi

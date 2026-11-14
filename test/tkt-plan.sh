@@ -328,8 +328,8 @@ expect_verdict() {
 state_get() { bash "$TKT_STATE" "$S" get "$1" 2>/dev/null || true; }
 
 set_ruling_comment() {
-  local body="$1" created_at="${2:-2099-01-01T00:00:00Z}" comment_issue="${3:-518}"
-  jq -n --arg body "$body" --arg url "https://api.github.com/repos/switchyard/issues/$comment_issue" --arg created_at "$created_at" '{body:$body,issue_url:$url,created_at:$created_at}' >"$T/comment.json"
+  local body="$1" created_at="${2:-2099-01-01T00:00:00Z}" comment_issue="${3:-518}" author_association="${4:-OWNER}"
+  jq -n --arg body "$body" --arg url "https://api.github.com/repos/switchyard/issues/$comment_issue" --arg created_at "$created_at" --arg author_association "$author_association" '{body:$body,author_association:$author_association,issue_url:$url,created_at:$created_at}' >"$T/comment.json"
 }
 
 seed_triaged_stop() {
@@ -379,12 +379,12 @@ run_plan verify
 [ "$RC" -eq 1 ] || fail "rerun verify with open questions stops again (rc=$RC)"
 [ "$(state_get plan_questions_verdict_at)" = "$first_verdict_at" ] || fail "rerun verify keeps the first QUESTIONS verdict time"
 
-jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2000-01-01T00:00:00Z' '{body:$body,issue_url:$url,created_at:$created_at}' >"$T/comment.json"
+jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2000-01-01T00:00:00Z' '{body:$body,author_association:"OWNER",issue_url:$url,created_at:$created_at}' >"$T/comment.json"
 run_plan rule-questions --comment 654321
 [ "$RC" -eq 1 ] || fail "ruling comment before the QUESTIONS verdict is refused (rc=$RC)"
 expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=comment-time log=*" "reject pre-verdict ruling comment"
 [ -z "$(state_get plan_questions_comment)" ] || fail "pre-verdict comment is not recorded as a ruling"
-jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,issue_url:$url,created_at:$created_at}' >"$T/comment.json"
+jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,author_association:"OWNER",issue_url:$url,created_at:$created_at}' >"$T/comment.json"
 run_plan rule-questions --comment 654321
 [ "$RC" -eq 0 ] || fail "record ruling for all questions (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan QUESTIONS-RECORDED comment=654321 log=*" "record ruling for all questions"
@@ -2958,6 +2958,11 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-source issue=518 log=*" "triaged-ruling-source"
   grep -Fq 'gh|api repos/switchyard/issues/comments/654320' "$T/gh.log" || fail "triaged-ruling-source fetches the comment"
 
+  set_ruling_comment 'Use exact wording.' '2099-01-01T00:00:00Z' 518 CONTRIBUTOR
+  run_plan triaged --comment 654321
+  [ "$RC" -eq 1 ] || fail "triaged-ruling-author refuses a contributor comment"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-author issue=518 log=*" "triaged-ruling-author"
+
   setup_case triaged-ruling-stale
   rebase_plan
   write_triaged_tasks_plan
@@ -3387,6 +3392,14 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = rule-ok ]; then
   run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654002
   [ "$RC" -eq 1 ] || fail "rule-ok-comment-fetch refuses an unreadable comment"
   expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=comment-fetch log=*" "rule-ok-comment-fetch"
+
+  setup_case rule-ok-author-none
+  rebase_plan
+  bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok author verdict time"
+  set_ruling_comment 'Steward ruling RULING-1604.' '2099-01-01T00:00:00Z' 518 NONE
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654009
+  [ "$RC" -eq 1 ] || fail "rule-ok-author-none refuses an untrusted comment author"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=ruling-author log=*" "rule-ok-author-none"
 
   setup_case rule-ok-comment-issue
   rebase_plan
