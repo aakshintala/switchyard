@@ -82,6 +82,7 @@ done
 if [ -n "\$resume_id" ]; then
   printf 'tkt-job-resume|%s\n' "\$*" >>"$T/calls.log"
   if [ -f "$T/job-resume-fail" ]; then echo "TKT tkt-job ERROR id=\$resume_id log=x"; exit 3; fi
+  if [ -f "$T/job-resume-ask" ]; then echo "TKT tkt-job ASK id=\$resume_id log=x"; echo "which footer?"; exit 1; fi
   resume_count="\$(cat "$T/job-resume.count" 2>/dev/null || printf 0)"
   resume_count=\$((resume_count + 1)); printf '%s\n' "\$resume_count" >"$T/job-resume.count"
   old_report="$T/job-\$resume_id.out"
@@ -180,7 +181,7 @@ build_case_template "$TEMPLATES/TWO" yes
 # setup NAME ONE|TWO AGAINST|FILING|SKIP: copy a private seed, origin and
 # clone from the matching common fixture. Sets CDIR CLONE WT RUN FILING.
 setup() {
-  : >"$T/calls.log"; : >"$T/job-results.log"; rm -f "$T/job-dispatch.count" "$T/job-resume.count" "$T/jobresumeout" "$T/job-resume-fail" "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
+  : >"$T/calls.log"; : >"$T/job-results.log"; rm -f "$T/job-dispatch.count" "$T/job-resume.count" "$T/jobresumeout" "$T/job-resume-fail" "$T/job-resume-ask" "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"; : >"$T/prstate"; printf '[]\n' >"$T/prlist"
   printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\nCore items: 2\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobout"
@@ -655,6 +656,21 @@ want "PREFLIGHT core=unknown out=" 1 resume-failure
   || fail "resume-failure: did not try one resume"
 [ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
   || fail "resume-failure: failed resume did not clear the slot"
+grep -qxF 'tkt-start: preflight footer resume failed (rc=3): TKT tkt-job ERROR id=stub-1 log=x' <<<"$OUT" \
+  || fail "resume-failure: refusal does not say why the resume failed: $OUT"
+
+# A resume that asks a question (NEEDS_CONTEXT) refuses and shows tkt-job's head line.
+setup resume-ask TWO FILING
+printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"
+touch "$T/job-resume-ask"
+run_start
+want "PREFLIGHT core=unknown out=" 1 resume-ask
+grep -qxF 'tkt-start: preflight footer resume failed (rc=1): TKT tkt-job ASK id=stub-1 log=x' <<<"$OUT" \
+  || fail "resume-ask: refusal does not show the resume's head line: $OUT"
+grep -qF 'tkt-start preflight resume failed job=stub-1 rc=1 head=TKT tkt-job ASK id=stub-1 log=x' "$RUN/widget-42.journal" \
+  || fail "resume-ask: journal misses the failed resume"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "resume-ask: failed resume did not clear the slot"
 
 setup resume-mismatch TWO FILING
 printf '1. core -- first\nNon-blocking items: 0\n' >"$T/jobout"

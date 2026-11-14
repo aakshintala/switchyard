@@ -609,10 +609,10 @@ if [ "$core" = unknown ]; then
     tkt journal "tkt-start preflight resume job=$preflight_job_id"
     resume_rc=0; resume_txt="$("$tktjob" "$state" --slot preflight --resume "$preflight_job_id" --prompt "$repair_prompt" --out-file "$out" 2>&1)" || resume_rc=$?
     resume_ok=0
+    resume_head="$(grep -m1 '^TKT tkt-job ' <<<"$resume_txt" || head -n 1 <<<"$resume_txt")"
     if [ "$resume_rc" -eq 0 ]; then
       resume_ok=1
     elif [ "$resume_rc" -eq 1 ] && [ -f "$out" ]; then
-      resume_head="$(grep -m1 '^TKT tkt-job ' <<<"$resume_txt" || head -n 1 <<<"$resume_txt")"
       case "$resume_head" in "TKT tkt-job CONCERNS "*) resume_ok=1 ;; esac
     fi
     if [ "$resume_ok" -eq 1 ] && [ -f "$out" ]; then
@@ -627,11 +627,13 @@ if [ "$core" = unknown ]; then
       tkt journal "tkt-start preflight resumed job=${resumed_job_id:-$preflight_job_id} core=$core out=$out"
     else
       core=unknown
+      resume_diag=("tkt-start: preflight footer resume failed (rc=$resume_rc): $resume_head")
+      tkt journal "tkt-start preflight resume failed job=$preflight_job_id rc=$resume_rc head=$resume_head"
     fi
   fi
   if [ "$core" = unknown ]; then
     clear_preflight_slot
-    emit "PREFLIGHT core=unknown out=$out" 1 "tkt-start: rerun tkt-start for a fresh preflight" "${dg[@]}" "tkt-start: preflight report has no 'Core items:' line" "$report"
+    emit "PREFLIGHT core=unknown out=$out" 1 "tkt-start: rerun tkt-start for a fresh preflight" "${dg[@]}" ${resume_diag[@]+"${resume_diag[@]}"} "tkt-start: preflight report has no 'Core items:' line" "$report"
   fi
 fi
 tail='[[:space:]`*:]*((none([[:space:]]+found)?|n/a|nothing)([.;!][[:space:][:print:]]*)?)?[[:space:][:punct:]]*$'
