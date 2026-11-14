@@ -74,6 +74,8 @@ tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"; r
 plangate="$bin_dir/plan-gate"
 fbrief="$HOME/.agents/skills/review-loop/briefs/fix.md"
 t() { "$tkt_state" "$state" "$@"; }
+# history_path K: the findings-history file for fix slot K.
+history_path() { printf '%s' "$run/$namebase$part_suffix-findings-history-r$1.md"; }
 
 # close_slot K: record slot fix<K> closed; the highest closed slot never drops.
 close_slot() {
@@ -117,6 +119,9 @@ chain_owned() {
       chain_bounds+=("$before")
       if [ "$before" = "$prhead" ]; then return 0; fi
       want="$before"
+      # A resumedFrom id no slot walk reached belongs to a fresh slot. Following
+      # a link across slots can trip the seen or head check and fail closed on
+      # purpose; that refusal is safe, but can be false.
       resumed="$(jq -r '.resumedFrom // empty' "$record" 2>/dev/null || true)"
       case "$resumed" in
         '') id="" ;;
@@ -232,7 +237,7 @@ if [ -n "$resume" ]; then
   fi
 fi
 knum="${slot#fix}"
-history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
+history_file="$(history_path "$knum")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 limited=0
@@ -358,17 +363,15 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
     # open slots use that proof above. ROUND-LIMIT still gates recovery pushes.
     if [ "$keep" -eq 0 ] && [ "$openk" -eq 0 ] && [ "$clean" -eq 1 ] && [ "$prhead" != "$actual" ] \
       && { git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null || [ "$stored" = "$actual" ]; } \
-      && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null \
-      && { [ "$limited" -eq 0 ] || [ "$newest" -ge 1 ]; }; then
+      && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
       closed_owned=0
       if chain_owned "$newest" "$prhead" "$actual"; then closed_owned=1; fi
       if [ "$closed_owned" -eq 1 ]; then
         recovery_slot="$newest"
         [ "$openk" -le 0 ] || recovery_slot="$openk"
-        [ "$recovery_slot" -gt 0 ] || recovery_slot="$n"
         slot="fix$recovery_slot"
         knum="$recovery_slot"
-        history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
+        history_file="$(history_path "$knum")"
         recover_unpushed=1
         recover_old_head="$prhead"
         recover_new_head="$actual"
@@ -378,12 +381,19 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
     if [ "$keep" -eq 0 ] && [ "$limited" -eq 1 ]; then round_limit; fi
     if [ "$keep" -eq 0 ]; then
       # A pushed rebase or main merge leaves PR head == worktree HEAD on a
-      # clean tree, descended from the state head. Name the supported route;
-      # the head never moves here.
+      # clean tree, descended from the state head. If an unpushed main merge
+      # leaves the worktree ahead of the PR head, name the hand-push route,
+      # but only while the state head agrees with the PR head: a PR head
+      # rewound behind the state head is someone else's force-push, and a
+      # push route would quietly undo it. Both routes are hints only; the
+      # head never moves here.
       route=""
       if [ "$prhead" = "$actual" ] && [ "$clean" -eq 1 ] \
         && git -C "$worktree" merge-base --is-ancestor "$stored" "$actual" 2>/dev/null; then
         route="after a rebase or main merge, run: tkt-state $state set head $actual"
+      elif [ "$prhead" != "$actual" ] && [ "$stored" = "$prhead" ] && [ "$clean" -eq 1 ] \
+        && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
+        route="after an unpushed main merge, run: git -C $worktree push origin $branch, then: tkt-state $state set head $actual"
       fi
       emit "DRIFT" 3 "state head=$stored" "PR head=$prhead" "worktree HEAD=$actual" ${route:+"$route"}
     fi
