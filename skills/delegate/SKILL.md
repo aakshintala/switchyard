@@ -139,7 +139,7 @@ job reads `CANCELLED`, and `tkt-job` prints it as `WALL-CAP`. `text` is the agen
 `NEEDS_CONTEXT` it is the question.
 
 - `result.gateResult`: a failing gate downgrades `DONE` to `DONE_WITH_CONCERNS`; it holds the
-  gate's `exitCode`, `outputTail` and `outputPath`, the file with the gate's full output.
+  gate's `exitCode`, `startedAtMs`, `durationMs`, `outputTail` and `outputPath`, the file with the gate's full output.
 - `result.changeSet`: git delta for the cwd (`newCommits`, `filesChanged`, `diffstat`,
   `uncommittedFiles`).
 - If `delegate status` prints `uncommitted complete tree: commit and run the gate; do not resume`,
