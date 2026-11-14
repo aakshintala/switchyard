@@ -89,7 +89,11 @@ if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ]; then
 fi
 fixslot="$(t get fixslot 2>/dev/null || printf '0')"
 case "$fixslot" in ''|*[!0-9]*) fixslot=0 ;; esac
-if [ "$round" -gt "$fixslot" ]; then knum=$((round + 1)); else knum=$((fixslot + 1)); fi
+if [ "$fixslot" -gt 0 ] \
+  && [ "$(t get "fix_round.$fixslot.start" 2>/dev/null || true)" = "$reviewed" ] \
+  && [ "$(t get "fix_round.$fixslot.head" 2>/dev/null || true)" = "$head" ]; then
+  knum="$fixslot"
+elif [ "$round" -gt "$fixslot" ]; then knum=$((round + 1)); else knum=$((fixslot + 1)); fi
 
 mkdir -p "$run"
 issue="$(t get issue 2>/dev/null || true)"
@@ -155,6 +159,7 @@ case "$fixline" in
       || [ "$post_origin_head" != "$head" ] \
       || [ "$post_pr_head" != "$head" ]; then
       # The slot stays recorded: it names the reviewed..head range that review-pr read.
+      advance_round
       emit "HEAD-MOVED head=$head worktree=$post_worktree_head origin/$branch=$post_origin_head pr=$post_pr_head" 1
     fi
     advance_round

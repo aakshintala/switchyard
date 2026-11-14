@@ -499,7 +499,7 @@ verify_round_coverage() {
   if ! git -C "$worktree" merge-base --is-ancestor "$verify_since" "$new_head" 2>/dev/null; then
     emit "SINCE-NOT-ANCESTOR since=$verify_since head=$new_head" 1 \
       "branch history was rewritten after the review, so scoped-verify rounds cannot be mapped" \
-      "route: re-review the head, or record reviewed as the rebased equivalent of the reviewed commit"
+      "route: re-review the head with tkt-build $(printf '%q' "$state") --from review, which records a fresh reviewed; never set reviewed by hand"
   fi
   # First parent only: main's commits are not branch fix work. Clean automatic
   # merges from origin/main need no round ownership; manual merges do.

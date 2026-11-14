@@ -540,6 +540,8 @@ grep -Fq "SINCE-NOT-ANCESTOR since=$OLD head=" <<<"$out" || fail "since-not-ance
 grep -Fq 'FINDINGS-UNACCOUNTED' <<<"$out" && fail "since-not-ancestor reported unaccounted findings: $out"
 grep -Fq 'branch history was rewritten after the review' <<<"$out" || fail "since-not-ancestor did not explain the rewrite: $out"
 grep -Fq 're-review the head' <<<"$out" || fail "since-not-ancestor omitted its recovery route: $out"
+grep -Fq -- '--from review' <<<"$out" || fail "since-not-ancestor route did not name tkt-build --from review: $out"
+grep -Fq 'rebased equivalent' <<<"$out" && fail "since-not-ancestor still routes to a hand write of reviewed: $out"
 fi
 
 if want unknown-gap-repair; then
