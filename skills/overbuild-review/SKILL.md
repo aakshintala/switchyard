@@ -20,7 +20,7 @@ Review the diff for complexity it doesn't need. The diff's best outcome is getti
 
 ## Output
 
-First line: `VERDICT: APPROVE` when there is nothing to cut, else `VERDICT: CHANGES`. Then one line per finding, biggest cut first:
+First line: `VERDICT: APPROVE` when there is nothing to cut, else `VERDICT: CHANGES`, optionally with one trailing period. Then one line per finding, biggest cut first:
 
 `P3 <file>:<line> — <tag> — cut <X> — replace with <Y>`
 
