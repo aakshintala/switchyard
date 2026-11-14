@@ -917,19 +917,24 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "R3 bad 
 grep -q "job|" "$T/calls.log" && fail "R3 dispatched a fix job"
 fi
 
-# R4: round-2 drift that cannot recover keeps the ROUND-LIMIT verdict.
+# R4: round-2 state-head recovery with a job-owned chain pushes and advances to 3.
 if want R4; then
 setup_case r4
 set_closed_round 2
 fixture_commit fix.txt "state-only head" "fix: state-only head"
 SHEAD="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$SHEAD" >/dev/null
-printf '%s' "$OLD" >"$T/prhead"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "R4 exited 0"
-rc=$?; [ "$rc" = "1" ] || fail "R4 exited $rc, want 1"
-head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "R4 bad verdict: $(head -n 1 <<<"$out")"
-grep -q "TKT tkt-fix DRIFT" <<<"$out" && fail "R4 returned DRIFT instead of ROUND-LIMIT"
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+write_job_record j2 "$OLD" "$SHEAD"
+record_test_round 2 "$SHEAD"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "R4 exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$SHEAD" || fail "R4 bad verdict: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q "ROUND-LIMIT" && fail "R4 was blocked by ROUND-LIMIT"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$SHEAD" ] || fail "R4 state head changed"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "0" ] || fail "R4 left fixopen set"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "3" ] || fail "R4 round did not advance from 2 to 3"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$SHEAD" ] || fail "R4 did not push the recovery commit"
 grep -q "job|" "$T/calls.log" && fail "R4 dispatched a fix job"
 fi
 
