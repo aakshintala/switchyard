@@ -41,6 +41,10 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+job_walk_lib="$script_dir/lib/job-walk.sh"
+if [ ! -r "$job_walk_lib" ]; then echo "tkt-fix: cannot read shared lib: $job_walk_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$job_walk_lib"
 tkt_state="$script_dir/tkt-state"; bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-fix: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
@@ -71,6 +75,54 @@ t() { "$tkt_state" "$state" "$@"; }
 close_slot() {
   cur="$(t get fixslot 2>/dev/null || printf '0')"; case "$cur" in ''|*[!0-9]*) cur=0;; esac
   if [ "$1" -gt "$cur" ]; then t set fixslot "$1"; fi
+}
+
+# chain_owned K PRHEAD ACTUAL: prove that fix<K>..fix1 records account for
+# every head transition back to the PR head. Superseded records resolve each
+# slot's current id; resumedFrom links preserve earlier attempts in that slot.
+# Successful headBefore values are exposed to the open-slot stored-head check.
+chain_owned() {
+  local k="$1" prhead="$2" actual="$3" want="$3"
+  local job walk walk_id walk_record newest_id id record before after resumed
+  local seen='|' count=0
+  chain_bounds=()
+  while [ "$k" -ge 1 ]; do
+    job="$(t get "job.fix$k" 2>/dev/null || true)"
+    [ -n "$job" ] || return 1
+    walk="$(job_walk_superseded "$job")" || return 1
+    [ -n "$walk" ] || return 1
+    newest_id=""
+    while IFS=$'\t' read -r walk_id walk_record; do
+      [ -n "$walk_id" ] && [ -f "$walk_record" ] || return 1
+      newest_id="$walk_id"
+    done <<<"$walk"
+    [ -n "$newest_id" ] || return 1
+    id="$newest_id"
+    while [ -n "$id" ]; do
+      case "$seen" in *"|$id|"*) return 1 ;; esac
+      seen="$seen$id|"
+      count=$((count + 1))
+      [ "$count" -le 64 ] || return 1
+      record="$(bash "$script_dir/job-record" "$id" 2>/dev/null || true)"
+      [ -n "$record" ] && [ -f "$record" ] || return 1
+      before="$(jq -r '.result.changeSet.headBefore // ""' "$record" 2>/dev/null || true)"
+      after="$(jq -r '.result.changeSet.headAfter // ""' "$record" 2>/dev/null || true)"
+      [ -n "$before" ] && [ -n "$after" ] || return 1
+      [ "$after" = "$want" ] || return 1
+      git -C "$worktree" merge-base --is-ancestor "$before" "$after" 2>/dev/null || return 1
+      chain_bounds+=("$before")
+      if [ "$before" = "$prhead" ]; then return 0; fi
+      want="$before"
+      resumed="$(jq -r '.resumedFrom // empty' "$record" 2>/dev/null || true)"
+      case "$resumed" in
+        '') id="" ;;
+        */*|.|..) return 1 ;;
+        *) id="$resumed" ;;
+      esac
+    done
+    k=$((k - 1))
+  done
+  return 1
 }
 
 # slot_owner ID: print the slot whose stored job id the walk from ID reaches
@@ -271,22 +323,12 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
       elif [ -n "$fjob" ] && [ "$prhead" != "$actual" ] \
         && [ "$clean" -eq 1 ] \
         && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
-        # Ownership: the ahead commits must be the open job's own. Its
-        # delegate record carries changeSet.headAfter, located the same way
-        # tkt-job locates it; only an exact match with the worktree HEAD
-        # proves no outside commit landed on top.
-        rec="$(bash "$script_dir/job-record" "$fjob" 2>/dev/null || true)"
-        owned=""
-        owned_before=""
-        if [ -n "$rec" ] && [ -f "$rec" ]; then
-          owned="$(jq -r '.result.changeSet.headAfter // ""' "$rec" 2>/dev/null || true)"
-          owned_before="$(jq -r '.result.changeSet.headBefore // ""' "$rec" 2>/dev/null || true)"
-        fi
-        if [ -n "$owned" ] && [ "$owned" = "$actual" ] \
-          && { { [ "$stored" = "$prhead" ] || [ "$stored" = "$actual" ]; } \
-            || { [ "$owned_before" = "$stored" ] \
-              && git -C "$worktree" merge-base --is-ancestor "$prhead" "$stored" 2>/dev/null \
-              && git -C "$worktree" merge-base --is-ancestor "$stored" "$actual" 2>/dev/null; }; }; then
+        # Ownership: every unpushed transition must be accounted for by the
+        # open slot and its earlier fix slots, back to the PR head. A stored
+        # intermediate head is safe only when it is a boundary in that chain.
+        if chain_owned "$openk" "$prhead" "$actual" \
+          && { [ "$stored" = "$prhead" ] || [ "$stored" = "$actual" ] \
+            || [[ " ${chain_bounds[*]} " == *" $stored "* ]]; }; then
           # Carry the validated recovery through tkt-job's head-drift guard
           # the same way a normal job end does. fixopen stays on the open
           # slot: its commits are still unpushed, and the dispatch below
@@ -298,27 +340,15 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
       fi
     fi
     # Closed slots recover unpushed commits on a clean tree whose HEAD
-    # descends from the PR head, in two arms. Arm 1: stored is at or behind
-    # the PR head; the job.fix<fixslot> record check runs only under the
-    # round limit. Arm 2: stored == actual, so the state head itself claims
-    # the commits; the record's headAfter must equal actual at every round.
-    # Open slots still need the exact job-record ownership proved above.
-    # debt: round<2 closed-slot recovery can push without job-record ownership; tighten when a round<2 closed-slot recovery pushes a commit no job record owns.
+    # descends from the PR head, in either stored-head arm. Every round now
+    # requires the same complete fix-slot ownership chain back to the PR head;
+    # open slots use that proof above. ROUND-LIMIT still gates recovery pushes.
     if [ "$keep" -eq 0 ] && [ "$openk" -eq 0 ] && [ "$clean" -eq 1 ] && [ "$prhead" != "$actual" ] \
       && { git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null || [ "$stored" = "$actual" ]; } \
       && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null \
       && { [ "$limited" -eq 0 ] || [ "$fixslot" -ge 1 ]; }; then
-      closed_owned=1
-      if [ "$limited" -eq 1 ] || [ "$stored" = "$actual" ]; then
-        closed_job="$(t get "job.fix$fixslot" 2>/dev/null || true)"
-        closed_rec=""
-        if [ -n "$closed_job" ]; then closed_rec="$(bash "$script_dir/job-record" "$closed_job" 2>/dev/null || true)"; fi
-        closed_head_after=""
-        if [ -n "$closed_rec" ] && [ -f "$closed_rec" ]; then
-          closed_head_after="$(jq -r '.result.changeSet.headAfter // ""' "$closed_rec" 2>/dev/null || true)"
-        fi
-        [ -n "$closed_head_after" ] && [ "$closed_head_after" = "$actual" ] || closed_owned=0
-      fi
+      closed_owned=0
+      if chain_owned "$fixslot" "$prhead" "$actual"; then closed_owned=1; fi
       if [ "$closed_owned" -eq 1 ]; then
         recovery_slot="$fixslot"
         [ "$openk" -le 0 ] || recovery_slot="$openk"

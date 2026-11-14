@@ -301,11 +301,16 @@ set_closed_round() {
 }
 
 write_job_record() {
-  local id="$1" before="$2" after="$3"
+  local id="$1" before="$2" after="$3" resumed_from="${4:-}" record
   mkdir -p "$TMPDIR/delegate-jobs"
+  record="$TMPDIR/delegate-jobs/$id.json"
   jq -n --arg hb "$before" --arg ha "$after" \
     '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"recorded fix",changeSet:{headBefore:$hb,headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1}' \
-    >"$TMPDIR/delegate-jobs/$id.json" || fail "write $id record"
+    >"$record" || fail "write $id record"
+  if [ -n "$resumed_from" ]; then
+    jq --arg id "$resumed_from" '. + {resumedFrom:$id}' "$record" >"$record.tmp" \
+      && mv "$record.tmp" "$record" || fail "write $id resumedFrom"
+  fi
 }
 
 # Selector for the new cases below: empty or unset runs all of them.
@@ -1017,7 +1022,11 @@ fixture_commit fix.txt "second owned fix" "fix: second owned"
 A2="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$A2" >/dev/null
 bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
 bash "$TKT_STATE" "$S" set job.fix3 j3 >/dev/null
+write_job_record j1 "$OLD" "$A1"
+write_job_record j2 "$A1" "$A2"
 write_job_record j3 "$A2" "$A2"
 record_test_round 3 "$A2"
 printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
@@ -1083,7 +1092,11 @@ fixture_commit fix.txt "second owned fix" "fix: second owned"
 A2="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$A2" >/dev/null
 bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
 bash "$TKT_STATE" "$S" set job.fix3 j3 >/dev/null
+write_job_record j1 "$OLD" "$A1"
+write_job_record j2 "$A1" "$A2"
 write_job_record j3 "$A2" "$A2"
 record_test_round 3 "$A2"
 printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
@@ -1626,7 +1639,7 @@ NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
 mkdir -p "$TMPDIR/delegate-jobs"
-jq -n --arg ha "$NEW" '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"which design rules the retry?",changeSet:{headBefore:"x",headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1}' >"$TMPDIR/delegate-jobs/j1.json" || fail "E record write"
+jq -n --arg hb "$OLD" --arg ha "$NEW" '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"which design rules the retry?",changeSet:{headBefore:$hb,headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1}' >"$TMPDIR/delegate-jobs/j1.json" || fail "E record write"
 printf '%s' "$OLD" >"$T/prhead"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "E exited 0"
 rc=$?; [ "$rc" = "3" ] || fail "E exited $rc, want 3"
@@ -1651,6 +1664,8 @@ bash "$TKT_STATE" "$S" set head "$SHEAD" >/dev/null
 bash "$TKT_STATE" "$S" set round 1 >/dev/null
 bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
 bash "$TKT_STATE" "$S" set fixopen 2 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+write_job_record j1 "$OLD" "$SHEAD"
 bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
 write_job_record j2 "$SHEAD" "$A"
 printf '%s' "$OLD" >"$T/prhead"
@@ -1936,10 +1951,10 @@ jobsdir="\${DELEGATE_JOBS_DIR:-\${TMPDIR:-/tmp}/delegate-jobs}"
 mode="\$(cat "$T/delegate-mode")"
 cmd="\${1:-}"; shift || true
 mint_record() {
-  if [ "\$4" = "1" ]; then comms="[\"\$3\"]"; else comms="[]"; fi
-  jq -n --arg status "\$1" --arg text "\$2" --arg ha "\$3" --argjson comms "\$comms" \
-    '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log"}, changeSet: {headBefore: "0", headAfter: \$ha, newCommits: \$comms, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: null}, supervisorPid: 1}' \
-    >"\$jobsdir/\$5.json" || exit 1
+  if [ "\$5" = "1" ]; then comms="[\"\$4\"]"; else comms="[]"; fi
+  jq -n --arg status "\$1" --arg text "\$2" --arg hb "\$3" --arg ha "\$4" --argjson comms "\$comms" --arg resumed "\$7" \
+    '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log"}, changeSet: {headBefore: \$hb, headAfter: \$ha, newCommits: \$comms, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: null}, supervisorPid: 1, resumedFrom: \$resumed}' \
+    >"\$jobsdir/\$6.json" || exit 1
 }
 commit_fix() {
   printf 'fixed-%s\n' "\$2" >"\$1/fix.txt"
@@ -1963,9 +1978,10 @@ case "\$cmd" in
     printf 'delegate|run|new=%s|cwd=%s|prompt=%s\n' "\$id" "\$cwd" "\$prompt" >>"$T/calls.log"
     printf '%s' "\$cwd" >"$T/dcwd"
     mkdir -p "\$jobsdir"
+    head_before="\$(git -C "\$cwd" rev-parse HEAD)"
     head="\$(commit_fix "\$cwd" "\$n")"
-    if [ "\$mode" = "ask" ]; then mint_record NEEDS_CONTEXT "which design rules the retry?" "\$head" 1 "\$id"
-    else mint_record DONE "\$(printf 'done\nSTATUS: DONE')" "\$head" 1 "\$id"; fi
+    if [ "\$mode" = "ask" ]; then mint_record NEEDS_CONTEXT "which design rules the retry?" "\$head_before" "\$head" 1 "\$id" ""
+    else mint_record DONE "\$(printf 'done\nSTATUS: DONE')" "\$head_before" "\$head" 1 "\$id" ""; fi
     printf '%s\n' "\$id"
     ;;
   resume)
@@ -1983,9 +1999,9 @@ case "\$cmd" in
     printf 'delegate|resume|from=%s|new=%s|prompt=%s\n' "\$from" "\$id" "\$prompt" >>"$T/calls.log"
     mkdir -p "\$jobsdir"
     cwd="\$(cat "$T/dcwd")"
-    head="\$(git -C "\$cwd" rev-parse HEAD)"
-    if [ "\$mode" = "ask" ]; then mint_record NEEDS_CONTEXT "which design rules the retry?" "\$head" 0 "\$id"
-    else mint_record DONE "\$(printf 'done\nSTATUS: DONE')" "\$head" 0 "\$id"; fi
+    head_before="\$(git -C "\$cwd" rev-parse HEAD)"
+    if [ "\$mode" = "ask" ]; then mint_record NEEDS_CONTEXT "which design rules the retry?" "\$head_before" "\$head_before" 0 "\$id" "\$from"
+    else mint_record DONE "\$(printf 'done\nSTATUS: DONE')" "\$head_before" "\$head_before" 0 "\$id" "\$from"; fi
     printf '%s\n' "\$id"
     ;;
   watch)
@@ -2091,8 +2107,7 @@ git -C "$WT" commit -qm "fix: fix.txt"
 NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
-mkdir -p "$TMPDIR/delegate-jobs"
-jq -n --arg ha "$NEW" '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"which design rules the retry?",changeSet:{headBefore:"x",headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1}' >"$TMPDIR/delegate-jobs/j1.json" || fail "F4 record write"
+write_job_record j1 "$OLD" "$NEW"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F4 call 1 exited 0"
 rc=$?; [ "$rc" = "3" ] || fail "F4 call 1 exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "F4 bad verdict: $(head -n 1 <<<"$out")"
@@ -2127,6 +2142,8 @@ first_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || first_rc=$?
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix NEEDS_CONTEXT id=j1" || fail "G first call bad verdict: $(head -n 1 <<<"$out")"
 bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
 NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+write_job_record j1 "$OLD" "$NEW"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "G recovery exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "G recovery bad verdict: $(head -n 1 <<<"$out")"
@@ -2148,6 +2165,8 @@ first_rc=0; bash "$TKT" "$S" --verify >/dev/null 2>"$T/stderr" || first_rc=$?
 [ "$first_rc" = "1" ] || fail "G2 first call exited $first_rc, want 1"
 bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
 NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+write_job_record j1 "$OLD" "$NEW"
 cat >"$CDIR/plan.md" <<'EOF'
 # Plan
 
@@ -2179,6 +2198,9 @@ printf 'stalled' >"$T/jobmode"
 first_rc=0; bash "$TKT" "$S" --verify >/dev/null 2>"$T/stderr" || first_rc=$?
 [ "$first_rc" = "1" ] || fail "G3 first call exited $first_rc, want 1"
 bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+write_job_record j1 "$OLD" "$NEW"
 printf 'untracked\n' >"$WT/untracked.txt"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "G3 recovery exited 0"
@@ -2196,6 +2218,9 @@ printf 'stalled' >"$T/jobmode"
 first_rc=0; bash "$TKT" "$S" --verify >/dev/null 2>"$T/stderr" || first_rc=$?
 [ "$first_rc" = "1" ] || fail "G4 first call exited $first_rc, want 1"
 bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
+STALLED_HEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+write_job_record j1 "$OLD" "$STALLED_HEAD"
 git -C "$WT" push -q origin tkt-529
 PRHEAD="$(git -C "$WT" rev-parse HEAD)"
 git -C "$WT" reset -q --hard "$OLD"
@@ -2280,5 +2305,160 @@ out="$(bash "$TKT" "$S" --verify --since not-a-commit 2>"$T/stderr")" && fail "s
 rc=$?; [ "$rc" = "2" ] || fail "since-invalid exited $rc, want 2"
 grep -F -q 'tkt-fix: --since does not resolve to a commit in worktree: not-a-commit' "$T/stderr" || fail "since-invalid message missing: $(cat "$T/stderr")"
 grep -q '^job|' "$T/calls.log" && fail "since-invalid dispatched a job"
+
+# K1: the #4598 three-slot chain proves ownership on the open-slot path,
+# including a no-op final job, then reports RECOVER with the carried head.
+if want K1; then
+setup_case K1
+fixture_commit fix.txt "first fix" "fix: first"
+A1="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second fix" "fix: second"
+A2="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set fixopen 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 k1a >/dev/null
+bash "$TKT_STATE" "$S" set job.fix2 k1b >/dev/null
+bash "$TKT_STATE" "$S" set job.fix3 k1c >/dev/null
+write_job_record k1a "$OLD" "$A1"
+write_job_record k1b "$A1" "$A2"
+write_job_record k1c "$A2" "$A2"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "K1 exited $run_rc, want RECOVER 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix RECOVER' || fail "K1 bad verdict: $(head -n 1 <<<"$out")"
+grep -q 'job=k1a' <<<"$out" || fail "K1 missing job digest: $out"
+grep -q 'slot=fix1' <<<"$out" || fail "K1 missing slot digest: $out"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A2" ] || fail "K1 state head did not advance"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "K1 pushed"
+fi
+
+# K2: a no-op job cannot claim a hand commit, at round 0 or under ROUND-LIMIT.
+if want K2; then
+setup_case K2
+fixture_commit fix.txt "hand commit" "outside: hand commit"
+A="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 k2a >/dev/null
+write_job_record k2a "$A" "$A"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "K2 round 0 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix DRIFT' || fail "K2 round 0 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "K2 round 0 changed state head"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "K2 round 0 pushed"
+
+setup_case K2-round2
+fixture_commit fix.txt "hand commit" "outside: hand commit"
+A="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 k2b >/dev/null
+write_job_record k2b "$A" "$A"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "K2 round 2 exited $run_rc, want ROUND-LIMIT 1: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix ROUND-LIMIT round=2' || fail "K2 round 2 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "K2 round 2 changed state head"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "K2 round 2 pushed"
+fi
+
+# K3: a hand commit between two recorded jobs leaves a gap in ownership.
+if want K3; then
+setup_case K3
+fixture_commit fix.txt "first fix" "fix: first"
+A1="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit outside.txt "hand commit" "outside: gap"
+A2="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second fix" "fix: second"
+A3="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set fixslot 2 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 k3a >/dev/null
+bash "$TKT_STATE" "$S" set job.fix2 k3b >/dev/null
+write_job_record k3a "$OLD" "$A1"
+write_job_record k3b "$A2" "$A3"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "K3 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix DRIFT' || fail "K3 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "K3 pushed"
+fi
+
+# K4: a declared slot with no record breaks the chain even if older and newer
+# records otherwise point toward the worktree head.
+if want K4; then
+setup_case K4
+fixture_commit fix.txt "first fix" "fix: first"
+A1="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit outside.txt "middle hand commit" "outside: middle"
+A2="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "third fix" "fix: third"
+A3="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 k4a >/dev/null
+bash "$TKT_STATE" "$S" set job.fix2 k4missing >/dev/null
+bash "$TKT_STATE" "$S" set job.fix3 k4c >/dev/null
+write_job_record k4a "$OLD" "$A1"
+write_job_record k4c "$A2" "$A3"
+rm -f "$TMPDIR/delegate-jobs/k4missing.json"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "K4 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix DRIFT' || fail "K4 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "K4 pushed"
+fi
+
+# K5: a resume within fix1 follows resumedFrom and proves its predecessor.
+if want K5; then
+setup_case K5
+fixture_commit fix.txt "first fix" "fix: first"
+A1="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "resumed fix" "fix: resumed"
+A2="$(git -C "$WT" rev-parse HEAD)"
+write_job_record k5a "$OLD" "$A1"
+j1_record="$TMPDIR/delegate-jobs/k5a.json"
+jq '. + {supersededBy:"k5b"}' "$j1_record" >"$j1_record.tmp" && mv "$j1_record.tmp" "$j1_record" || fail "K5 supersededBy write"
+write_job_record k5b "$A1" "$A2" k5a
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 k5b >/dev/null
+record_test_round 1 "$A2"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "K5 exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$A2" || fail "K5 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$A2" ] || fail "K5 did not push the recovered chain"
+fi
+
+# K6: the open-slot stored-head == actual shortcut still needs a full chain.
+if want K6; then
+setup_case K6
+fixture_commit fix.txt "hand commit" "outside: hand commit"
+A="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$A" >/dev/null
+bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 k6a >/dev/null
+write_job_record k6a "$A" "$A"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "K6 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix DRIFT' || fail "K6 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A" ] || fail "K6 changed state head"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "K6 pushed"
+fi
+
+# K7: a resumedFrom cycle is rejected without hanging.
+if want K7; then
+setup_case K7
+fixture_commit fix.txt "first commit" "fix: first"
+A1="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second commit" "fix: second"
+A2="$(git -C "$WT" rev-parse HEAD)"
+write_job_record k7a "$A1" "$A1" k7b
+write_job_record k7b "$A1" "$A2" k7a
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 k7b >/dev/null
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "K7 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix DRIFT' || fail "K7 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "K7 pushed"
+fi
 
 echo "tkt-fix assertions passed"
