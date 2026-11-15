@@ -57,6 +57,7 @@ for arg in "$@"; do
   if [ "$previous" = --verify ]; then verify_file="$arg"; fi
   if [ "$previous" = --model ]; then model="$arg"; fi
   if [ "$previous" = --model-ruling ]; then model_ruling="$arg"; fi
+  if [ "$previous" = --context ]; then cp "$arg" "$T/context-$(basename "$arg")"; fi
   previous="$arg"
 done
 if [ "$model" = claude-sonnet-5-5 ] && [ -z "$model_ruling" ]; then
@@ -151,10 +152,19 @@ run_verify() {
   RC="$rc"
 }
 
-run_verify_ruling() {
-  local id="$1" rc=0
-  OUT="$(bash "$TKT" "$S" --findings "$F" --ruling "$id" 2>"$T/stderr")" || rc=$?
+run_verify_rulings() {
+  local rc=0
+  local -a ruling_args=()
+  while [ "$#" -gt 0 ]; do
+    ruling_args+=(--ruling "$1")
+    shift
+  done
+  OUT="$(bash "$TKT" "$S" --findings "$F" "${ruling_args[@]}" 2>"$T/stderr")" || rc=$?
   RC="$rc"
+}
+
+run_verify_ruling() {
+  run_verify_rulings "$1"
 }
 
 run_verify_override() {
@@ -603,6 +613,7 @@ grep -Fq 'add this line to the PR body' <<<"$OUT" || fail "grant output omitted 
 run_verify_ruling 900
 [ "$RC" = 2 ] || fail "reuse exited $RC, want 2: $OUT"
 grep -Fq 'RULING-REFUSED reason=reused comment=900' <<<"$OUT" || fail "reuse was not refused as reused: $OUT"
+grep -Fq 'grant comment 900 has already been consumed; post a new ruling comment' <<<"$OUT" || fail "reuse did not explain that a new ruling comment is needed: $OUT"
 assert_no_review reuse
 : >"$T/calls.log"
 run_verify
@@ -611,6 +622,55 @@ assert_first_verdict ROUND-LIMIT 'next round without grant'
 grep -Fq 'round=3' <<<"$OUT" || fail "next round hint omitted the current round: $OUT"
 assert_no_review 'next round without grant'
 fi
+
+# A separate refutes comment is staged with a valid round grant and marks only
+# the copied findings file passed to review-pr. The grant-only path above stays
+# unchanged, including its round count and PR-body requirement.
+setup_case grant-with-separate-refutes
+set_state round 2
+write_ruling_comment 920 $'context\ngrants: round 3'
+write_ruling_comment 921 'refutes: P1 src/main.sh:1'
+printf 'incomplete\n' >"$T/vermode"
+run_verify_rulings 920 921
+[ "$RC" = 1 ] || fail "grant plus separate refutes exited $RC, want FIX-INCOMPLETE: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-INCOMPLETE 'grant plus separate refutes'
+awk '/^P1 src\/main.sh:1 — initial finding$/ { if (getline <= 0 || $0 !~ /^refuted: recorded ruling https:\/\/github.com\/switchyard\/switchyard\/issues\/1756#issuecomment-921 \(refutes: P1 src\/main.sh:1\); text in \.review-context\/ruling-921\.md$/) exit 1; found=1 } END { exit !found }' \
+  "$T/verify-input.md" || fail "separate refutes ruling did not mark its open row"
+grep -Fq -- "--context $T/tmp/tkt-verify." "$T/calls.log" || fail "separate refutes ruling was not passed with --context"
+grep -Fq 'refutes: P1 src/main.sh:1' "$T/context-ruling-921.md" || fail "separate refutes body was not staged as ruling-921.md"
+! grep -q '^refuted:' "$F" || fail "tkt-verify modified the caller's findings file"
+[ "$(read_state round)" = 3 ] || fail "separate refutes grant did not count round 3"
+[ "$(read_state grant.3)" = '920 https://github.com/switchyard/switchyard/issues/1756#issuecomment-920' ] || fail "separate refutes grant was not recorded"
+grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-921 refutes P1 src/main.sh:1' "${S%.state}.journal" || fail "separate refutes ruling was not journalled"
+
+# A valid-shaped refutes prefix with no finding is rejected as drift before review.
+setup_case ruling-refutes-drift
+write_ruling_comment 922 'refutes: P2 absent.sh:9'
+run_verify_rulings 922
+[ "$RC" = 1 ] || fail "ruling-refutes-drift exited $RC, want 1: $OUT"
+assert_first_verdict 'VERIFY-FAIL reason=ruling-drift' 'ruling-refutes-drift'
+assert_no_review 'ruling-refutes-drift'
+assert_no_slot 'ruling-refutes-drift'
+! grep -q '^refuted:' "$F" || fail "ruling-refutes-drift modified the caller's findings file"
+
+# Trailing reason prose is not part of the full-text row prefix and refuses before review.
+setup_case ruling-refutes-trailing-prose
+write_ruling_comment 924 'refutes: P1 src/main.sh:1 — initial finding because it is safe'
+run_verify_ruling 924
+[ "$RC" = 1 ] || fail "ruling-refutes-trailing-prose exited $RC, want 1: $OUT"
+assert_first_verdict 'VERIFY-FAIL reason=ruling-drift' 'ruling-refutes-trailing-prose'
+grep -Fq 'Use a column-0 `refutes: <exact leading text of the row>` line; put any reason on the next line.' <<<"$OUT" || fail "ruling-refutes-trailing-prose form hint is missing: $OUT"
+assert_no_review 'ruling-refutes-trailing-prose'
+assert_no_slot 'ruling-refutes-trailing-prose'
+
+# Invalid refutes syntax keeps the same refusal as tkt-fix.
+setup_case ruling-bad-refutes
+write_ruling_comment 923 'refutes: P2'
+run_verify_rulings 923
+[ "$RC" = 2 ] || fail "ruling-bad-refutes exited $RC, want 2: $OUT"
+assert_first_verdict 'RULING-REFUSED reason=bad-refutes comment=923' 'ruling-bad-refutes'
+assert_no_review 'ruling-bad-refutes'
+assert_no_slot 'ruling-bad-refutes'
 
 # Resetting grant keys opens a fresh review cycle: the old comment is stale,
 # rounds 1 and 2 run again, and a new round-3 grant can be consumed.
@@ -644,6 +704,7 @@ set_state verdict_at '2026-11-15T00:00:00Z'
 run_verify_ruling 940
 [ "$RC" = 2 ] || fail "grant-cycle-reset old grant after reset exited $RC, want 2: $OUT"
 grep -Fq 'RULING-REFUSED reason=stale comment=940' <<<"$OUT" || fail "grant-cycle-reset old grant after reset was not stale: $OUT"
+grep -Fq 'post a new ruling comment with `grants: round 3`' <<<"$OUT" || fail "grant-cycle-reset stale refusal did not say a new ruling comment is needed: $OUT"
 assert_no_review 'grant-cycle-reset old grant after reset'
 [ "$(read_state round)" = 2 ] || fail "grant-cycle-reset old grant after reset changed round"
 write_ruling_comment 941 'grants: round 3' OWNER 1756 '2026-11-16T00:00:00Z'
@@ -713,6 +774,18 @@ set_state round 2
 write_ruling_comment 915 $'grants: round 3\ngrants: round 3'
 expect_grant_refused multiple-lines bad-grant 915
 grep -Fq 'state round=2; this grant must read `grants: round 3` on a single line' <<<"$OUT" || fail "grant-multiple-lines hint is missing: $OUT"
+
+setup_case grant-multiple-comments
+set_state round 2
+write_ruling_comment 950 'grants: round 3'
+write_ruling_comment 951 'grants: round 3'
+run_verify_rulings 950 951
+[ "$RC" = 2 ] || fail "multiple grant rulings exited $RC, want 2: $OUT"
+grep -Fq 'RULING-REFUSED reason=bad-grant comment=950' <<<"$OUT" || fail "multiple grant rulings did not refuse bad-grant: $OUT"
+grep -Fq 'only one grants-bearing ruling per run' <<<"$OUT" || fail "multiple grant rulings did not explain the one-grant limit: $OUT"
+assert_no_review 'multiple grant rulings'
+assert_no_grant 'multiple grant rulings'
+[ "$(read_state round)" = 2 ] || fail "multiple grant rulings changed round"
 fi
 
 # A grant can be attached to the PR, and CRLF line endings are accepted.

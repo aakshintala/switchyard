@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # tkt-verify: review an already-pushed head without starting a fix job.
-# Usage: tkt-verify <state> --findings <file> [--verify-model <id>] [--ruling <comment id>]
+# Usage: tkt-verify <state> --findings <file> [--verify-model <id>] [--ruling <comment id>]...
 set -euo pipefail
 
 usage() {
-  echo "usage: tkt-verify <state> --findings <file> [--verify-model <id>] [--ruling <comment id>]" >&2
+  echo "usage: tkt-verify <state> --findings <file> [--verify-model <id>] [--ruling <comment id>]..." >&2
   exit 2
 }
 
 [ $# -ge 3 ] || usage
 state="$1"; shift
-findings=""; verifymodel=""; ruling_id=""
+findings=""; verifymodel=""; ruling_requested=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --findings) [ $# -ge 2 ] && [ -n "$2" ] || usage; findings="$2"; shift 2 ;;
     --verify-model) [ $# -ge 2 ] && [ -n "$2" ] || usage; verifymodel="$2"; shift 2 ;;
-    --ruling) [ $# -ge 2 ] && [ -n "$2" ] && [ -z "$ruling_id" ] || usage; ruling_id="$2"; shift 2 ;;
+    --ruling) [ $# -ge 2 ] && [ -n "$2" ] || usage; ruling_requested+=("$2"); shift 2 ;;
     *) usage ;;
   esac
 done
@@ -50,6 +50,10 @@ review_verdict_lib="$script_dir/lib/review-verdict.sh"
 if [ ! -r "$review_verdict_lib" ]; then echo "tkt-verify: cannot read shared lib: $review_verdict_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$review_verdict_lib"
+ruling_refutes_lib="$script_dir/lib/ruling-refutes.sh"
+if [ ! -r "$ruling_refutes_lib" ]; then echo "tkt-verify: cannot read shared lib: $ruling_refutes_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$ruling_refutes_lib"
 reviewpr="$bin_dir/review-pr"
 t() { "$tkt_state" "$state" "$@"; }
 
@@ -108,23 +112,93 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-verify.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 round_grant_limited=0
 if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ]; then round_grant_limited=1; fi
+ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_jsons=(); ruling_grant_ids=()
+ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
 grant_comment_count=0
 grant_accepted=0
+grant_id=""
 grant_url=""
-if [ -n "$ruling_id" ]; then
-  grant_comment_count=1
-  ruling_json="$tmp/ruling-comment.json"
-  if ! check_round_grant "$ruling_json" "$ruling_id" "$round" t; then
+ruling_history_source="$(t get findings_history 2>/dev/null || true)"
+for ruling_id in "${ruling_requested[@]+${ruling_requested[@]}}"; do
+  case "$ruling_id" in
+    ''|*[!0-9]*) emit "RULING-REFUSED reason=bad-id comment=$ruling_id" 2 ;;
+  esac
+  ruling_json="$tmp/ruling-$ruling_id.json"
+  ruling_error="$tmp/ruling-$ruling_id.err"
+  ruling_comment_hint=""
+  if ! fetch_issue_comment "$ruling_id" "$ruling_json" "$ruling_error" "$pr"; then
     if [ -n "$ruling_comment_hint" ]; then
       emit "RULING-REFUSED reason=$ruling_comment_failure comment=$ruling_id" 2 "$ruling_comment_hint"
     fi
     emit "RULING-REFUSED reason=$ruling_comment_failure comment=$ruling_id" 2
   fi
+  ruling_body="$tmp/ruling-$ruling_id.md"
+  jq -r '.body' "$ruling_json" >"$ruling_body" || emit "RULING-REFUSED reason=fetch comment=$ruling_id" 2
+  ruling_url="$(jq -r '.html_url // ""' "$ruling_json")"
+  ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body"); ruling_jsons+=("$ruling_json")
+  ruling_refutes_file="$tmp/ruling-$ruling_id.refutes"
+  ruling_grants_file="$tmp/ruling-$ruling_id.grants"
+  grep '^refutes:' "$ruling_body" >"$ruling_refutes_file" || true
+  grep '^grants:' "$ruling_body" >"$ruling_grants_file" || true
+  if [ -s "$ruling_refutes_file" ]; then
+    if ! jq -e --arg repo "$repo" --arg issue "$issue" '
+      (.issue_url | endswith("/repos/" + $repo + "/issues/" + $issue))
+    ' "$ruling_json" >/dev/null 2>&1; then
+      emit "RULING-REFUSED reason=issue comment=$ruling_id" 2
+    fi
+  fi
+  if [ -s "$ruling_grants_file" ]; then
+    ruling_grant_ids+=("$ruling_id")
+    grant_comment_count=$((grant_comment_count + 1))
+  elif [ ! -s "$ruling_refutes_file" ]; then
+    emit "RULING-REFUSED reason=no-refutes comment=$ruling_id" 2
+  fi
+done
+for ruling_index in "${!ruling_ids[@]}"; do
+  if ! ruling_refutes_validate_file \
+    "${ruling_ids[$ruling_index]}" \
+    "${ruling_urls[$ruling_index]}" \
+    "$tmp/ruling-${ruling_ids[$ruling_index]}.refutes" \
+    "$ruling_history_source" "$findings"; then
+    if [ "$ruling_refutes_failure" = no-match ]; then
+      emit "VERIFY-FAIL reason=ruling-drift" 1 \
+        "comment=$ruling_refutes_failure_id" \
+        "refutes=$ruling_refutes_failure_prefix" \
+        "$ruling_refutes_hint"
+    fi
+    emit "RULING-REFUSED reason=$ruling_refutes_failure comment=$ruling_refutes_failure_id" 2
+  fi
+done
+for grant_id in "${ruling_grant_ids[@]+${ruling_grant_ids[@]}}"; do
+  ruling_json="$tmp/ruling-$grant_id.json"
+  if ! check_round_grant "$ruling_json" "$grant_id" "$round" t; then
+    if [ -n "$ruling_comment_hint" ]; then
+      emit "RULING-REFUSED reason=$ruling_comment_failure comment=$grant_id" 2 "$ruling_comment_hint"
+    fi
+    emit "RULING-REFUSED reason=$ruling_comment_failure comment=$grant_id" 2
+  fi
   grant_accepted=1
-  record_round_grant "$ruling_id" "$grant_url" "$grant_round" t
+done
+if [ "$grant_accepted" -eq 1 ]; then
+  record_round_grant "$grant_id" "$grant_url" "$grant_round" t
 fi
 if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ] && [ "$grant_accepted" -ne 1 ]; then
   emit "ROUND-LIMIT" 1 "round=$round; otherwise post an owner ruling with a column-0 grants: round $((round + 1)) line and retry with --ruling <comment id>; send the open findings to triage"
+fi
+verify_findings="$findings"
+if [ "${#ruling_refute_ids[@]}" -gt 0 ]; then
+  verify_findings="$tmp/findings.md"
+  cp "$findings" "$verify_findings" || emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot copy findings for recorded rulings"
+  verify_findings_with_rulings="$tmp/findings-with-rulings.md"
+  if ! ruling_refutes_mark_rows "$verify_findings" "$verify_findings_with_rulings"; then
+    emit "VERIFY-FAIL reason=ruling-drift" 1 \
+      "comment=$ruling_refutes_drift_id" \
+      "refutes=$ruling_refutes_drift_prefix"
+  fi
+  mv "$verify_findings_with_rulings" "$verify_findings" || emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot prepare findings for recorded rulings"
+  for ruling_index in "${!ruling_refute_ids[@]}"; do
+    t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
+  done
 fi
 fixslot="$(t get fixslot 2>/dev/null || printf '0')"
 case "$fixslot" in ''|*[!0-9]*) fixslot=0 ;; esac
@@ -137,9 +211,10 @@ elif [ "$round" -gt "$fixslot" ]; then knum=$((round + 1)); else knum=$((fixslot
 if [ -n "$issue" ]; then set_namebase "$repo" "$issue"; else namebase="${repo##*/}"; fi
 part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
 history_file="$(history_path "$knum")"
-vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --model "$verifymodel" --verify "$findings" --since "$reviewed")
+vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --model "$verifymodel" --verify "$verify_findings" --since "$reviewed")
 verify_ruling="$(t get ruling.verify 2>/dev/null || true)"
 if [ -n "$verify_ruling" ]; then vargs+=(--model-ruling "$verify_ruling"); fi
+for ruling_index in "${!ruling_ids[@]}"; do vargs+=(--context "${ruling_bodies[$ruling_index]}"); done
 
 advance_round() {
   if [ "$has_p_lines" -eq 1 ]; then
