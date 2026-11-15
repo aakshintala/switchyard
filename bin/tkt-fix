@@ -673,6 +673,14 @@ recover_unpushed="${recover_unpushed:-0}"
 if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && job="$(t get "job.$slot" 2>/dev/null || true)" && [ -n "$job" ]; then emit "RECOVER" 3 "job=$job" "slot=$slot"; fi
 [ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
 [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
+# A fresh dispatch needs a finding to fix (#1879); nothing before this point
+# writes fix_round.*, job.* or fixslot. Rows match the way tkt-verify and
+# the round-findings checks read them: column-0 `P[123] `.
+if [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ "$recover_unpushed" -ne 1 ]; then
+  grep -qE '^P[123] ' "$findings" || emit "FINDINGS-EMPTY file=$findings" 2 \
+    "no column-0 P1-P3 finding rows in $findings" \
+    "for a verify-only run, use: tkt-verify $state --findings $findings"
+fi
 
 pass() {
   tool="$1"; output="$2"; ec="$3"; stderr_file="${4:-}"
