@@ -665,22 +665,36 @@ grep -Fq 'refutes: P1 src/main.sh:1' "$T/context-ruling-921.md" || fail "separat
 [ "$(read_state grant.3)" = '920 https://github.com/switchyard/switchyard/issues/1756#issuecomment-920' ] || fail "separate refutes grant was not recorded"
 grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-921 refutes P1 src/main.sh:1' "${S%.state}.journal" || fail "separate refutes ruling was not journalled"
 
-# A valid-shaped refutes prefix with no finding is rejected as drift before review.
-setup_case ruling-refutes-drift
+# A valid-shaped refutes prefix with no finding is refused before review.
+setup_case ruling-refutes-no-match
 write_ruling_comment 922 'refutes: P2 absent.sh:9'
 run_verify_rulings 922
-[ "$RC" = 1 ] || fail "ruling-refutes-drift exited $RC, want 1: $OUT"
-assert_first_verdict 'VERIFY-FAIL reason=ruling-drift' 'ruling-refutes-drift'
-assert_no_review 'ruling-refutes-drift'
-assert_no_slot 'ruling-refutes-drift'
-! grep -q '^refuted:' "$F" || fail "ruling-refutes-drift modified the caller's findings file"
+[ "$RC" = 2 ] || fail "ruling-refutes-no-match exited $RC, want 2: $OUT"
+assert_first_verdict 'RULING-REFUSED reason=no-match comment=922' 'ruling-refutes-no-match'
+grep -Fq 'Use a column-0 `refutes: <exact leading text of the row>` line; put any reason on the next line.' <<<"$OUT" || fail "ruling-refutes-no-match form hint is missing: $OUT"
+assert_no_review 'ruling-refutes-no-match'
+assert_no_slot 'ruling-refutes-no-match'
+! grep -q '^refuted:' "$F" || fail "ruling-refutes-no-match modified the caller's findings file"
 
-# Trailing reason prose is not part of the full-text row prefix and refuses before review.
+# An open history-only row is not valid evidence for verify, which marks only --findings.
+setup_case ruling-refutes-history-only
+write_ruling_comment 925 'refutes: P2 history-only.sh:9'
+history_file="$CASE_DIR/findings-history.md"
+printf '# Findings history\nP2 history-only.sh:9 — old finding [tkt-history: raised=review round 0; status=open; unverified=none]\n' >"$history_file"
+set_state findings_history "$history_file"
+run_verify_rulings 925
+[ "$RC" = 2 ] || fail "ruling-refutes-history-only exited $RC, want 2: $OUT"
+assert_first_verdict 'RULING-REFUSED reason=no-match comment=925' 'ruling-refutes-history-only'
+assert_no_review 'ruling-refutes-history-only'
+assert_no_slot 'ruling-refutes-history-only'
+! grep -q '^refuted:' "$F" || fail "ruling-refutes-history-only modified the caller's findings file"
+
+# Trailing reason prose is not part of a row prefix, so validation refuses before review.
 setup_case ruling-refutes-trailing-prose
 write_ruling_comment 924 'refutes: P1 src/main.sh:1 — initial finding because it is safe'
 run_verify_ruling 924
-[ "$RC" = 1 ] || fail "ruling-refutes-trailing-prose exited $RC, want 1: $OUT"
-assert_first_verdict 'VERIFY-FAIL reason=ruling-drift' 'ruling-refutes-trailing-prose'
+[ "$RC" = 2 ] || fail "ruling-refutes-trailing-prose exited $RC, want 2: $OUT"
+assert_first_verdict 'RULING-REFUSED reason=no-match comment=924' 'ruling-refutes-trailing-prose'
 grep -Fq 'Use a column-0 `refutes: <exact leading text of the row>` line; put any reason on the next line.' <<<"$OUT" || fail "ruling-refutes-trailing-prose form hint is missing: $OUT"
 assert_no_review 'ruling-refutes-trailing-prose'
 assert_no_slot 'ruling-refutes-trailing-prose'
