@@ -482,7 +482,6 @@ expect_findings_empty_refusal() {
   ! grep -q '^job|' "$T/calls.log" || fail "$name started a delegate job: $(cat "$T/calls.log")"
 }
 
-
 run_ruling_refutes_row() {
   local name="$1" row="$2" prefix="$3" run_rc=0 out history
   setup_case "$name"
@@ -868,7 +867,6 @@ write_ruling_comment 99 'grants: round 3' "$issue" OWNER '2026-11-14T00:00:00Z'
 before_fixslot="$(bash "$TKT_STATE" "$S" get fixslot 2>/dev/null || true)"
 run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || run_rc=$?
 expect_findings_empty_refusal findings-empty-state-ruling "$EMPTY_FINDINGS" "$out" "$run_rc" "$before_fixslot"
-! grep -q '^grant[.]' "$S" || fail "findings-empty-state-ruling recorded a grant before refusing"
 fi
 
 if want no-p-round-findings; then

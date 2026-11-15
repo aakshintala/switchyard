@@ -305,26 +305,8 @@ ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_notes=(); ruling_jsons=(
 ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
 ruling_grant_ids=()
 grant_comment_count=0; grant_accepted=0; grant_id=""; grant_url=""; grant_round=""
-empty_findings_dispatch=0; deferred_grant=0; deferred_rulings=0; deferred_identity=0
-pr_identity_resolved=0; deferred_head=""; deferred_fixopen=""
-if [ -z "$collect_verify_job" ]; then
-  if [ -z "$findings" ]; then
-    findings="$(t get findings 2>/dev/null)" || {
-      echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2
-      exit 2
-    }
-  fi
-  [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
-  findings_has_rows=0
-  while IFS= read -r finding_row || [ -n "$finding_row" ]; do
-    normalized_finding="$(normalize_finding_line "$finding_row")"
-    normalized_base="$(normalize_finding_line "$(findings_row_base "$finding_row")")"
-    if [[ "$normalized_finding" =~ ^P[0123]\  ]] || [[ "$normalized_base" =~ ^P[0123]\  ]]; then
-      findings_has_rows=1
-      break
-    fi
-  done <"$findings"
-  if [ "$findings_has_rows" -eq 0 ] && [ -z "$resume" ]; then empty_findings_dispatch=1; fi
+if [ "${#ruling_requested[@]}" -gt 0 ] && [ -z "$findings" ]; then
+  findings="$(t get findings 2>/dev/null || true)"
 fi
 
 emit() {
@@ -335,28 +317,6 @@ emit() {
     [ $# -eq 0 ] || printf '%s\n' "$@" | head -n 40
   } >"$logpath"
   cat "$logpath"; t journal "tkt-fix $verdict"; exit "$ec"
-}
-
-flush_deferred_state() {
-  [ "$empty_findings_dispatch" -eq 1 ] || return 0
-  if [ "$deferred_grant" -eq 1 ]; then
-    record_round_grant "$grant_id" "$grant_url" "$grant_round" t
-    ruling_notes+=("Recorded ruling: $grant_url" "add this line to the PR body")
-    deferred_grant=0
-  fi
-  if [ "$deferred_rulings" -eq 1 ]; then
-    for ruling_index in "${!ruling_refute_ids[@]}"; do
-      t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
-    done
-    deferred_rulings=0
-  fi
-  if [ "$pr_identity_resolved" -eq 1 ] && [ "$deferred_identity" -eq 1 ]; then
-    [ -n "$(t get pr 2>/dev/null || true)" ] || t set pr "$pr"
-    [ -n "$(t get head 2>/dev/null || true)" ] || t set head "$stored"
-    deferred_identity=0
-  fi
-  if [ -n "$deferred_head" ]; then t set head "$deferred_head"; deferred_head=""; fi
-  if [ -n "$deferred_fixopen" ]; then t set fixopen "$deferred_fixopen"; deferred_fixopen=""; fi
 }
 
 collect_verify_refuse() {
@@ -547,26 +507,19 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
     done <"$ruling_refutes_file"
   done
   if [ "$grant_accepted" -eq 1 ]; then
-    if [ "$empty_findings_dispatch" -eq 1 ]; then deferred_grant=1
-    else
-      record_round_grant "$grant_id" "$grant_url" "$grant_round" t
-      ruling_notes+=("Recorded ruling: $grant_url" "add this line to the PR body")
-    fi
+    record_round_grant "$grant_id" "$grant_url" "$grant_round" t
     limited=0
+    ruling_notes+=("Recorded ruling: $grant_url" "add this line to the PR body")
   fi
-  if [ "$empty_findings_dispatch" -eq 1 ]; then deferred_rulings=1
-  else
-    for ruling_index in "${!ruling_refute_ids[@]}"; do
-      t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
-    done
-  fi
+  for ruling_index in "${!ruling_refute_ids[@]}"; do
+    t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
+  done
   for ruling_index in "${!ruling_ids[@]}"; do
     ruling_notes+=("ruling: ${ruling_urls[$ruling_index]}")
   done
 fi
 
 round_limit() {
-  flush_deferred_state
   emit "ROUND-LIMIT round=$round" 1 "resume a job with: tkt-fix $state --verify --resume <job id> --prompt <file> (works with no open slot); otherwise post an owner ruling with grants: round $((round + 1)) and pass --ruling <comment id>, or send the open findings to triage"
 }
 # Two rounds have run: only a round-2 closed-slot recovery may pass without --resume.
@@ -589,12 +542,10 @@ pr="$(t get pr 2>/dev/null || true)"
 stored="$(t get head 2>/dev/null || true)"
 if [ -z "$pr" ] || [ -z "$stored" ]; then
   if ! pr_list="$(gh pr list --head "$branch" --repo "$repo" --state open --json number,headRefOid 2>/dev/null)"; then
-    flush_deferred_state
     echo "tkt-fix: PRECONDITION missing=pr: cannot list PRs for branch $branch" >&2
     exit 2
   fi
   if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$pr_list"; then
-    flush_deferred_state
     echo "tkt-fix: PRECONDITION missing=pr: cannot list PRs for branch $branch" >&2
     exit 2
   fi
@@ -604,7 +555,6 @@ if [ -z "$pr" ] || [ -z "$stored" ]; then
     entry="$(jq -c '.[0] // empty' <<<"$pr_list" 2>/dev/null || true)"
   fi
   if [ -z "$entry" ]; then
-    flush_deferred_state
     echo "tkt-fix: PRECONDITION missing=pr: no open PR for branch $branch in $repo" >&2
     pre_pr_resume_hint
     exit 2
@@ -612,7 +562,6 @@ if [ -z "$pr" ] || [ -z "$stored" ]; then
   if [ -z "$pr" ]; then
     pr="$(jq -r 'if .number == null then "" else (.number | tostring) end' <<<"$entry" 2>/dev/null || true)"
     if [ -z "$pr" ]; then
-      flush_deferred_state
       echo "tkt-fix: PRECONDITION missing=pr: no open PR for branch $branch in $repo" >&2
       pre_pr_resume_hint
       exit 2
@@ -621,24 +570,17 @@ if [ -z "$pr" ] || [ -z "$stored" ]; then
   if [ -z "$stored" ]; then
     stored="$(jq -r 'if .headRefOid == null then "" else (.headRefOid | tostring) end' <<<"$entry" 2>/dev/null || true)"
     if [ -z "$stored" ]; then
-      flush_deferred_state
       echo "tkt-fix: PRECONDITION missing=head: open PR for branch $branch has no headRefOid" >&2
       exit 2
     fi
   fi
-  if [ -z "$(t get pr 2>/dev/null || true)" ] || [ -z "$(t get head 2>/dev/null || true)" ]; then
-    if [ "$empty_findings_dispatch" -eq 1 ]; then deferred_identity=1
-    else
-      [ -n "$(t get pr 2>/dev/null || true)" ] || t set pr "$pr"
-      [ -n "$(t get head 2>/dev/null || true)" ] || t set head "$stored"
-    fi
-  fi
+  [ -n "$(t get pr 2>/dev/null || true)" ] || t set pr "$pr"
+  [ -n "$(t get head 2>/dev/null || true)" ] || t set head "$stored"
 fi
-pr_identity_resolved=1
 # Entry: state head, PR head and worktree HEAD must agree exactly.
-if [ -n "$stored" ]; then
-  prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)" || { flush_deferred_state; echo "tkt-fix: cannot read PR head" >&2; exit 2; }
-  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { flush_deferred_state; echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
+if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
+  prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)" || { echo "tkt-fix: cannot read PR head" >&2; exit 2; }
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
   if [ "$stored" = "$prhead" ] && [ "$prhead" = "$actual" ]; then :; else
     # Drift the open fix job's own push caused is accepted: the PR head
     # descends from the state head and the worktree matches the PR head,
@@ -653,8 +595,8 @@ if [ -n "$stored" ]; then
       if fjob="$(t get "job.fix$openk" 2>/dev/null || true)" && [ -n "$fjob" ] \
         && git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null \
         && [ "$actual" = "$prhead" ] && [ "$clean" -eq 1 ]; then
-        if [ "$empty_findings_dispatch" -eq 1 ]; then deferred_head="$prhead"; deferred_fixopen=0
-        else t set head "$prhead"; t set fixopen 0; fi
+        t set head "$prhead"
+        t set fixopen 0
         keep=1
       elif [ -n "$fjob" ] && [ "$prhead" != "$actual" ] \
         && [ "$clean" -eq 1 ] \
@@ -669,8 +611,7 @@ if [ -n "$stored" ]; then
           # the same way a normal job end does. fixopen stays on the open
           # slot: its commits are still unpushed, and the dispatch below
           # re-marks it to the slot that runs next.
-          if [ "$empty_findings_dispatch" -eq 1 ]; then deferred_head="$actual"
-          else t set head "$actual"; fi
+          t set head "$actual"
           echo "tkt-fix: worktree is ahead of the PR head by open fix job fix$openk's unpushed commits" >&2
           keep=1
         fi
@@ -723,26 +664,26 @@ if [ -n "$stored" ]; then
         && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
         route="after an unpushed main merge, run: git -C $worktree push origin $branch, then: tkt-state $state set head $actual"
       fi
-      flush_deferred_state
       emit "DRIFT" 3 "state head=$stored" "PR head=$prhead" "worktree HEAD=$actual" ${route:+"$route"}
     fi
   fi
 fi
 if [ "$limited" -eq 1 ] && [ "${recover_unpushed:-0}" -ne 1 ]; then round_limit; fi
 recover_unpushed="${recover_unpushed:-0}"
-if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && job="$(t get "job.$slot" 2>/dev/null || true)" && [ -n "$job" ]; then
-  flush_deferred_state
-  emit "RECOVER" 3 "job=$job" "slot=$slot"
-fi
-if [ "$empty_findings_dispatch" -eq 1 ] && [ "$recover_unpushed" -ne 1 ]; then
-  verify_only="tkt-verify $(printf '%q' "$state") --findings $(printf '%q' "$findings")"
-  emit "FINDINGS-EMPTY file=$findings" 2 \
-    "no bare P0-P3 finding rows in $findings" \
-    "for a verify-only run, use: $verify_only"
-fi
-flush_deferred_state
-if [ -z "$findings" ]; then findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }; fi
+if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && job="$(t get "job.$slot" 2>/dev/null || true)" && [ -n "$job" ]; then emit "RECOVER" 3 "job=$job" "slot=$slot"; fi
+[ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
 [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
+# A fresh dispatch needs a finding to fix (#1879); nothing before this point
+# writes fix_round.*, job.* or fixslot.
+if [ -z "$resume" ] && [ "$recover_unpushed" -ne 1 ]; then
+  findings_has_rows=0
+  while IFS= read -r finding_row || [ -n "$finding_row" ]; do
+    if [[ "$(normalize_finding_line "$finding_row")" =~ ^P[0123]\  ]]; then findings_has_rows=1; break; fi
+  done <"$findings"
+  [ "$findings_has_rows" -eq 1 ] || emit "FINDINGS-EMPTY file=$findings" 2 \
+    "no bare P0-P3 finding rows in $findings" \
+    "for a verify-only run, use: tkt-verify $state --findings $findings"
+fi
 
 pass() {
   tool="$1"; output="$2"; ec="$3"; stderr_file="${4:-}"
