@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_WAIT_TIMEOUT: f64 = 120_000.0;
 const HEARTBEAT_MS: u64 = 30_000;
-/// Grace after a wall-budget SIGTERM before the watchdog escalates to SIGKILL.
+/// Grace after a watchdog SIGTERM before escalation to SIGKILL.
 const KILL_GRACE_MS: u64 = 5_000;
 /// Backoff before each retry of a transient provider error; its length caps the retries.
 const RETRY_DELAYS_MS: [u64; 2] = [10_000, 30_000];
@@ -75,8 +75,8 @@ struct JobState {
     progress: ProgressSnapshotRaw,
     last_event: Instant,
     termination: Option<JobStatus>,
-    /// When the wall budget killed the child; arms the SIGKILL escalation and
-    /// marks the wall wording. Set only on wall expiry; cleared by a user cancel.
+    /// When the watchdog sent SIGTERM; arms the SIGKILL escalation and is
+    /// cleared by a user cancel.
     kill_at: Option<Instant>,
     /// The idle duration when the watchdog decided to stall-kill the job.
     idle_at_kill: Option<Duration>,
@@ -165,25 +165,36 @@ fn child_process_check_interval(window: Duration) -> Duration {
 }
 
 /// Check for live commands in the backend's process tree or isolated process group.
-fn process_group_has_live_child(group: libc::pid_t) -> bool {
-    let Ok(output) = Command::new("ps")
+fn process_group_ps_snapshot() -> Option<String> {
+    let output = Command::new("ps")
         .args([
             "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=",
         ])
         .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    process_group_has_live_child_in_ps(&String::from_utf8_lossy(&output.stdout), group)
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn process_group_has_live_child(group: libc::pid_t) -> bool {
+    process_group_ps_snapshot().is_some_and(|ps| process_group_has_live_child_in_ps(&ps, group))
+}
+
+fn process_group_live_pids(group: libc::pid_t) -> Vec<libc::pid_t> {
+    process_group_ps_snapshot()
+        .map_or_else(Vec::new, |ps| process_group_live_pids_in_ps(&ps, group))
 }
 
 /// Parse one `ps` snapshot and find live descendants or reparented members of the group.
 fn process_group_has_live_child_in_ps(ps: &str, group: libc::pid_t) -> bool {
+    !process_group_live_pids_in_ps(ps, group).is_empty()
+}
+
+fn process_group_live_pids_in_ps(ps: &str, group: libc::pid_t) -> Vec<libc::pid_t> {
     let mut children = HashMap::<libc::pid_t, Vec<(libc::pid_t, &str)>>::new();
-    let mut same_group_has_live_child = false;
+    let mut live_pids = HashSet::new();
     for line in ps.lines() {
         let mut fields = line.split_whitespace();
         let Some((pid, ppid, pgid, state)) = fields.next().and_then(|pid| {
@@ -197,7 +208,7 @@ fn process_group_has_live_child_in_ps(ps: &str, group: libc::pid_t) -> bool {
             continue;
         };
         if pgid == group && pid != group && !is_zombie(state) {
-            same_group_has_live_child = true;
+            live_pids.insert(pid);
         }
         children.entry(ppid).or_default().push((pid, state));
     }
@@ -210,14 +221,78 @@ fn process_group_has_live_child_in_ps(ps: &str, group: libc::pid_t) -> bool {
         };
         for &(pid, state) in descendants {
             if pid != group && !is_zombie(state) {
-                return true;
+                live_pids.insert(pid);
             }
             if visited.insert(pid) {
                 pending.push(pid);
             }
         }
     }
-    same_group_has_live_child
+
+    let mut live_pids: Vec<_> = live_pids.into_iter().collect();
+    live_pids.sort_unstable();
+    live_pids
+}
+
+fn wait_for_terminated_process_group(
+    group: libc::pid_t,
+    term_at: Option<Instant>,
+    kill_grace: Duration,
+) -> Vec<libc::pid_t> {
+    let escalation_at = term_at.unwrap_or_else(Instant::now) + kill_grace;
+    loop {
+        let live_pids = process_group_live_pids(group);
+        if live_pids.is_empty() {
+            return live_pids;
+        }
+        let now = Instant::now();
+        if now >= escalation_at {
+            break;
+        }
+        std::thread::sleep(
+            escalation_at
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(25)),
+        );
+    }
+
+    // The watchdog only escalates while the backend is Running. If its leader
+    // exited on SIGTERM, signal the still-live group directly: backend kill
+    // closures stop signalling once they reap the leader to avoid a recycled pid.
+    // A live member keeps this process-group ID allocated until the signal lands.
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
+    }
+    let kill_deadline = Instant::now() + kill_grace;
+    loop {
+        let live_pids = process_group_live_pids(group);
+        if live_pids.is_empty() {
+            return live_pids;
+        }
+        let now = Instant::now();
+        if now >= kill_deadline {
+            return live_pids;
+        }
+        std::thread::sleep(
+            kill_deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(25)),
+        );
+    }
+}
+
+fn add_live_process_group_concern(out: &mut RunOutput, pids: &[libc::pid_t]) {
+    if pids.is_empty() {
+        return;
+    }
+    let pids = pids
+        .iter()
+        .map(libc::pid_t::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.concerns.get_or_insert_with(Vec::new).push(format!(
+        "Process group still has live pids after SIGKILL: {pids}"
+    ));
 }
 
 fn is_zombie(state: &str) -> bool {
@@ -245,7 +320,7 @@ fn idle_window_ms(job: &JobState, deps: &JobDeps) -> Option<f64> {
 
 fn describe_stall_progress(job: &JobState, deps: &JobDeps) -> String {
     let running = job.started.elapsed();
-    let mut parts = if job.kill_at.is_some() {
+    let mut parts = if job.termination == Some(JobStatus::Cancelled) && job.kill_at.is_some() {
         vec![format!(
             "Cancelled: wall budget of {} ms exceeded after {}s.",
             job.spec.wall_ms.unwrap_or(0.0),
@@ -502,8 +577,8 @@ impl JobHandle {
         } else {
             JobStatus::Stalled
         });
+        job.kill_at = Some(now);
         if wall {
-            job.kill_at = Some(now);
             job.finalize_abort.store(true, Ordering::SeqCst);
         } else {
             job.idle_at_kill = Some(now.saturating_duration_since(job.last_event));
@@ -549,8 +624,8 @@ impl JobHandle {
                 }
             }
             // A child that ignores SIGTERM gets one grace period, then SIGKILL.
-            // Wall-only: an idle stall keeps its single SIGTERM, and the gate
-            // has its own SIGKILL grace, so only a Running job escalates.
+            // Escalation stays limited to Running jobs; finalization waits for
+            // surviving group members if the backend leader exits first.
             if !job.escalated
                 && let Some(sent) = job.kill_at
             {
@@ -613,6 +688,7 @@ impl JobHandle {
                         wake_at = wake_at.min(next_child_check);
                     } else if now >= due {
                         self.terminate_watchdog_kill(job, false, now);
+                        wake_at = wake_at.min(now + kill_grace);
                     } else {
                         wake_at = wake_at.min(due);
                     }
@@ -688,23 +764,68 @@ impl JobHandle {
                 permission_denials: Vec::new(),
                 retries: Vec::new(),
             });
-        let mut st = self.lock();
         let mut out = out;
         out.retries = retries;
-        // Re-read: a wall expiry or cancel may have landed while the gate ran,
-        // after the snapshot above. Expiry after `retire` changes nothing.
-        if let Some((_, job)) = st.job.as_ref()
-            && let Some(term) = job.termination
-        {
-            out.text = describe_stall_progress(job, &self.deps);
-            out.status = match term {
-                JobStatus::Cancelled => RunStatus::Cancelled,
-                JobStatus::Stalled => RunStatus::Stalled,
-                _ => out.status,
+        let mut termination_state = {
+            let st = self.lock();
+            let Some((id, job)) = st.job.as_ref() else {
+                return;
             };
+            if id != job_id {
+                return;
+            }
+            (job.termination, job.process_group, job.kill_at)
+        };
+        loop {
+            let lingering_pids = if let (Some(_), Some(group), kill_at) = termination_state {
+                wait_for_terminated_process_group(
+                    group,
+                    kill_at,
+                    Duration::from_millis(self.deps.kill_grace_ms),
+                )
+            } else {
+                Vec::new()
+            };
+            let mut st = self.lock();
+            let Some((id, job)) = st.job.as_ref() else {
+                return;
+            };
+            if id != job_id {
+                return;
+            }
+            let current_state = (job.termination, job.process_group, job.kill_at);
+            if current_state != termination_state {
+                termination_state = current_state;
+                drop(st);
+                continue;
+            }
+            let mut lingering_pids = lingering_pids;
+            if let (Some(_), Some(group), _) = current_state {
+                let current_live_pids = process_group_live_pids(group);
+                if current_live_pids.is_empty() {
+                    lingering_pids.clear();
+                } else if lingering_pids.is_empty() {
+                    drop(st);
+                    continue;
+                } else {
+                    lingering_pids = current_live_pids;
+                }
+            }
+            add_live_process_group_concern(&mut out, &lingering_pids);
+            if let Some((_, job)) = st.job.as_ref()
+                && let Some(term) = job.termination
+            {
+                out.text = describe_stall_progress(job, &self.deps);
+                out.status = match term {
+                    JobStatus::Cancelled => RunStatus::Cancelled,
+                    JobStatus::Stalled => RunStatus::Stalled,
+                    _ => out.status,
+                };
+            }
+            self.retire(&mut st, job_id, out);
+            self.cv.notify_all();
+            return;
         }
-        self.retire(&mut st, job_id, out);
-        self.cv.notify_all();
     }
 
     fn retire(&self, st: &mut Inner, job_id: &str, out: RunOutput) {
