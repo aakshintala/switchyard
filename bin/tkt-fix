@@ -703,7 +703,7 @@ fi
 # A fresh dispatch needs a finding to fix (#1879); nothing before this point
 # writes fix_round.*, job.* or fixslot. Rows match the way tkt-verify and
 # the round-findings checks read them: column-0 `P[123] `.
-if [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ "$recover_unpushed" -ne 1 ]; then
+if [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ -z "$collect_fix_job" ] && [ "$recover_unpushed" -ne 1 ]; then
   grep -qE '^P[123] ' "$findings" || emit "FINDINGS-EMPTY file=$findings" 2 \
     "no column-0 P1-P3 finding rows in $findings" \
     "for a verify-only run, use: tkt-verify $state --findings $findings"

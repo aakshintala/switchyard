@@ -2221,6 +2221,18 @@ grep -Fq 'P1 heading from review' "$T/verify-input-1.md" || fail "collect-fix ve
 grep -Fq 'refuted: recorded ruling' "$T/verify-input-1.md" || fail "collect-fix did not apply the refutes ruling to the recorded finding"
 ! grep -q 'tkt-fix gate PASS ' "${S%.state}.journal" || fail "collect-fix credited a report-only gate PASS without a passing record gateResult"
 
+# An empty recorded findings file is valid input when recollecting a dispatch.
+setup_case collect-fix-empty-findings
+run_wrapper_death empty-findings
+empty_round_findings="$CDIR/empty-round-findings.md"
+printf 'no open findings\n' >"$empty_round_findings"
+bash "$TKT_STATE" "$S" set fix_round.1.findings "$empty_round_findings" >/dev/null
+! grep -qE '^P[123] ' "$empty_round_findings" || fail "empty collect fixture has finding rows"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --no-verify --collect-fix j1 2>"$T/stderr")" || fail "collect with empty recorded findings exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix PUSHED unverified' || fail "collect with empty recorded findings did not finish without verification: $out"
+! grep -q 'FINDINGS-EMPTY' <<<"$out" || fail "collect with empty recorded findings hit FINDINGS-EMPTY: $out"
+
 # Collect refuses missing or unreadable findings recorded for the dispatched slot.
 setup_case collect-fix-missing-findings
 run_wrapper_death missing-findings
