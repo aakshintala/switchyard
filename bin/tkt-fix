@@ -723,10 +723,13 @@ handle_verify_result() {
       write_findings "$verify_output"
       emit "FIX-OK reviewed=$verify_head" 0 "head=$verify_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
     FIX-INCOMPLETE*)
+      open="$(grep '^P[123] ' "$verify_output" | head -n 30 || true)"
+      [ -n "$open" ] || emit "VERIFY-FAIL reason=no-finding-rows" 1 \
+        "FIX-INCOMPLETE verify output contains no bare P1/P2/P3 finding rows; rerun verification with finding rows"
+      if ! grep -q '^P[12] ' "$verify_output"; then t set reviewed "$verify_head"; fi
       stamp_verdict_at t
       write_findings_history verified "$verify_output" "$verify_rounds"
       write_findings "$verify_output"
-      open="$(grep '^P[123] ' "$verify_output" | head -n 30 || true)"
       if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" ${notes[@]+"${notes[@]}"}; fi
       emit "FIX-INCOMPLETE round=$round" 1 "$open" ${notes[@]+"${notes[@]}"} ;;
     *) emit "VERIFY-FAIL" 1 "$(head -n 40 "$verify_output")" ;;

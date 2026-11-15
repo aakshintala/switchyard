@@ -990,12 +990,31 @@ ship; expect 0 "prose naming a fixed P2 does not block a P3-only verify"
 jq -e '.[0].body | contains("P3 bin/x:1 duplicated code remains")' "$ST/created-issues" >/dev/null \
   || fail "P3 from #1353-shaped verify is filed: [$(cat "$ST/created-issues")]"
 
+# Fixed and not-judged rows in the verify section do not count as open findings.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+verify_fixture="$(cat "$SCRIPT_DIR/fixtures/review-verdict-fixed-and-open-p3.md")"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" --arg verify "$verify_fixture" '[
+  {created_at:"2026-11-04T11:00:00Z",id:115,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n" + $verify)}
+]' >"$ST/review-comments"
+ship; expect 0 "fixed P2/P3 and not-judged P2 leave only open P3 findings"
+[ "$(jq 'length' "$ST/created-issues")" = 3 ] \
+  || fail "only the two open P3s and new P3 are filed: [$(cat "$ST/created-issues")]"
+for finding in 'wrapper placement' 'single-caller pass-through' 'stale test name'; do
+  jq -e --arg finding "$finding" '[.[].body] | join("\\n") | contains($finding)' "$ST/created-issues" >/dev/null \
+    || fail "open P3 [$finding] is filed: [$(cat "$ST/created-issues")]"
+done
+for closed in 'open_on' 'choose' 'value helper has its documentation restored' 'split this finding'; do
+  ! jq -e --arg closed "$closed" '[.[].body] | join("\\n") | contains($closed)' "$ST/created-issues" >/dev/null \
+    || fail "closed/not-judged row [$closed] is not filed: [$(cat "$ST/created-issues")]"
+done
+
 # Any P1 or P2 in readable findings keeps the refusal and files no issues.
 for priority in P1 P2; do
   setup
   REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
   jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" --arg priority "$priority" '[
-    {created_at:"2026-11-04T11:00:00Z",id:110,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE mixed findings\nP3 non-blocking finding\n" + $priority + " blocking finding")}
+    {created_at:"2026-11-04T11:00:00Z",id:110,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE mixed findings\n**Open**\nP3 non-blocking finding\n" + $priority + " blocking finding")}
   ]' >"$ST/review-comments"
   ship; expect 5 "FIX-INCOMPLETE with $priority still refuses"; expect_refused REVIEW; no_merge "FIX-INCOMPLETE with $priority"
   ! grep -q '^gh issue \(list\|create\)' "$ST/gh.log" || fail "$priority refusal files no issue"

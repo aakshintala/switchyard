@@ -105,7 +105,7 @@ review_verdict() {
 }
 
 parse_p3_verify_findings() {
-  local encoded="$1" output="$2" decoded="${2}.comment" line count=0 decoded_ok=1 valid=1 result=1
+  local encoded="$1" output="$2" decoded="${2}.comment" line section="" count=0 decoded_ok=1 valid=1 result=1
   if ! printf '%s' "$encoded" | base64 -D >"$decoded" 2>/dev/null; then
     if ! printf '%s' "$encoded" | base64 -d >"$decoded" 2>/dev/null; then
       decoded_ok=0
@@ -114,9 +114,13 @@ parse_p3_verify_findings() {
   if [ "$decoded_ok" = 1 ]; then
     : >"$output"
     while IFS= read -r line || [ -n "$line" ]; do
-      # A finding is a line that starts with a priority token once markup and any
-      # list marker are gone; prose that mentions a fixed P1 or P2 is not one.
+      # Fixed and not-judged sections can contain priority rows that are closed,
+      # so exclude them before classifying open findings.
       line="$(printf '%s' "$line" | tr -d '*`' | sed -E -e 's/^[[:space:]]*//' -e 's/^([-+]|[0-9]+[.)])[[:space:]]+//' -e 's/[[:space:]]*$//')"
+      case "$line" in
+        Fixed|Open|New|"Not judged") section="$line"; continue ;;
+      esac
+      if [ "$section" = Fixed ] || [ "$section" = "Not judged" ] || [[ "$line" == *": fixed." ]]; then continue; fi
       if [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then
         if [[ "$line" =~ ^P3[[:space:]]+[^[:space:]] ]]; then
           printf '%s\n' "$line" >>"$output"

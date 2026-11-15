@@ -67,6 +67,9 @@ fi
 case "$(cat "$T/vermode")" in
   ok) printf 'FIX-OK\n';;
   incomplete) printf 'FIX-INCOMPLETE round=1\nP1 src/main.sh:1 — finding remains open\n';;
+  bullet-incomplete) printf 'FIX-INCOMPLETE round=1\n- **P3 `src/main.sh:3` — non-blocking finding.**\n';;
+  p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 src/main.sh:3 — non-blocking finding\n';;
+  p2-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 src/main.sh:3 — non-blocking finding\nP2 src/main.sh:2 — blocking finding\n';;
   fail) printf 'review-pr failed\n' >&2; exit 7;;
   behind)
     refusal_head="$(cat "$REFUSAL_HEAD")"
@@ -363,7 +366,7 @@ run_verify_override
 [ "$RC" = 0 ] || fail "model override exited $RC: $OUT $(cat "$T/stderr")"
 grep -Fq -- "--model override-model" "$T/calls.log" || fail "review-pr did not receive --verify-model"
 
-# FIX-INCOMPLETE saves the output as current findings, but does not change reviewed.
+# A P1 FIX-INCOMPLETE leaves reviewed unchanged, but records the usable open findings.
 setup_case incomplete
 printf 'incomplete\n' >"$T/vermode"
 run_verify
@@ -380,6 +383,37 @@ grep -Fq 'tkt-verify FIX-INCOMPLETE' "${S%.state}.journal" || fail "FIX-INCOMPLE
 [ "$(read_state fix_round.1.findings)" = "$F" ] || fail "FIX-INCOMPLETE did not record the input findings file"
 [ "$(read_state fixslot)" = 1 ] || fail "FIX-INCOMPLETE did not close the fix-round slot"
 [ -r "$(read_state findings_history)" ] || fail "FIX-INCOMPLETE did not write findings history"
+
+# Bullet-formatted findings are not usable bare rows: fail without persisting output.
+setup_case bullet-incomplete
+printf 'bullet-incomplete\n' >"$T/vermode"
+set_state findings "$F"
+run_verify
+[ "$RC" = 1 ] || fail "bullet-incomplete exited $RC, want 1: $OUT"
+assert_first_verdict 'VERIFY-FAIL reason=no-finding-rows' 'bullet-incomplete'
+output_file="$RUN/switchyard-1756-tkt-verify-${HEAD:0:12}.md"
+[ ! -e "$output_file" ] || fail "bullet-incomplete wrote a findings file: $(cat "$output_file")"
+[ "$(read_state findings)" = "$F" ] || fail "bullet-incomplete changed the findings state key"
+
+# P3-only FIX-INCOMPLETE advances reviewed to the verified head.
+setup_case p3-incomplete
+printf 'p3-incomplete\n' >"$T/vermode"
+run_verify
+[ "$RC" = 1 ] || fail "P3-only FIX-INCOMPLETE exited $RC, want 1: $OUT"
+assert_first_verdict FIX-INCOMPLETE 'P3-only FIX-INCOMPLETE'
+[ "$(read_state reviewed)" = "$HEAD" ] || fail "P3-only FIX-INCOMPLETE did not advance reviewed"
+[ "$(read_state findings)" = "$RUN/switchyard-1756-tkt-verify-${HEAD:0:12}.md" ] \
+  || fail "P3-only FIX-INCOMPLETE did not store its verify output path"
+grep -Fq 'P3 src/main.sh:3 — non-blocking finding' "$(read_state findings)" \
+  || fail "P3-only FIX-INCOMPLETE lost its bare P3 row"
+
+# An open P2 beside a P3 keeps reviewed at the prior head.
+setup_case p2-incomplete
+printf 'p2-incomplete\n' >"$T/vermode"
+run_verify
+[ "$RC" = 1 ] || fail "P2 FIX-INCOMPLETE exited $RC, want 1: $OUT"
+assert_first_verdict FIX-INCOMPLETE 'P2 FIX-INCOMPLETE'
+[ "$(read_state reviewed)" = "$OLD" ] || fail "P2 FIX-INCOMPLETE changed reviewed"
 
 # VERIFY-FAIL paths never count a round, even with P-line input.
 setup_case verify-fail
