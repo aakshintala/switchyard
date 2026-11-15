@@ -46,12 +46,15 @@ file_mtime() {
 now=$(date +%s)
 
 # Newest file per ticket number, across read/ and any undrained reports.
-# Report names look like box-box-<ticket>-<stamp>-<pid>-<n>.md; peers (surveyor,
-# switchyard, flywheel) carry no ticket and are skipped.
+# Report names look like box-box-<ticket>-<stamp>-<pid>-<n>.md, or
+# stop-report-<ticket>-<tool>-*.md (box-stop-report-... once box-inbox-pull.sh
+# moves a box one over); peers (surveyor, switchyard, flywheel) carry no ticket
+# and are skipped.
 for f in "$read_dir"/*.md "$inbox"/*.md; do
     [ -e "$f" ] || continue
     base=$(basename "$f")
-    ticket=$(printf '%s\n' "$base" | sed -n 's/^[a-z]*-[a-z]*-\([0-9][0-9]*\)-.*/\1/p')
+    ticket=$(printf '%s\n' "$base" | sed -n 's/^\(box-\)\{0,1\}stop-report-\([0-9][0-9]*\)-.*/\2/p')
+    [ -n "$ticket" ] || ticket=$(printf '%s\n' "$base" | sed -n 's/^[a-z]*-[a-z]*-\([0-9][0-9]*\)-.*/\1/p')
     [ -n "$ticket" ] || ticket=$(printf '%s\n' "$base" | sed -n 's/^box-\([0-9][0-9]*\)-.*/\1/p')
     [ -n "$ticket" ] || continue
     printf '%s\t%s\t%s\n' "$ticket" "$(file_mtime "$f")" "$f"
