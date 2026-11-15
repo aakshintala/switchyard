@@ -861,6 +861,18 @@ run_rc=0; out="$(bash "$TKT" "$S" --verify --findings "$EMPTY_FINDINGS" 2>"$T/st
 expect_findings_empty_refusal findings-empty-argument "$EMPTY_FINDINGS" "$out" "$run_rc" "$before_fixslot"
 fi
 
+# Readers match column-0 `P[123] `, so a bulleted, bolded or P0-only row is no row.
+if want findings-empty-markup; then
+setup_case findings-empty-markup
+EMPTY_FINDINGS="$CDIR/markup-findings.md"
+before_fixslot="$(bash "$TKT_STATE" "$S" get fixslot 2>/dev/null || true)"
+for row in '- P1 x' '**P1** x' 'P0 x'; do
+  printf '%s\n' "$row" >"$EMPTY_FINDINGS"
+  run_rc=0; out="$(bash "$TKT" "$S" --verify --findings "$EMPTY_FINDINGS" 2>"$T/stderr")" || run_rc=$?
+  expect_findings_empty_refusal "findings-empty-markup ($row)" "$EMPTY_FINDINGS" "$out" "$run_rc" "$before_fixslot"
+done
+fi
+
 if want findings-empty-state-ruling; then
 setup_case findings-empty-state-ruling
 EMPTY_FINDINGS="$CDIR/empty-state-findings.md"

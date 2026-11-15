@@ -674,14 +674,11 @@ if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && job="$(t get "job.$slot"
 [ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
 [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
 # A fresh dispatch needs a finding to fix (#1879); nothing before this point
-# writes fix_round.*, job.* or fixslot.
+# writes fix_round.*, job.* or fixslot. Rows match the way tkt-verify and
+# the round-findings checks read them: column-0 `P[123] `.
 if [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ "$recover_unpushed" -ne 1 ]; then
-  findings_has_rows=0
-  while IFS= read -r finding_row || [ -n "$finding_row" ]; do
-    if [[ "$(normalize_finding_line "$finding_row")" =~ ^P[0123]\  ]]; then findings_has_rows=1; break; fi
-  done <"$findings"
-  [ "$findings_has_rows" -eq 1 ] || emit "FINDINGS-EMPTY file=$findings" 2 \
-    "no bare P0-P3 finding rows in $findings" \
+  grep -qE '^P[123] ' "$findings" || emit "FINDINGS-EMPTY file=$findings" 2 \
+    "no column-0 P1-P3 finding rows in $findings" \
     "for a verify-only run, use: tkt-verify $state --findings $findings"
 fi
 
