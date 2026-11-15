@@ -36,6 +36,7 @@ Claude Sonnet 5.5 (`claude-sonnet-5-5`) needs `--model-ruling <comment URL>`. On
 - Commit each new script under `bin/` as executable: `chmod 755` it, then `git ls-files -s <path>` shows mode `100755`.
 - Mark a deliberate shortcut with a `debt: <ceiling>, <upgrade trigger>` comment. A shortcut that would weaken a rule a doc, spec or ticket states gets no marker: stop and report.
 - Commit your work before any command that discards changes (`git reset --hard`, `git checkout -- <path>`, `git restore`, a rebase). Make a scratch commit, such as one kept as evidence, on a throwaway branch (`git switch -c scratch/<name>`), then switch back to the lane branch and delete the scratch one.
+- Write scratch logs and notes under `$TMPDIR` or another absolute directory outside the checkout, never to a relative path inside the checkout: a stray `run/` in the worktree leaves it dirty.
 - Give each new comparison, match guard and `&&`/`||` condition a test that fails when it flips: for a comparison, values at, just below and just above the edge. See each new assert fail against deliberately broken code before you rely on it.
 - A test asserts behaviour: pin a fixture by a tag or by the repo it builds, never by a commit sha, which a rebase rewrites.
 - Give each blocking wait in a test you add (a join, a `recv`, an attempt-count loop) a deadline, so a bug fails the test instead of hanging it.

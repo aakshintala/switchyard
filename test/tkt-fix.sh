@@ -129,9 +129,15 @@ if [ "\$(cat "$T/jobmode")" = wrapper-death ]; then
   exit 0
 fi
 case "\$(cat "$T/jobmode")" in
-  done)
+  done|stray-run)
     n="\$((\$(cat "$T/jobcount") + 1))"
     printf '%s' "\$n" >"$T/jobcount"
+    if [ "\$(cat "$T/jobmode")" = stray-run ]; then
+      run_dir="\$("$TKT_STATE" "\$state" get run)"
+      mkdir -p "\$wt/run"
+      printf 'fix scratch log\n' >"\$wt/run/fix.log"
+      (cd "\$wt" && DELEGATE_JOB_ID=fix-job-77 bash "$REAL_BIN/lib/tkt-stray-run.sh" "\$state" "\$run_dir") || exit 2
+    fi
     commit_as_job fix.txt "fixed-\$n"
     echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   stalled)
@@ -655,6 +661,36 @@ printf '# Findings history\nP2 legacy.txt:1 — fixed historical finding [tkt-hi
 bash "$TKT_STATE" "$S" set findings_history "$history_file" >/dev/null
 write_ruling_comment 100 'refutes: P2 legacy.txt:1'
 expect_ruling_refused ruling-history-only no-match 100
+fi
+
+# A normalized row closed in round 1 can be raised with different markdown in
+# round 2; the closed copy must not shadow the open --findings row.
+if want ruling-refutes-reopened; then
+setup_case ruling-refutes-reopened
+ROUND1_FINDINGS="$CDIR/round1-findings.md"
+ROUND2_FINDINGS="$CDIR/round2-findings.md"
+printf 'P1 **fix.txt:1** — a\n' >"$ROUND1_FINDINGS"
+printf 'P1 fix.txt:1 — a\n' >"$ROUND2_FINDINGS"
+bash "$TKT_STATE" "$S" set findings "$ROUND1_FINDINGS" >/dev/null
+fixture_commit fix.txt 'round one fix' 'fix: round one'
+ROUND1_HEAD="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" push -q origin tkt-529 || fail 'ruling-refutes-reopened could not push round one'
+bash "$TKT_STATE" "$S" set head "$ROUND1_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+record_test_round 1 "$ROUND1_HEAD"
+history_file="$CDIR/findings-history-r1.md"
+printf '# Findings history\nP1 **fix.txt:1** — a [tkt-history: raised=raised in review round 0; status=closed in fix round 1; unverified=none]\n' >"$history_file"
+bash "$TKT_STATE" "$S" set findings_history "$history_file" >/dev/null
+write_ruling_comment 99 'refutes: P1 fix.txt:1'
+printf 'ruling' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --findings "$ROUND2_FINDINGS" --ruling 99 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "ruling-refutes-reopened exited $run_rc, want 1: $out $(cat "$T/stderr")"
+! grep -Fq 'RULING-REFUSED' <<<"$out" || fail "ruling-refutes-reopened refused the open re-raised row: $out"
+grep -Fq 'FIX-INCOMPLETE round=2 STOP-AT-TWO' <<<"$out" || fail "ruling-refutes-reopened did not reach verification: $out"
+awk '/^P1 fix.txt:1 — a \[tkt-history: .*status=open/ { if (getline <= 0 || $0 !~ /^refuted: recorded ruling /) exit 1; found=1 } END { exit !found }' \
+  "$T/verify-input-1.md" || fail "ruling-refutes-reopened did not apply the ruling to the open row: $(cat "$T/verify-input-1.md")"
+grep -Fq 'P1 **fix.txt:1** — a [tkt-history:' "$T/verify-input-1.md" || fail 'ruling-refutes-reopened lost the closed round-one row'
 fi
 
 # A reason on the refutes line makes it longer than the exact row prefix, so it is refused before dispatch.
@@ -1727,10 +1763,15 @@ fi
 # Without a Fix gate the fresh job keeps --gate-from-plan and GATE is the full Gate.
 if want fix-gate-fallback; then
 setup_case fix-gate-fallback
+printf 'stray-run' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "fix-gate-fallback exited $?: $(cat "$T/stderr")"
 grep -Fq -- '--gate-from-plan' "$T/calls.log" || fail "fix-gate-fallback did not pass --gate-from-plan: $(cat "$T/calls.log")"
 grep -Fq 'GATE=true' "$T/calls.log" || fail "fix-gate-fallback brief did not retain full gate: $(cat "$T/calls.log")"
 ! grep -Fq 'Fix gate' "$T/stderr" || fail "fix-gate-fallback printed plan-gate's missing-heading note: $(cat "$T/stderr")"
+[ ! -e "$WT/run/fix.log" ] || fail "fix-gate-fallback left the stray log in the worktree"
+grep -qx 'fix scratch log' "$CDIR/run/stray-fix-job-77-fix.log" || fail "fix-gate-fallback did not move the stray log"
+grep -Fq 'tkt-build stray-run moved path=run/fix.log' "$CDIR/tkt.journal" || fail "fix-gate-fallback did not journal the moved log"
+git -C "$WT" show HEAD:fix.txt | grep -qx fixed-1 || fail "fix-gate-fallback did not proceed to commit the fix"
 fi
 
 # --fix-model overrides the stored model for a resume.

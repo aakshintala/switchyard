@@ -1370,7 +1370,7 @@ set -- "$CDIR"/run/switchyard-502-*-gate-*.sh
 gate_sh="$1"
 [ -f "$gate_sh" ] || fail "the gate script is written"
 grep -q "gate=bash $gate_sh" "$T/stub.log" || fail "delegate gets --gate 'bash <script>'"
-gout="$(bash "$gate_sh" 2>&1)"; grc=$?
+gout="$(DELEGATE_JOB_ID=stub-1 bash "$gate_sh" 2>&1)"; grc=$?
 [ "$grc" -eq 3 ] || fail "a failing gate script exits 3 (rc=$grc)"
 grep -q "GATE FAIL rc=3" <<<"$gout" || fail "a failing gate script prints GATE FAIL rc=3"
 setup_case gate-pass
@@ -1381,10 +1381,30 @@ run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
 [ "$RC" -eq 0 ] || fail "passing gate dispatch exits 0"
 set -- "$CDIR"/run/switchyard-502-*-gate-*.sh
 [ "$#" -eq 1 ] || fail "the passing gate script is written (found $#)"
-gout="$(bash "$1" 2>&1)"; grc=$?
+gout="$(DELEGATE_JOB_ID=stub-1 bash "$1" 2>&1)"; grc=$?
 [ "$grc" -eq 0 ] || fail "a passing gate script exits 0"
 grep -q "GATE PASS" <<<"$gout" || fail "a passing gate script prints GATE PASS"
-grep -Eq ' tkt-job gate slot=lane job=stub-1 cmd64=dHJ1ZQ== env64=' "$CDIR/tkt.journal" || fail "--gate-from-plan journals the inner gate command and env"
+grep -Fq "tkt-stray-run.sh" "$1" || fail "a plan gate absorbs stray run files"
+plan_journal_cmd="$(grep 'tkt-job gate slot=lane job=stub-1 ' "$CDIR/tkt.journal" | sed -E 's/.*cmd64=([^ ]+).*/\1/' | base64 -D)"
+[ "$plan_journal_cmd" = true ] || fail "--gate-from-plan journals the bare plan Gate, not the stray-run step: $plan_journal_cmd"
+# gate-credit and tkt-gate --from-job read the row through job_gate_journal_match
+# and compare it with the plan Gate, so the row they read must equal it.
+(
+  script_dir="$REAL_BIN"
+  . "$REAL_BIN/lib/job-walk.sh"
+  job_gate_journal_match "$CDIR/tkt.journal" stub-1
+  [ "$job_gate_journal_cmd" = true ] || { echo "fresh row reads back as: $job_gate_journal_cmd"; exit 1; }
+  legacy_cmd="bash $REAL_BIN/lib/tkt-stray-run.sh $CDIR/tkt.state $CDIR/run && true"
+  printf '%s tkt-job gate slot=fix1 job=legacy-1 cmd64=%s env64=%s\n' "2026-11-15T22:23:55Z" \
+    "$(printf '%s' "$legacy_cmd" | jq -Rrs '@base64')" "$(printf '' | jq -Rrs '@base64')" >"$T/legacy.journal"
+  job_gate_journal_match "$T/legacy.journal" legacy-1
+  [ "$job_gate_journal_cmd" = true ] || { echo "903c98a row reads back as: $job_gate_journal_cmd"; exit 1; }
+  other_cmd="bash /tmp/other.sh a b && true"
+  printf '%s tkt-job gate slot=fix1 job=other-1 cmd64=%s env64=%s\n' "2026-11-15T22:23:55Z" \
+    "$(printf '%s' "$other_cmd" | jq -Rrs '@base64')" "$(printf '' | jq -Rrs '@base64')" >"$T/other.journal"
+  job_gate_journal_match "$T/other.journal" other-1
+  [ "$job_gate_journal_cmd" = "$other_cmd" ] || { echo "another prefix was stripped: $job_gate_journal_cmd"; exit 1; }
+) || fail "journal reader returns the plan Gate for fresh and 903c98a rows and keeps other prefixes"
 
 setup_case gate-journal-explicit
 reset_stub
@@ -1460,7 +1480,7 @@ set -- "$CDIR"/run/switchyard-502-*-gate-*.sh
 passes=0
 fails=0
 for f in "$@"; do
-  if bash "$f" >/dev/null 2>&1; then passes=$((passes + 1)); else fails=$((fails + 1)); fi
+  if DELEGATE_JOB_ID=stub-1 bash "$f" >/dev/null 2>&1; then passes=$((passes + 1)); else fails=$((fails + 1)); fi
 done
 [ "$passes" -eq 1 ] && [ "$fails" -eq 1 ] || fail "each gate script runs its own gate command (pass=$passes fail=$fails)"
 
@@ -1791,6 +1811,9 @@ grep -q "^resumegate=bash " "$T/stub.log" || fail "resume with gate-from-plan fo
 gate_script="$(grep '^resumegate=' "$T/stub.log" | sed 's/^resumegate=bash //')"
 [ -f "$gate_script" ] || fail "resume gate script exists [$gate_script]"
 grep -q "true" "$gate_script" || fail "resume gate script holds the plan gate command"
+grep -Fq "tkt-stray-run.sh" "$gate_script" || fail "resume plan gate absorbs stray run files"
+resume_journal_cmd="$(grep 'tkt-job gate slot=lane job=stub-1 ' "$CDIR/tkt.journal" | sed -E 's/.*cmd64=([^ ]+).*/\1/' | base64 -D)"
+[ "$resume_journal_cmd" = true ] || fail "resume journals the bare plan Gate, not the stray-run step: $resume_journal_cmd"
 
 # --- --resume forwards an explicit gate ---
 setup_case resume-gate-explicit
