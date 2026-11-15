@@ -481,6 +481,10 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
       [ "$noverify" -eq 0 ] || ruling_refuse refutes-need-verify "$ruling_id"
     fi
     if [ -s "$ruling_grants_file" ]; then
+      if [ -n "$collect_fix_job" ]; then
+        emit "RULING-REFUSED reason=bad-grant comment=$ruling_id" 2 \
+          "a collect needs no grant because the collected dispatch already passed the round limit"
+      fi
       ruling_grant_ids+=("$ruling_id")
       grant_comment_count=$((grant_comment_count + 1))
     elif [ ! -s "$ruling_refutes_file" ]; then

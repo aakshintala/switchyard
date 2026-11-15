@@ -2078,6 +2078,38 @@ collected_head="$(git -C "$WT" rev-parse HEAD)"
 grep -Fq "job|$S --slot fix1 --expect-commits" "$T/calls.log" || fail "collect-fix did not use the watch-only tkt-job call: $(cat "$T/calls.log")"
 ! grep -q 'tkt-fix gate PASS ' "${S%.state}.journal" || fail "collect-fix credited a report-only gate PASS without a passing record gateResult"
 
+# A round-2 grant is consumed by the dispatch, not by collecting its job.
+setup_case collect-fix-roundgrant
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 920 'grants: round 3'
+printf 'wrapper-death' >"$T/jobmode"
+wrapper_pid=""
+bash "$TKT" "$S" --verify --ruling 920 >"$T/grant-wrapper.out" 2>"$T/grant-wrapper.err" &
+wrapper_pid=$!
+wrapper_rc=0; wait "$wrapper_pid" || wrapper_rc=$?
+[ "$wrapper_rc" -ne 0 ] || fail "round-2 grant wrapper did not die"
+for tries in $(seq 1 100); do [ -f "$T/wrapper-finished" ] && break; sleep 0.1; done
+[ -f "$T/wrapper-finished" ] || fail "granted fix job did not finish after its wrapper died"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "grant dispatch advanced round before collection"
+[ "$(bash "$TKT_STATE" "$S" get grant.3)" = '920 https://github.com/switchyard/switchyard/issues/529#issuecomment-920' ] || fail "grant dispatch did not record grant.3"
+[ "$(bash "$TKT_STATE" "$S" get job.fix3)" = j1 ] || fail "grant dispatch did not store job.fix3"
+cp "$S" "$T/state-before-grant-collect"
+: >"$T/calls.log"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --collect-fix j1 --ruling 920 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "collect with the consumed grant exited $run_rc, want 2: $out $(cat "$T/stderr")"
+grep -Fq 'TKT tkt-fix RULING-REFUSED reason=bad-grant comment=920' <<<"$out" || fail "collect with grant did not return RULING-REFUSED: $out"
+grep -Fq 'a collect needs no grant because the collected dispatch already passed the round limit' <<<"$out" || fail "collect with grant omitted explanation: $out"
+cmp -s "$S" "$T/state-before-grant-collect" || fail "refusing a grant on collect changed state"
+! grep -q '^job|' "$T/calls.log" || fail "refusing a grant on collect called tkt-job"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --collect-fix j1 2>"$T/stderr")" || fail "collect without a grant exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK reviewed=' || fail "round-2 grant collect did not finish normal verify: $out"
+! grep -q 'ROUND-LIMIT' <<<"$out" || fail "round-2 grant collect hit ROUND-LIMIT: $out"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "round-2 grant collect did not advance to round 3"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.3.head)" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "round-2 grant collect did not record fix_round.3.head"
+grep -Fq "job|$S --slot fix3 --expect-commits" "$T/calls.log" || fail "round-2 grant collect did not use the watch-only job path: $(cat "$T/calls.log")"
+[ "$(grep -c '^job|' "$T/calls.log")" = 1 ] || fail "round-2 grant collect dispatched another job: $(cat "$T/calls.log")"
+
 # --collect-fix refuses dispatch modifiers and conflicting collection modes.
 setup_case collect-fix-usage
 for usage_case in resume prompt fix-model collect-verify duplicate; do
