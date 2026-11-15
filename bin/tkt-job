@@ -251,8 +251,9 @@ build_gate_from_plan() {
   esac
   printf -v stray_run_command 'bash %q %q %q' \
     "$script_dir/lib/tkt-stray-run.sh" "$state_for_gate" "$run_for_gate"
-  inner_gate_cmd="$stray_run_command && $inner_gate_cmd"
-  gate_cmd="$inner_gate_cmd"
+  # The journal keeps the bare plan Gate: gate-credit and tkt-gate --from-job
+  # compare it with the plan. Only the script runs the stray-run step first.
+  gate_cmd="$stray_run_command && $inner_gate_cmd"
   validate_gate_journal_command
   # The gate script keeps the whole chain inside the redirected block and is
   # judged by its exit code, never the log line (see bin/lib/gate-script.sh).
