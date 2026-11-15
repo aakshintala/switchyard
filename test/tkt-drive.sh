@@ -217,7 +217,7 @@ export DELEGATE_JOB_ID=test-job-1893
 run_drive
 [ "$RC" -eq 2 ] || fail "delegate job should be refused with rc 2 (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
 [ ! -s "$OUT" ] || fail "delegate refusal wrote stdout: $(cat "$OUT")"
-printf '%s\n' "tkt-drive: refusing to run inside delegate job test-job-1893: a delegate job never runs the orchestrator's tkt-* tools; report to your orchestrator instead" >"$CASE_DIR/expected.err"
+printf '%s\n' "tkt-drive: refusing to run inside delegate job test-job-1893: a lane never runs the orchestrator's tkt-* tools; report to your orchestrator instead; if this is a top-level session, DELEGATE_JOB_ID leaked from its launcher (#1748): report that to switchyard" >"$CASE_DIR/expected.err"
 cmp -s "$CASE_DIR/expected.err" "$ERR" || fail "delegate refusal message mismatch: $(cat "$ERR")"
 [ ! -s "$TEST_CALLS" ] || fail "delegate refusal called fake tkt-* tools: $(cat "$TEST_CALLS")"
 [ ! -s "$TEST_FENCE_CALLS" ] || fail "delegate refusal called fence-grant: $(cat "$TEST_FENCE_CALLS")"

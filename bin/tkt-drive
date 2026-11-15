@@ -12,7 +12,7 @@ usage() {
 state="$1"
 
 if [ -n "${DELEGATE_JOB_ID:-}" ]; then
-  echo "tkt-drive: refusing to run inside delegate job $DELEGATE_JOB_ID: a delegate job never runs the orchestrator's tkt-* tools; report to your orchestrator instead" >&2
+  echo "tkt-drive: refusing to run inside delegate job $DELEGATE_JOB_ID: a lane never runs the orchestrator's tkt-* tools; report to your orchestrator instead; if this is a top-level session, DELEGATE_JOB_ID leaked from its launcher (#1748): report that to switchyard" >&2
   exit 2
 fi
 
