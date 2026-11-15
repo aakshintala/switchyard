@@ -1308,7 +1308,25 @@ gout="$(DELEGATE_JOB_ID=stub-1 bash "$1" 2>&1)"; grc=$?
 grep -q "GATE PASS" <<<"$gout" || fail "a passing gate script prints GATE PASS"
 grep -Fq "tkt-stray-run.sh" "$1" || fail "a plan gate absorbs stray run files"
 plan_journal_cmd="$(grep 'tkt-job gate slot=lane job=stub-1 ' "$CDIR/tkt.journal" | sed -E 's/.*cmd64=([^ ]+).*/\1/' | base64 -D)"
-[[ "$plan_journal_cmd" == *"tkt-stray-run.sh"* && "$plan_journal_cmd" == *" && true" ]] || fail "--gate-from-plan journals the combined guard and plan command: $plan_journal_cmd"
+[ "$plan_journal_cmd" = true ] || fail "--gate-from-plan journals the bare plan Gate, not the stray-run step: $plan_journal_cmd"
+# gate-credit and tkt-gate --from-job read the row through job_gate_journal_match
+# and compare it with the plan Gate, so the row they read must equal it.
+(
+  script_dir="$REAL_BIN"
+  . "$REAL_BIN/lib/job-walk.sh"
+  job_gate_journal_match "$CDIR/tkt.journal" stub-1
+  [ "$job_gate_journal_cmd" = true ] || { echo "fresh row reads back as: $job_gate_journal_cmd"; exit 1; }
+  legacy_cmd="bash $REAL_BIN/lib/tkt-stray-run.sh $CDIR/tkt.state $CDIR/run && true"
+  printf '%s tkt-job gate slot=fix1 job=legacy-1 cmd64=%s env64=%s\n' "2026-11-15T22:23:55Z" \
+    "$(printf '%s' "$legacy_cmd" | jq -Rrs '@base64')" "$(printf '' | jq -Rrs '@base64')" >"$T/legacy.journal"
+  job_gate_journal_match "$T/legacy.journal" legacy-1
+  [ "$job_gate_journal_cmd" = true ] || { echo "903c98a row reads back as: $job_gate_journal_cmd"; exit 1; }
+  other_cmd="bash /tmp/other.sh a b && true"
+  printf '%s tkt-job gate slot=fix1 job=other-1 cmd64=%s env64=%s\n' "2026-11-15T22:23:55Z" \
+    "$(printf '%s' "$other_cmd" | jq -Rrs '@base64')" "$(printf '' | jq -Rrs '@base64')" >"$T/other.journal"
+  job_gate_journal_match "$T/other.journal" other-1
+  [ "$job_gate_journal_cmd" = "$other_cmd" ] || { echo "another prefix was stripped: $job_gate_journal_cmd"; exit 1; }
+) || fail "journal reader returns the plan Gate for fresh and 903c98a rows and keeps other prefixes"
 
 setup_case gate-journal-explicit
 reset_stub
@@ -1715,7 +1733,7 @@ gate_script="$(grep '^resumegate=' "$T/stub.log" | sed 's/^resumegate=bash //')"
 grep -q "true" "$gate_script" || fail "resume gate script holds the plan gate command"
 grep -Fq "tkt-stray-run.sh" "$gate_script" || fail "resume plan gate absorbs stray run files"
 resume_journal_cmd="$(grep 'tkt-job gate slot=lane job=stub-1 ' "$CDIR/tkt.journal" | sed -E 's/.*cmd64=([^ ]+).*/\1/' | base64 -D)"
-[[ "$resume_journal_cmd" == *tkt-stray-run.sh* && "$resume_journal_cmd" == *" && true" ]] || fail "resume journals the combined guard and plan command: $resume_journal_cmd"
+[ "$resume_journal_cmd" = true ] || fail "resume journals the bare plan Gate, not the stray-run step: $resume_journal_cmd"
 
 # --- --resume forwards an explicit gate ---
 setup_case resume-gate-explicit
