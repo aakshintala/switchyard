@@ -471,6 +471,18 @@ expect_ruling_refused() {
   [ -z "$(bash "$TKT_STATE" "$S" get fix_round.1.start 2>/dev/null || true)" ] || fail "$name wrote fix_round.1.start"
 }
 
+expect_findings_empty_refusal() {
+  local name="$1" path="$2" out="$3" rc="$4" before_fixslot="$5"
+  [ "$rc" = 2 ] || fail "$name exited $rc, want 2: $out $(cat "$T/stderr")"
+  grep -Fq "TKT tkt-fix FINDINGS-EMPTY file=$path" <<<"$out" || fail "$name missing FINDINGS-EMPTY verdict: $out"
+  grep -Fq "$path" <<<"$out" || fail "$name did not name its findings file: $out"
+  grep -Fq "tkt-verify $S --findings $path" <<<"$out" || fail "$name did not point to tkt-verify: $out"
+  [ "$before_fixslot" = "$(bash "$TKT_STATE" "$S" get fixslot 2>/dev/null || true)" ] || fail "$name changed fixslot"
+  ! grep -Eq '^(fix_round[.]|job[.])' "$S" || fail "$name wrote fix round or job state: $(grep -E '^(fix_round[.]|job[.])' "$S")"
+  ! grep -q '^job|' "$T/calls.log" || fail "$name started a delegate job: $(cat "$T/calls.log")"
+}
+
+
 run_ruling_refutes_row() {
   local name="$1" row="$2" prefix="$3" run_rc=0 out history
   setup_case "$name"
@@ -834,6 +846,29 @@ repair_out="$(eval "$repair_command" 2>"$T/stderr")" || fail "printed missing-ro
 head -n 1 <<<"$repair_out" | grep -q 'TKT tkt-fix FIX-OK' || fail "printed missing-round-findings repair did not pass coverage: $(head -n 1 <<<"$repair_out")"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.findings)" = "$FIX_ROUND_FINDINGS" ] || fail "missing-round-findings repair did not record the restored file"
 grep -q '^review-pr|' "$T/calls.log" || fail "missing-round-findings repair did not reach review-pr"
+fi
+
+if want findings-empty-argument; then
+setup_case findings-empty-argument
+EMPTY_FINDINGS="$CDIR/empty-findings.md"
+printf 'no open findings\n' >"$EMPTY_FINDINGS"
+before_fixslot="$(bash "$TKT_STATE" "$S" get fixslot 2>/dev/null || true)"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --findings "$EMPTY_FINDINGS" 2>"$T/stderr")" || run_rc=$?
+expect_findings_empty_refusal findings-empty-argument "$EMPTY_FINDINGS" "$out" "$run_rc" "$before_fixslot"
+fi
+
+if want findings-empty-state-ruling; then
+setup_case findings-empty-state-ruling
+EMPTY_FINDINGS="$CDIR/empty-state-findings.md"
+printf 'no open findings\n' >"$EMPTY_FINDINGS"
+bash "$TKT_STATE" "$S" set findings "$EMPTY_FINDINGS" >/dev/null
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+issue="$(bash "$TKT_STATE" "$S" get issue)"
+write_ruling_comment 99 'grants: round 3' "$issue" OWNER '2026-11-14T00:00:00Z'
+before_fixslot="$(bash "$TKT_STATE" "$S" get fixslot 2>/dev/null || true)"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || run_rc=$?
+expect_findings_empty_refusal findings-empty-state-ruling "$EMPTY_FINDINGS" "$out" "$run_rc" "$before_fixslot"
+! grep -q '^grant[.]' "$S" || fail "findings-empty-state-ruling recorded a grant before refusing"
 fi
 
 if want no-p-round-findings; then
