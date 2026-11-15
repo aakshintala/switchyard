@@ -814,6 +814,23 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
 ship; expect 0 "repeated FIX-OK lines permit merge"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "repeated FIX-OK still merges: [$OUT]"
 
+# The verify section accepts an optional VERDICT: prefix, including no following space.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:107,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nVERDICT: FIX-OK\nVERDICT:FIX-OK")}
+]' >"$ST/review-comments"
+ship; expect 0 "prefixed FIX-OK lines permit merge"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "prefixed FIX-OK still merges: [$OUT]"
+
+# A FIX verdict prefix outside the verify section remains invalid.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:107,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT: FIX-OK\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: APPROVE\n\n## overbuild (test)\n\nVERDICT overbuild: APPROVE")}
+]' >"$ST/review-comments"
+ship; expect 5 "VERDICT: FIX-OK outside verify is invalid"; expect_refused REVIEW; no_merge "prefixed FIX-OK outside verify"
+
 # FIX-OK beside FIX-INCOMPLETE stays refused.
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
@@ -956,6 +973,17 @@ ship; expect 0 "decorated verify heading opens the P3 findings section"
 [ "$(jq 'length' "$ST/created-issues")" = 1 ] || fail "decorated verify heading files its P3 finding: [$(cat "$ST/created-issues")]"
 jq -e '.[0].body | contains("P3 decorated-heading finding")' "$ST/created-issues" >/dev/null \
   || fail "decorated verify heading keeps the finding: [$(cat "$ST/created-issues")]"
+
+# A prefixed FIX-INCOMPLETE still exposes bare P3 rows to review_verdict.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:116,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nVERDICT: FIX-INCOMPLETE: open P3s at file.txt:3\nP3 file.txt:3 — non-blocking issue — fix it")}
+]' >"$ST/review-comments"
+ship; expect 0 "prefixed FIX-INCOMPLETE with bare P3 ships"
+[ "$(jq 'length' "$ST/created-issues")" = 1 ] || fail "prefixed incomplete P3 row is extracted: [$(cat "$ST/created-issues")]"
+jq -e '.[0].body | contains("P3 file.txt:3 — non-blocking issue — fix it")' "$ST/created-issues" >/dev/null \
+  || fail "prefixed incomplete P3 row is filed: [$(cat "$ST/created-issues")]"
 
 # The P3 issue side effect is deferred until CI and every other refusal check pass.
 setup

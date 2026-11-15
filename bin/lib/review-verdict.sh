@@ -55,8 +55,8 @@ review_verdict() {
       elif ($line | test("^VERDICT overbuild: CHANGES\\.?$")) then .verdicts += ["overbuild:CHANGES"]
       elif .section == "overbuild" and ($line | test("^VERDICT: APPROVE\\.?$")) then .verdicts += ["overbuild:APPROVE"]
       elif .section == "overbuild" and ($line | test("^VERDICT: CHANGES\\.?$")) then .verdicts += ["overbuild:CHANGES"]
-      elif .section == "verify" and ($line | test("^FIX-OK([.:;,]($|\\s)|$|\\s)")) then .verdicts += ["verify:FIX-OK"]
-      elif .section == "verify" and ($line | test("^FIX-INCOMPLETE([.:;,]($|\\s)|$|\\s)")) then .verdicts += ["verify:FIX-INCOMPLETE"]
+      elif .section == "verify" and ($line | test("^(VERDICT:\\s*)?FIX-OK([.:;,]($|\\s)|$|\\s)")) then .verdicts += ["verify:FIX-OK"]
+      elif .section == "verify" and ($line | test("^(VERDICT:\\s*)?FIX-INCOMPLETE([.:;,]($|\\s)|$|\\s)")) then .verdicts += ["verify:FIX-INCOMPLETE"]
       elif ($line | test("^(VERDICT|FIX-)")) then .verdicts += ["INVALID"]
       else . end
     )) as $parsed |

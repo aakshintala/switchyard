@@ -68,9 +68,11 @@ set -euo pipefail
 #   spec role:      VERDICT spec: APPROVE|CHANGES (optional trailing period)
 #   overbuild role: VERDICT: APPROVE|CHANGES (optional trailing period)
 # (collect prints the overbuild verdict as VERDICT overbuild: APPROVE|CHANGES.)
-#   verify role:    FIX-OK | FIX-INCOMPLETE, alone or followed by whitespace and detail;
+#   verify role:    optionally VERDICT: plus optional whitespace, then
+#                   FIX-OK | FIX-INCOMPLETE, alone or followed by whitespace and detail;
 #                   alternatively, one . : ; , may follow immediately, then whitespace and detail or end of line
-# Verdict lines must start with the form below (after normalisation).
+#                   collect prints and posts the canonical bare FIX-OK / FIX-INCOMPLETE form
+# Verdict lines must start with the form below (after normalisation; verify may use the optional prefix).
 # Matching tolerates decoration: leading/trailing whitespace, **bold**, `code`.
 # A line that starts with VERDICT or FIX- but matches none of these is a bad
 # verdict: loud failure, never UNFINISHED.
@@ -163,6 +165,16 @@ brief_for() {
   esac
 }
 
+# canonical_verify_verdict_line NORMALISED_LINE: remove verify's optional
+# VERDICT: prefix and its following whitespace.
+canonical_verify_verdict_line() {
+  local line="$1"
+  case "$line" in
+    VERDICT:*) line="${line#VERDICT:}"; line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//')";;
+  esac
+  printf '%s' "$line"
+}
+
 # is_verdict ROLE NORMALISED_LINE: the line starts with a recognised verdict
 # form (verify may have trailing detail after whitespace).
 is_verdict() {
@@ -185,7 +197,9 @@ is_verdict() {
       esac
       return 1;;
     verify)
-      case "$2" in
+      local verify_line
+      verify_line="$(canonical_verify_verdict_line "$2")"
+      case "$verify_line" in
         FIX-OK|FIX-OK[[:space:]]*|FIX-OK[.:,\;]|FIX-OK[.:,\;][[:space:]]*|\
         FIX-INCOMPLETE|FIX-INCOMPLETE[[:space:]]*|FIX-INCOMPLETE[.:,\;]|\
         FIX-INCOMPLETE[.:,\;][[:space:]]*) return 0;;
@@ -202,6 +216,8 @@ is_verdict() {
 label_verdict() {
   if [ "$1" = "overbuild" ]; then
     printf 'VERDICT overbuild:%s\n' "${2#VERDICT:}"
+  elif [ "$1" = "verify" ]; then
+    printf '%s\n' "$(canonical_verify_verdict_line "$2")"
   else
     printf '%s\n' "$2"
   fi
@@ -272,7 +288,9 @@ verify_comment_has_fix_ok() {
   while IFS= read -r line; do
     norm="$(norm_line "$line")"
     if is_verdict verify "$norm"; then
-      case "$norm" in FIX-OK|FIX-OK[[:space:]]*|FIX-OK[.:,\;]|FIX-OK[.:,\;][[:space:]]*) return 0;; esac
+      case "$(canonical_verify_verdict_line "$norm")" in
+        FIX-OK|FIX-OK[[:space:]]*|FIX-OK[.:,\;]|FIX-OK[.:,\;][[:space:]]*) return 0;;
+      esac
     fi
   done < <(printf '%s\n' "$body" | verify_section_lines)
   return 1
@@ -1541,10 +1559,22 @@ cmd_collect() {
           --arg result_hash "$result_hash" \
           '{job_id: $job_id, repo: $repo, pr: $pr, result_hash: $result_hash}' \
           >"$tmp/posted-$jid"
-        if [ -n "$rruling" ]; then
-          printf '\n## %s (%s, model-ruling %s)\n\n%s\n' "$role" "$rmodel" "$rruling" "$text"
+        if [ "$role" = "verify" ]; then
+          comment_text="$(while IFS= read -r line || [ -n "$line" ]; do
+            norm="$(norm_line "$line")"
+            if is_verdict verify "$norm"; then
+              label_verdict verify "$norm"
+            else
+              printf '%s\n' "$line"
+            fi
+          done <<<"$text")"
         else
-          printf '\n## %s (%s)\n\n%s\n' "$role" "$rmodel" "$text"
+          comment_text="$text"
+        fi
+        if [ -n "$rruling" ]; then
+          printf '\n## %s (%s, model-ruling %s)\n\n%s\n' "$role" "$rmodel" "$rruling" "$comment_text"
+        else
+          printf '\n## %s (%s)\n\n%s\n' "$role" "$rmodel" "$comment_text"
         fi
       done
     } >"$body"
@@ -1608,8 +1638,8 @@ cmd_collect() {
         norm="$(norm_line "$line")"
         [ -n "$norm" ] || continue
         if is_verdict "$role" "$norm"; then
-          # Collect labels the overbuild verdict; the job still writes the
-          # bare form above, and the PR comment keeps the job's full text.
+          # Collect labels overbuild and strips verify's optional prefix.
+          # Posted verify comments use the same canonical line form.
           label_verdict "$role" "$norm" >>"$verdicts_f"
           case "$role:$norm" in
             standards:"VERDICT standards: "*) std_ok="1";;
