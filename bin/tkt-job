@@ -12,9 +12,10 @@
 # A verifier-r* slot's wall cap travels on the run call (--wall-ms); watch
 # only reads the record.
 # Every state read and write goes through tkt-state; the model comes from
-# --model or state model.<slot> and is never picked here. A --resume passes
-# --model to delegate resume only when given (delegate refuses a backend
-# switch); without it the resumed job keeps its stored model.
+# --model or state model.<slot> and is never picked here. Rulings come from
+# state ruling.<slot> and reach delegate run/resume only as --model-ruling.
+# A --resume passes --model to delegate resume only when given (delegate refuses
+# a backend switch); without it, the resumed job keeps its stored model.
 # Usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] |
 #   --brief <file> | --resume <job id> --prompt <file>) [--model <id>]
 #   [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]
@@ -400,8 +401,11 @@ if [ -n "$resume" ]; then
   # No --model keeps the stored model; delegate itself refuses a backend switch.
   model_args=()
   if [ -n "$model" ]; then model_args=(--model "$model"); fi
+  model_ruling="$(tkt get "ruling.$slot" 2>/dev/null || true)"
+  model_ruling_args=()
+  if [ -n "$model_ruling" ]; then model_ruling_args=(--model-ruling "$model_ruling"); fi
   prompt_hash="$(shasum -a 256 <"$prompt" | awk '{print $1}')"
-  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" ${model_args[@]+"${model_args[@]}"} ${gate_args[@]+"${gate_args[@]}"} | head -n 1)"
+  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" ${model_args[@]+"${model_args[@]}"} ${model_ruling_args[@]+"${model_ruling_args[@]}"} ${gate_args[@]+"${gate_args[@]}"} | head -n 1)"
   tkt set "job.$slot" "$jobid"
   # A resume continues the slot's job, so it keeps the slot's prompt identity:
   # the brief the slot was dispatched from still matches on the next call.
@@ -441,7 +445,10 @@ else
   case "$slot" in verifier-r*) wall=(--wall-ms 10800000) ;; esac
   gate_args=()
   if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
-  jobid="$("$delegate" run --model "$model" --cwd "$worktree" ${gate_args[@]+"${gate_args[@]}"} ${tool_idle[@]+"${tool_idle[@]}"} ${wall[@]+"${wall[@]}"} --prompt-file "$brief" | head -n 1)"
+  model_ruling="$(tkt get "ruling.$slot" 2>/dev/null || true)"
+  model_ruling_args=()
+  if [ -n "$model_ruling" ]; then model_ruling_args=(--model-ruling "$model_ruling"); fi
+  jobid="$("$delegate" run --model "$model" --cwd "$worktree" ${gate_args[@]+"${gate_args[@]}"} ${tool_idle[@]+"${tool_idle[@]}"} ${wall[@]+"${wall[@]}"} ${model_ruling_args[@]+"${model_ruling_args[@]}"} --prompt-file "$brief" | head -n 1)"
   tkt set "job.$slot" "$jobid"
   tkt set "job.$slot.prompt" "$prompt_hash"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid"

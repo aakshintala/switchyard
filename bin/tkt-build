@@ -105,7 +105,7 @@ repair_hint() {
     pr)
       lane_job="$(tkt get job.lane 2>/dev/null || true)"
       if [ -n "$lane_job" ]; then
-        printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan --expect-commits, then tkt-build %s --from gate\n' "$state" "$lane_job" "$state"
+        printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan --expect-commits; the resumed lane must finish its push step and open the PR before tkt-build %s --from gate\n' "$state" "$lane_job" "$state"
       else
         printf 'Repair command: tkt-build %s --from lane (create the branch PR, then resume with --from review)\n' "$state"
       fi ;;
@@ -639,11 +639,17 @@ if [ "$mutant_count" -gt 0 ]; then
     mm="$(tkt get model.map 2>/dev/null || true)"
     if [ -z "$mm" ]; then map_note="map failed: missing model.map"
     else
+      map_ruling="$(tkt get ruling.map 2>/dev/null || true)"
+      map_ruling_args=()
+      if [ -n "$map_ruling" ]; then map_ruling_args=(--model-ruling "$map_ruling"); fi
       mbrief="$run/$slug-$issue-map-1.md"
       if "$bin_dir/fill-brief" --out "$mbrief" "$map_brief" PR="$pr" ISSUE="$issue" REPO="$repo" WORKTREE="$worktree" MUTANTS="@$mutants_file" >/dev/null 2>"$tmpd/map-brief-err"; then
-        map_id="$("$delegate" run --model "$mm" --cwd "$worktree" --prompt-file "$mbrief" 2>/dev/null | head -n 1 || true)"
+        map_id="$("$delegate" run --model "$mm" ${map_ruling_args[@]+"${map_ruling_args[@]}"} --cwd "$worktree" --prompt-file "$mbrief" 2>"$tmpd/map-run-err" | head -n 1 || true)"
         if [ -n "$map_id" ]; then tkt set job.map "$map_id"; tkt journal "tkt-build map id=$map_id" 2>/dev/null || true
-        else map_note="map failed: no id"; fi
+        else
+          map_err="$(head -n 1 "$tmpd/map-run-err" 2>/dev/null || true)"
+          if [ -n "$map_err" ]; then map_note="map failed: $map_err"; else map_note="map failed: no id"; fi
+        fi
       else map_note="map failed: brief $(head -n 1 "$tmpd/map-brief-err" 2>/dev/null || true)"; fi
     fi
   fi
@@ -657,6 +663,11 @@ n=0; for ax in standards spec overbuild; do n=$((n+1))
   slot="$(printf '%s' "$rids" | awk -v n="$n" '{print $n}')"
   case "$slot" in ''|RESTART) ;; *) continue;; esac
   start_args=(start "$pr" --repo "$repo" --cwd "$worktree" --state "$state" --head "$head" --issue "$issue" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "tkt-build round-0 full review")
+  case "$ax" in
+    standards|spec) role_ruling="$(tkt get ruling.review 2>/dev/null || true)" ;;
+    overbuild) role_ruling="$(tkt get ruling.overbuild 2>/dev/null || true)" ;;
+  esac
+  if [ -n "$role_ruling" ]; then start_args+=(--model-ruling "$role_ruling"); fi
   if [ -n "$spec_issue" ]; then start_args+=(--spec "$spec_issue"); fi
   if [ "${#context_args[@]}" -gt 0 ]; then start_args+=("${context_args[@]}"); fi
   rc=0; one="$("$reviewpr" "${start_args[@]}" 2>"$tmpd/start-$ax-err")" || rc=$?

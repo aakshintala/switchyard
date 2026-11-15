@@ -201,12 +201,18 @@ printf '0' >"$T/verify-count"
 cat >"$T/bin/review-pr" <<EOF
 #!/usr/bin/env bash
 printf 'review-pr|%s\n' "\$*" >>"$T/calls.log"
-verify_file=""; previous=""; context_files=()
+verify_file=""; previous=""; context_files=(); model=""; model_ruling=""
 for arg in "\$@"; do
   if [ "\$previous" = "--verify" ]; then verify_file="\$arg"; fi
   if [ "\$previous" = "--context" ]; then context_files+=("\$arg"); fi
+  if [ "\$previous" = "--model" ]; then model="\$arg"; fi
+  if [ "\$previous" = "--model-ruling" ]; then model_ruling="\$arg"; fi
   previous="\$arg"
 done
+if [ "\$model" = "claude-sonnet-5-5" ] && [ -z "\$model_ruling" ]; then
+  echo 'delegate: claude-sonnet-5-5 is not in the allowed pool; pass --model-ruling <comment URL>' >&2
+  exit 2
+fi
 if [ "\${1:-}" = "collect" ]; then
   case "\$(cat "$T/collectmode")" in
     ok) printf 'FIX-OK. Every finding in the verify file is fixed at HEAD.\\n';;
@@ -403,11 +409,11 @@ set_closed_round() {
 }
 
 write_job_record() {
-  local id="$1" before="$2" after="$3" resumed_from="${4:-}" record
+  local id="$1" before="$2" after="$3" resumed_from="${4:-}" record cwd="$WT"
   mkdir -p "$TMPDIR/delegate-jobs"
   record="$TMPDIR/delegate-jobs/$id.json"
-  jq -n --arg hb "$before" --arg ha "$after" \
-    '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"recorded fix",changeSet:{headBefore:$hb,headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1}' \
+  jq -n --arg hb "$before" --arg ha "$after" --arg cwd "$cwd" \
+    '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"recorded fix",changeSet:{headBefore:$hb,headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1,startedAtMs:1700000000000,endedAtMs:1700000001000,caller:"test",callerPid:1,callerCommand:"test",callerCwd:$cwd,resume:{model:"test-model",backend:"test",cwd:$cwd,sessionId:"test-session",gate:"",toolIdleMs:7200000,idleMs:null,wallMs:null,addDirs:[]}}' \
     >"$record" || fail "write $id record"
   if [ -n "$resumed_from" ]; then
     jq --arg id "$resumed_from" '. + {resumedFrom:$id}' "$record" >"$record.tmp" \
@@ -2760,8 +2766,8 @@ mode="\$(cat "$T/delegate-mode")"
 cmd="\${1:-}"; shift || true
 mint_record() {
   if [ "\$5" = "1" ]; then comms="[\"\$4\"]"; else comms="[]"; fi
-  jq -n --arg status "\$1" --arg text "\$2" --arg hb "\$3" --arg ha "\$4" --argjson comms "\$comms" --arg resumed "\$7" \
-    '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log"}, changeSet: {headBefore: \$hb, headAfter: \$ha, newCommits: \$comms, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: null}, supervisorPid: 1, resumedFrom: \$resumed}' \
+  jq -n --arg status "\$1" --arg text "\$2" --arg hb "\$3" --arg ha "\$4" --argjson comms "\$comms" --arg resumed "\$7" --arg cwd "\$cwd" \
+    '({status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log", startedAtMs: 1700000000000, durationMs: 0}, changeSet: {headBefore: \$hb, headAfter: \$ha, newCommits: \$comms, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: null}, supervisorPid: 1, startedAtMs: 1700000000000, endedAtMs: 1700000001000, caller: "test", callerPid: 1, callerCommand: "test", callerCwd: \$cwd, resume: {model: "test-model", backend: "test", cwd: \$cwd, sessionId: "test-session", gate: "true", toolIdleMs: 7200000, idleMs: null, wallMs: null, addDirs: []}} + (if \$resumed == "" then {} else {resumedFrom: \$resumed} end))' \
     >"\$jobsdir/\$6.json" || exit 1
 }
 commit_fix() {
@@ -3516,6 +3522,31 @@ if want gate-credit-takeover-env; then
 fi
 if want gate-credit-takeover-no-env; then
   run_gate_credit_test gate-credit-takeover-no-env takeover-no-env
+fi
+
+# Per-slot ruling.verify reaches the verify reviewer, and no ruling is journalled.
+if want sonnet-verify-ruling; then
+VERIFY_RULING='https://github.com/example/repo/issues/1#issuecomment-1'
+setup_case sonnet-verify-ruling
+bash "$TKT_STATE" "$S" set model.verify claude-sonnet-5-5 >/dev/null || fail "set Sonnet verify model"
+bash "$TKT_STATE" "$S" set ruling.verify "$VERIFY_RULING" >/dev/null || fail "set ruling.verify"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")"; rc=$?
+[ "$rc" = 0 ] || fail "ruled Sonnet verify exited $rc: $out $(cat "$T/stderr")"
+grep -Fq -- "--model claude-sonnet-5-5" "$T/calls.log" || fail "Sonnet verify model reaches review-pr"
+grep -Fq -- "--model-ruling $VERIFY_RULING" "$T/calls.log" || fail "ruling.verify reaches review-pr"
+! grep -Fq "$VERIFY_RULING" "${S%.state}.journal" || fail "verify ruling is not journalled"
+fi
+
+# Without ruling.verify, the review-pr refusal stops the fix round.
+if want sonnet-verify-refusal; then
+VERIFY_OTHER_SLOT_RULING='https://github.com/example/repo/issues/1#issuecomment-2'
+setup_case sonnet-verify-refusal
+bash "$TKT_STATE" "$S" set model.verify claude-sonnet-5-5 >/dev/null || fail "set unruled Sonnet verify model"
+bash "$TKT_STATE" "$S" set ruling.review "$VERIFY_OTHER_SLOT_RULING" >/dev/null || fail "set wrong-slot review ruling"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")"; rc=$?
+[ "$rc" = 1 ] || fail "unruled Sonnet verify exits 1 (rc=$rc): $out"
+grep -Fq -- '--model-ruling <comment URL>' "$T/stderr" || fail "unruled Sonnet verify surfaces the remedy"
+! grep -Fq "$VERIFY_OTHER_SLOT_RULING" "${S%.state}.journal" || fail "wrong-slot verify ruling is not journalled"
 fi
 
 echo "tkt-fix assertions passed"

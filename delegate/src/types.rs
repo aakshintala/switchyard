@@ -121,6 +121,18 @@ pub struct GateResult {
     pub passed: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub refused: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::util::js_num_opt"
+    )]
+    pub started_at_ms: Option<f64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::util::js_num_opt"
+    )]
+    pub duration_ms: Option<f64>,
     pub output_tail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
@@ -453,7 +465,60 @@ pub struct FinalizeCtx {
 
 #[cfg(test)]
 mod tests {
-    use super::{Allowance, AllowanceWindow, Usage};
+    use super::{Allowance, AllowanceWindow, GateResult, Usage};
+
+    #[test]
+    fn old_job_record_gate_result_round_trips_without_timing_fields() {
+        // Shape copied from a real job record; values are generic and contain no host paths.
+        let record = serde_json::json!({
+            "status": "DONE",
+            "result": {
+                "status": "DONE",
+                "text": "Gate passed.\nSTATUS: DONE",
+                "sessionId": "session-id",
+                "backend": "cursor",
+                "model": "model-id",
+                "usage": {
+                    "inputTokens": 1,
+                    "outputTokens": 2,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0
+                },
+                "costUsd": 0,
+                "costEstimated": false,
+                "durationMs": 10,
+                "jobId": "job-id",
+                "gateResult": {
+                    "command": "true",
+                    "exitCode": 0,
+                    "passed": true,
+                    "outputTail": "",
+                    "outputPath": "gate.log"
+                }
+            },
+            "supervisorPid": 1,
+            "startedAtMs": 100,
+            "endedAtMs": 110,
+            "caller": "delegate run",
+            "callerPid": 2,
+            "callerCommand": "delegate run --model model-id",
+            "callerCwd": ".",
+            "resume": {
+                "model": "model-id",
+                "cwd": ".",
+                "sessionId": "session-id",
+                "gate": "true",
+                "toolIdleMs": null
+            }
+        });
+        let old_gate = record["result"]["gateResult"].clone();
+
+        let parsed: GateResult = serde_json::from_value(old_gate.clone()).unwrap();
+
+        assert_eq!(parsed.started_at_ms, None);
+        assert_eq!(parsed.duration_ms, None);
+        assert_eq!(serde_json::to_value(parsed).unwrap(), old_gate);
+    }
 
     #[test]
     fn usage_without_muse_fields_keeps_the_old_wire_shape() {

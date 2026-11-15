@@ -21,6 +21,13 @@ S="$T/t.state"
 bash "$TKT" "$S" set greeting hello || fail "set exits 0"
 [ "$(bash "$TKT" "$S" get greeting)" = "hello" ] || fail "get returns the set value"
 
+# A ruling.<slot> key is valid state and writes no journal entry.
+RS="$T/ruling.state"
+RULING_URL='https://github.com/example/repo/issues/1#issuecomment-1'
+bash "$TKT" "$RS" set ruling.review "$RULING_URL" || fail "set ruling.<slot> exits 0"
+[ "$(bash "$TKT" "$RS" get ruling.review)" = "$RULING_URL" ] || fail "get returns the ruling.<slot> value"
+[ ! -e "${RS%.state}.journal" ] || fail "setting ruling.<slot> writes no journal entry"
+
 # set replaces every line for the key with one line
 bash "$TKT" "$S" add color red || fail "first add exits 0"
 bash "$TKT" "$S" add color blue || fail "second add exits 0"

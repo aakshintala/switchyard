@@ -20,7 +20,7 @@ Pick the lowest rung whose definition covers the job:
 - `strong`: under-specified tickets. Makes local design calls, and stops and flags a plan that's wrong instead of following it. Writes a lane brief from an approved plan. Checks a plan as the Verifier.
 - `frontier`: long-horizon planning, cross-cutting design, sub-orchestrating a ticket, and the last escalation before the owner.
 
-The current spend pool is in the `delegate models` ALLOWED column. A model outside it needs `--model-ruling <comment URL>` for a ruled exception. Use a model with no rung only when flywheel rules it in. Within a rung, pick the cheapest model with headroom (the `$OUT/1M` column); on a price tie, pick the provider with more headroom.
+The current spend pool is in the `delegate models` ALLOWED column. A model outside it needs `--model-ruling <comment URL>` for a ruled exception. Claude Sonnet 5.5 (`claude-sonnet-5-5`) needs that flag. Only flywheel, surveyor or switchyard can set `ruling.<slot>` from a ruling comment posted by that role. A lane never sets it itself. The role runs `tkt-state <state file> set ruling.<slot> <comment URL>`. Use a model with no rung only when flywheel rules it in. Within a rung, pick the cheapest model with headroom (the `$OUT/1M` column); on a price tie, pick the provider with more headroom.
 
 When the pick is a Claude model and you run in a Claude Code session, start it as a local `claude-worker` subagent with that model and effort (`model: haiku` for `claude-haiku-5-5`), and run the gate yourself on its result. A script with no session to host a subagent, such as `review-pr`, passes the Claude model to `delegate run`. A session started before Claude Code learned of a model may resolve its alias to the older one (`haiku` to Haiku 4.5), so check the model id the subagent reports.
 
@@ -139,7 +139,7 @@ job reads `CANCELLED`, and `tkt-job` prints it as `WALL-CAP`. `text` is the agen
 `NEEDS_CONTEXT` it is the question.
 
 - `result.gateResult`: a failing gate downgrades `DONE` to `DONE_WITH_CONCERNS`; it holds the
-  gate's `exitCode`, `outputTail` and `outputPath`, the file with the gate's full output.
+  gate's `exitCode`, `startedAtMs`, `durationMs`, `outputTail` and `outputPath`, the file with the gate's full output.
 - `result.changeSet`: git delta for the cwd (`newCommits`, `filesChanged`, `diffstat`,
   `uncommittedFiles`).
 - If `delegate status` prints `uncommitted complete tree: commit and run the gate; do not resume`,

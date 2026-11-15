@@ -3,6 +3,8 @@ Check this plan for issue #__ISSUE__ in __REPO__ against the code it cites. Do n
 Read the ticket (body and comments, pasted below, at the start of the extra lines: your sandbox prints nothing for `gh issue view`) and every file the plan names, at __BASE__, in your working directory. You check by reading and searching code; the lane builds and runs the Gate, so your report needs no build or test output. Gather in batches: put every grep, `git show` range and `sed` slice one question needs into a single Bash call, and read the pack (`__PACK__`) before any of them.
 __EXTRA__
 
+Claude Sonnet 5.5 (`claude-sonnet-5-5`) needs `--model-ruling <comment URL>`. Only flywheel, surveyor or switchyard can set `ruling.<slot>` from a ruling comment posted by that role. A lane never sets it itself. The role runs `tkt-state <state file> set ruling.<slot> <comment URL>`.
+
 ## Plan
 
 Read the plan at `__PLAN__` before anything else, and reread it after any compaction. If it can't be read, stop with `STATUS: NEEDS_CONTEXT`; work only from the file, never from memory of it.

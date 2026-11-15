@@ -201,6 +201,14 @@ if [ "$no_preflight" -eq 0 ] && [ "$takeover_given" -eq 0 ]; then
 fi
 mkdir -p "$run"
 tkt() { "$tkt_state" "$state" "$@"; }
+clear_preflight_slot() {
+  local job_id
+  job_id="$(tkt get job.preflight 2>/dev/null || true)"
+  tkt set job.preflight ""
+  tkt set job.preflight.prompt ""
+  tkt set preflight.resume_attempted ""
+  tkt journal "tkt-start preflight cleared job=$job_id"
+}
 part_notes=()
 emit() {
   local rest="$1" code="$2"; shift 2; local twelve log out note
@@ -579,21 +587,101 @@ if [ "$jrc" -ne 0 ]; then
 fi
 [ -f "$out" ] || fail_step tkt-job 1 "no out file: $out"
 # Trailing whitespace is allowed: a markdown line break ends the line with two spaces (#1666).
-core="$(grep -E '^Core items: [0-9]+[[:space:]]*$' "$out" | tail -n 1 | sed -n 's/^Core items: \([0-9][0-9]*\)[[:space:]]*$/\1/p' || true)"
-nb="$(grep -E '^Non-blocking items: [0-9]+[[:space:]]*$' "$out" | tail -n 1 | sed -n 's/^Non-blocking items: \([0-9][0-9]*\)[[:space:]]*$/\1/p' || true)"
-[ -n "$nb" ] || nb=0
-[ -n "$core" ] || core=unknown
-dg+=("sweep=$sweep_out" "out=$out"); report="$(head -n 30 "$out")"
-tkt journal "tkt-start preflight core=$core out=$out"
-if [ "$core" = unknown ]; then
-  emit "PREFLIGHT core=unknown out=$out" 1 "${dg[@]}" "tkt-start: preflight report has no 'Core items:' line" "$report"
-fi
+parse_preflight_footer() {
+  core="$(grep -E '^Core items: [0-9]+[[:space:]]*$' "$out" | tail -n 1 | sed -n 's/^Core items: \([0-9][0-9]*\)[[:space:]]*$/\1/p' || true)"
+  nb="$(grep -E '^Non-blocking items: [0-9]+[[:space:]]*$' "$out" | tail -n 1 | sed -n 's/^Non-blocking items: \([0-9][0-9]*\)[[:space:]]*$/\1/p' || true)"
+  [ -n "$nb" ] || nb=0
+  [ -n "$core" ] || core=unknown
+}
+parse_preflight_footer
+
 tail='[[:space:]`*:]*((none([[:space:]]+found)?|n/a|nothing)([.;!][[:space:][:print:]]*)?)?[[:space:][:punct:]]*$'
 count_items() { grep -E "($1)" "$out" | grep -cviE "(${2:-$1})$tail" || true; }
-tagged_core="$(count_items '^([0-9]+\.|-|\*)[[:space:]]+`?\**core([^[:alnum:]_]|$)|^[[:space:]]*`?\**core[`*]*(:| --)|^([0-9]+\.|-) .*(`core`|\*\*core\*\*)' '^(([0-9]+\.|-|\*)[[:space:]]+)?[[:space:]]*`?\**core')"
-tagged_nonblocking="$(count_items '^([0-9]+\.|-|\*)[[:space:]]+`?\**non-blocking([^[:alnum:]_]|$)|^[[:space:]]*`?\**non-blocking[`*]*(:| --)')"
+count_tags() {
+  tagged_core="$(count_items '^([0-9]+\.|-|\*)[[:space:]]+`?\**core([^[:alnum:]_]|$)|^[[:space:]]*`?\**core[`*]*(:| --)|^([0-9]+\.|-) .*(`core`|\*\*core\*\*)' '^(([0-9]+\.|-|\*)[[:space:]]+)?[[:space:]]*`?\**core')"
+  tagged_nonblocking="$(count_items '^([0-9]+\.|-|\*)[[:space:]]+`?\**non-blocking([^[:alnum:]_]|$)|^[[:space:]]*`?\**non-blocking[`*]*(:| --)')"
+}
+
+dg+=("sweep=$sweep_out" "out=$out"); report="$(head -n 30 "$out")"
+tkt journal "tkt-start preflight core=$core out=$out"
+# One resume per preflight job, shared by the footer and tag checks: a
+# trailing " *" marks a resume in flight, so a start killed mid-resume can't
+# resume the same job again (#1833). Returns 0 with the resumed report reparsed.
+resume_diag=()
+resume_preflight() {
+  local slug="$1" text="$2" job attempted prompt rc=0 txt jobhead ok=0 new failure="" floor_core previous_core="$core" previous_nb="$nb" previous_tagged_core="${tagged_core:-}" previous_tagged_nonblocking="${tagged_nonblocking:-}" previous_report="$report"
+  job="$(tkt get job.preflight 2>/dev/null || true)"
+  attempted="$(tkt get preflight.resume_attempted 2>/dev/null || true)"
+  [ -n "$job" ] || return 1
+  case " $attempted " in *" * "*|*" $job "*) return 1 ;; esac
+  prompt="$run/$namebase-preflight-$slug-repair.md"
+  printf '%s\n' "$text" >"$prompt"
+  tkt set preflight.resume_attempted "$job *"
+  tkt journal "tkt-start preflight resume job=$job"
+  txt="$("$tktjob" "$state" --slot preflight --resume "$job" --prompt "$prompt" --out-file "$out" 2>&1)" || rc=$?
+  jobhead="$(grep -m1 '^TKT tkt-job ' <<<"$txt" || head -n 1 <<<"$txt")"
+  if [ "$rc" -eq 0 ]; then ok=1
+  elif [ "$rc" -eq 1 ]; then case "$jobhead" in "TKT tkt-job CONCERNS "*) ok=1 ;; esac
+  fi
+  if [ "$ok" -eq 0 ] || [ ! -f "$out" ]; then
+    resume_diag=("tkt-start: preflight $slug resume failed (rc=$rc): $jobhead")
+    tkt journal "tkt-start preflight resume failed job=$job rc=$rc head=$jobhead"
+    return 1
+  fi
+  new="$(tkt get job.preflight 2>/dev/null || true)"
+  attempted="$job"
+  [ -z "$new" ] || [ "$new" = "$job" ] || attempted="$attempted $new"
+  tkt set preflight.resume_attempted "$attempted"
+  parse_preflight_footer
+  report="$(head -n 30 "$out")"
+  count_tags
+  if ! grep -q '^STATUS: ' "$out"; then
+    failure="resumed report has no STATUS: line"
+  elif [ "$tagged_nonblocking" -lt "$nb" ]; then
+    failure="resumed report has $tagged_nonblocking tagged non-blocking lines but footer says $nb"
+  else
+    # A resume may add findings or fix tags, never drop one: the floor is the
+    # larger of the original footer and the original tagged lines.
+    floor_core="$orig_tagged_core"
+    case "$previous_core" in ''|*[!0-9]*) ;; *) [ "$previous_core" -le "$floor_core" ] || floor_core="$previous_core" ;; esac
+    if [ "$core" != unknown ] && [ "$core" -lt "$floor_core" ]; then
+      failure="resumed report lowers Core items from $floor_core to $core"
+    elif [ "$nb" -lt "$orig_tagged_nonblocking" ]; then
+      failure="resumed report lowers Non-blocking items from $orig_tagged_nonblocking to $nb"
+    fi
+  fi
+  if [ -n "$failure" ]; then
+    if [ "$slug" = tags ]; then
+      core="$previous_core"; nb="$previous_nb"
+      tagged_core="$previous_tagged_core"; tagged_nonblocking="$previous_tagged_nonblocking"
+      report="$previous_report"
+    fi
+    resume_diag=("tkt-start: preflight $slug resume failed (rc=0): $failure ($jobhead)")
+    tkt journal "tkt-start preflight resume failed job=$job rc=0 head=$jobhead reason=$failure"
+    return 1
+  fi
+  tkt journal "tkt-start preflight resumed job=${new:-$job} core=$core out=$out"
+}
+refuse_unknown() {
+  clear_preflight_slot
+  emit "PREFLIGHT core=unknown out=$out" 1 "tkt-start: rerun tkt-start for a fresh preflight" "${dg[@]}" ${resume_diag[@]+"${resume_diag[@]}"} "tkt-start: preflight report has no 'Core items:' line" "$report"
+}
+count_tags; orig_tagged_core="$tagged_core"; orig_tagged_nonblocking="$tagged_nonblocking"
+if [ "$core" = unknown ]; then
+  resume_preflight footer 'Append the required footer lines exactly as skills/planning/briefs/preflight.md asks: Core items: <n> and Non-blocking items: <n>, using decimal counts. Do not change the findings. Reply with the complete corrected report as your message: every finding line tagged "- core:" or "- non-blocking:", the Writes/Reads sweep, both footer lines ("Core items: <n>" and "Non-blocking items: <n>") matching the tagged lines, and the STATUS line. Write no file, and change no finding.' || core=unknown
+  [ "$core" != unknown ] || refuse_unknown
+fi
+count_tags
 if [ "$core" -gt "$tagged_core" ]; then
   tkt journal "tkt-start preflight core=mismatch footer=$core tagged=$tagged_core out=$out"
-  emit "PREFLIGHT core=mismatch footer=$core tagged=$tagged_core out=$out" 1 "${dg[@]}" "tkt-start: preflight footer says Core items: $core but $tagged_core core lines are tagged ($tagged_nonblocking non-blocking)" "$report"
+  if resume_preflight tags 'Start each finding line with its tag, as skills/planning/briefs/preflight.md asks: "- core: ..." or "- non-blocking: ...", and make the Core items: and Non-blocking items: counts equal the tagged lines. Do not change the findings. Reply with the complete corrected report as your message: every finding line tagged "- core:" or "- non-blocking:", the Writes/Reads sweep, both footer lines ("Core items: <n>" and "Non-blocking items: <n>") matching the tagged lines, and the STATUS line. Write no file, and change no finding.'; then
+    [ "$core" != unknown ] || refuse_unknown
+    count_tags
+    [ "$core" -le "$tagged_core" ] || tkt journal "tkt-start preflight core=mismatch footer=$core tagged=$tagged_core out=$out"
+  fi
+fi
+if [ "$core" -gt "$tagged_core" ]; then
+  clear_preflight_slot
+  emit "PREFLIGHT core=mismatch footer=$core tagged=$tagged_core out=$out" 1 "tkt-start: rerun tkt-start for a fresh preflight" "${dg[@]}" ${resume_diag[@]+"${resume_diag[@]}"} "tkt-start: preflight footer says Core items: $core but $tagged_core core lines are tagged ($tagged_nonblocking non-blocking)" "$report"
 fi
 [ "$core" -eq 0 ] && emit "PREFLIGHT core=0 nonblocking=$nb out=$out" 0 "${dg[@]}" "$report" || emit "PREFLIGHT core=$core out=$out" 1 "${dg[@]}" "$report"

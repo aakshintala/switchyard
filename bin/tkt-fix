@@ -1304,6 +1304,8 @@ if [ "${#ruling_refute_ids[@]}" -gt 0 ]; then
   mv "$verify_history_with_rulings" "$verify_history" || emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot prepare findings history for recorded rulings"
 fi
 vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$verify_history" --since "$verify_since")
+verify_ruling="$(t get ruling.verify 2>/dev/null || true)"
+if [ -n "$verify_ruling" ]; then vargs+=(--model-ruling "$verify_ruling"); fi
 if [ -n "$concerns_file" ]; then vargs+=(--context "$concerns_file"); fi
 for ruling_index in "${!ruling_ids[@]}"; do vargs+=(--context "${ruling_bodies[$ruling_index]}"); done
 vrc=0; "$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
