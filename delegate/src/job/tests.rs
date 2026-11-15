@@ -420,14 +420,16 @@ fn a_sigterm_resistant_group_child_is_dead_before_the_stalled_record() {
     let reg = JobHandle::new(deps);
     let id = reg.dispatch(spec_of(|_| {}));
 
+    // The shell creates the file before `echo` writes the pid: wait for a parse.
+    let read_pid = || {
+        std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<libc::pid_t>().ok())
+    };
     wait_until("SIGTERM-resistant child pid", Duration::from_secs(5), || {
-        pid_file.is_file()
+        read_pid().is_some()
     });
-    let child_pid = std::fs::read_to_string(&pid_file)
-        .expect("read child pid")
-        .trim()
-        .parse::<libc::pid_t>()
-        .expect("parse child pid");
+    let child_pid = read_pid().expect("parse child pid");
 
     assert_eq!(settle(&reg, &id), "STALLED");
     assert_eq!(status_of(&spy.last().1), "STALLED");
@@ -1487,12 +1489,13 @@ fn a_sigterm_resistant_child_is_killed_after_the_grace() {
         d.kill_grace_ms = 400;
     });
     *s.fake.ignore_first_kill.lock().unwrap() = true;
-    let id = s.reg.dispatch(spec_of(|_| {}));
     let started = Instant::now();
+    let id = s.reg.dispatch(spec_of(|_| {}));
     assert_eq!(settle(&s.reg, &id), "STALLED");
+    // #1889 acceptance: STALLED within idle + kill_grace + one grace.
     assert!(
-        started.elapsed() < Duration::from_millis(50 + 400 + 400 + 500),
-        "idle stall took {:?}, beyond idle + kill grace + one grace + slack",
+        started.elapsed() < Duration::from_millis(50 + 400 + 400),
+        "idle stall took {:?}, beyond idle + kill grace + one grace",
         started.elapsed()
     );
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM", "SIGKILL"]);
