@@ -613,6 +613,7 @@ resume_preflight() {
   job="$(tkt get job.preflight 2>/dev/null || true)"
   attempted="$(tkt get preflight.resume_attempted 2>/dev/null || true)"
   [ -n "$job" ] || return 1
+  # " * " is the in-flight marker set below: a start killed mid-resume never resumes again.
   case " $attempted " in *" * "*|*" $job "*) return 1 ;; esac
   prompt="$run/$namebase-preflight-$slug-repair.md"
   printf '%s\n' "$text" >"$prompt"
