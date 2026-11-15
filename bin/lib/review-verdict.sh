@@ -122,17 +122,16 @@ finding_row_is_closed() {
 # review_incomplete_rows FILE: populate the bare P0-P3 rows and whether an
 # open P0-P2 row remains. The input is review-pr's digest, which need not have
 # a ## verify heading, so inspect the whole file while matching rows raw.
+# Only a row's own `: fixed.` suffix closes it here: no brief defines Fixed or
+# Not judged headings, and a section rule would let a missing heading hide an
+# open P0-P2 row from the reviewed gate.
 review_incomplete_rows() {
-  local file="$1" line heading section=""
+  local file="$1" line
   REVIEW_INCOMPLETE_ROWS="$(finding_rows verify-output "$file" | head -n 30 || true)"
   REVIEW_INCOMPLETE_HAS_OPEN_P12=0
   [ -n "$REVIEW_INCOMPLETE_ROWS" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
-    if heading="$(finding_section_heading "$line")"; then
-      section="$heading"
-      continue
-    fi
-    finding_row_is_closed "$section" "$line" && continue
+    [[ "$line" == *": fixed." ]] && continue
     if [[ "$line" == P[012]\ * ]]; then REVIEW_INCOMPLETE_HAS_OPEN_P12=1; fi
   done <"$file"
 }

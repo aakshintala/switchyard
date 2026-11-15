@@ -278,7 +278,8 @@ case "\$(cat "$T/vermode")" in
     printf 'FIX-INCOMPLETE round=1\nP1 fix.txt:1 — a\n';;
   p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 fix.txt:3 — non-blocking finding\n';;
   p2-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 fix.txt:3 — non-blocking finding\nP2 fix.txt:2 — blocking finding\n';;
-  p2-fixed-p3-incomplete) printf 'FIX-INCOMPLETE round=1\n## Fixed\nP2 fix.txt:2: fixed.\n## Not judged\nP1 fix.txt:1 — not judged\n## Open\nP2 fix.txt:4: fixed.\nP3 fix.txt:3 — non-blocking finding\n';;
+  p2-fixed-p3-incomplete) printf 'FIX-INCOMPLETE round=1\n## Fixed\nP2 fix.txt:2: fixed.\n## Open\nP2 fix.txt:4: fixed.\nP3 fix.txt:3 — non-blocking finding\n';;
+  p1-not-judged-incomplete) printf 'FIX-INCOMPLETE round=1\n## Fixed\nP2 fix.txt:2: fixed.\n## Not judged\nP1 fix.txt:1 — not judged\nP3 fix.txt:3 — non-blocking finding\n';;
   p0-p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 fix.txt:0 — critical finding\nP3 fix.txt:3 — non-blocking finding\n';;
   p0-only-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 fix.txt:0 — critical finding\n';;
   bullet-incomplete) printf 'FIX-INCOMPLETE round=1\n- **P3 fix.txt:3 — non-blocking finding.**\n';;
@@ -1523,6 +1524,15 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "fixe
 fr="$CDIR/run/switchyard-529-findings-r1.md"
 grep -Fq 'P2 fix.txt:2: fixed.' "$fr" || fail "fixed P2 row was not preserved"
 grep -Fq 'P3 fix.txt:3 — non-blocking finding' "$fr" || fail "open P3 row was not preserved"
+
+# A P1 under a Not judged heading has no `: fixed.` suffix, so it holds reviewed.
+setup_case incomplete-p1-not-judged
+printf 'p1-not-judged-incomplete' >"$T/vermode"
+run_rc=0
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "not-judged-P1 FIX-INCOMPLETE exited $run_rc, want 1: $out"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "not-judged-P1 verdict changed: $out"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$OLD" ] || fail "P1 under Not judged advanced reviewed"
 
 # P0 plus P3 remains incomplete and leaves reviewed unchanged; both rows persist.
 setup_case incomplete-p0-p3
