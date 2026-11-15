@@ -9,6 +9,15 @@ norm_line() {
   printf '%s' "$1" | tr -d '*`' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
+# normalize_finding_line: strip finding markup, a leading list marker and
+# surrounding whitespace before matching a finding row.
+normalize_finding_line() {
+  printf '%s' "$1" | tr -d '*`' | sed -E \
+    -e 's/^[[:space:]]*//' \
+    -e 's/^([-+]|[0-9]+[.)])[[:space:]]+//' \
+    -e 's/[[:space:]]*$//'
+}
+
 verify_section_lines() {
   local line norm in_verify=0
   while IFS= read -r line || [ -n "$line" ]; do

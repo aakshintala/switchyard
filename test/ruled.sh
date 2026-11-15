@@ -12,13 +12,20 @@ cat >"$T/stub/delegate" <<'STUB'
 set -euo pipefail
 case "${1:-} ${2:-}" in
   "session list")
+    if [ -n "${DELEGATE_CALLS:-}" ]; then printf '%s\n' "$*" >>"$DELEGATE_CALLS"; fi
+    if [ "${LIST_RC:-0}" -ne 0 ]; then
+      echo 'session list failed for test' >&2
+      exit "$LIST_RC"
+    fi
     printf '%s idle pi/model turns=1 /work\n' "$SESSION_ID"
     ;;
   "session watch")
+    if [ -n "${DELEGATE_CALLS:-}" ]; then printf '%s\n' "$*" >>"$DELEGATE_CALLS"; fi
     printf 'watch\n' >>"$EVENTS"
     echo idle
     ;;
   "session send")
+    if [ -n "${DELEGATE_CALLS:-}" ]; then printf '%s\n' "$*" >>"$DELEGATE_CALLS"; fi
     n=$(cat "$SEND_COUNT")
     n=$((n + 1))
     printf '%s\n' "$n" >"$SEND_COUNT"
@@ -32,6 +39,7 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "session logs")
+    if [ -n "${DELEGATE_CALLS:-}" ]; then printf '%s\n' "$*" >>"$DELEGATE_CALLS"; fi
     printf 'logs\n' >>"$EVENTS"
     case "$EVENT_OUTCOME" in
       consumed)
@@ -108,10 +116,12 @@ run_case() {
     "$ticket" "$route" "fiber-$ticket-build" "$sid" >"$run/roster"
   printf '0\n' >"$T/count-$case_number"
   : >"$T/events-$case_number"
+  : >"$T/delegate-calls-$case_number"
   export T SESSION_ID="$sid" FIRST_DISPOSITION="$disposition" EVENT_OUTCOME="$outcome"
   COMMAND_ID="command-$case_number"
   export COMMAND_ID
   export SEND_COUNT="$T/count-$case_number" EVENTS="$T/events-$case_number"
+  export DELEGATE_CALLS="$T/delegate-calls-$case_number" LIST_RC=0
   if [ "$route" = mac ]; then
     output=$(HOME="$T/home" FW_RUN="$run" FW_NO_BOX_PUSH=1 \
       FW_DELEGATE="$T/stub/delegate" INBOX_HOST=mac \
@@ -157,4 +167,104 @@ for route in mac muse; do
   run_case "$route" unconfirmed missing yes
   run_case "$route" unconsumed ignored yes
 done
+
+run_mac_lookup_case() {
+  local name=$1 jid_mode=$2 list_rc=$3 delegate=$4 ticket run ruling sid jid
+  local output rc count calls expected_calls
+  case_number=$((case_number + 1))
+  ticket=$((5100 + case_number))
+  sid="session-$case_number"
+  run="$T/run-$case_number"
+  ruling="$T/ruling-$ticket.md"
+  mkdir -p "$run" "$run/inbox" "$run/rulings"
+  printf 'RULING-%s\n' "$ticket" >"$ruling"
+  case "$jid_mode" in
+    present) jid=$sid ;;
+    claude) jid=0a1b2c3d ;;
+    empty) jid= ;;
+  esac
+  if [ -n "$jid" ]; then
+    printf '2026-01-01T00:00:00Z\t%s\tmac\t%s\t%s\n' \
+      "$ticket" "fiber-$ticket-build" "$jid" >"$run/roster"
+  else
+    printf '2026-01-01T00:00:00Z\t%s\tmac\t%s\n' \
+      "$ticket" "fiber-$ticket-build" >"$run/roster"
+  fi
+  printf '0\n' >"$T/count-$case_number"
+  : >"$T/events-$case_number"
+  : >"$T/delegate-calls-$case_number"
+  export T SESSION_ID="$sid" FIRST_DISPOSITION=started EVENT_OUTCOME=missing
+  export LIST_RC="$list_rc"
+  export SEND_COUNT="$T/count-$case_number" EVENTS="$T/events-$case_number"
+  export DELEGATE_CALLS="$T/delegate-calls-$case_number"
+  output=$(HOME="$T/home" FW_RUN="$run" FW_NO_BOX_PUSH=1 \
+    FW_DELEGATE="$delegate" INBOX_HOST=mac \
+    bash "$BIN/ruled.sh" "$ticket" "$ruling" 2>&1) && rc=0 || rc=$?
+  count=$(cat "$SEND_COUNT")
+  calls=$(cat "$DELEGATE_CALLS")
+  case "$name" in
+    list-has-id)
+      expected_calls=$(printf 'session list\nsession send %s - --json' "$sid")
+      if [ "$rc" -ne 0 ] || [ "$count" -ne 1 ] \
+          || [ "$calls" != "$expected_calls" ] \
+          || ! grep -q 'delivered into the turn' <<<"$output"; then
+        fail "$name (rc=$rc count=$count calls=$calls output=$output)"
+      else
+        echo "ok $name"
+      fi
+      ;;
+    list-lacks-claude-id)
+      if [ "$rc" -ne 3 ] || [ "$count" -ne 0 ] \
+          || [ "$calls" != "session list" ] \
+          || ! grep -q 'is a mac Claude session' <<<"$output" \
+          || ! grep -q 'SendMessage to' <<<"$output" \
+          || grep -q 'session send' <<<"$calls"; then
+        fail "$name (rc=$rc count=$count calls=$calls output=$output)"
+      else
+        echo "ok $name"
+      fi
+      ;;
+    list-fails)
+      if [ "$rc" -ne 3 ] || [ "$count" -ne 0 ] \
+          || [ "$calls" != "session list" ] \
+          || ! grep -q 'delegate lookup failed: delegate session list failed (exit 1)' <<<"$output" \
+          || ! grep -q 'session list failed for test' <<<"$output" \
+          || ! grep -q 'archive copy above is the durable record' <<<"$output" \
+          || ! grep -q 'resolve delivery manually' <<<"$output" \
+          || grep -Eqi 'Claude session|SendMessage' <<<"$output"; then
+        fail "$name (rc=$rc count=$count calls=$calls output=$output)"
+      else
+        echo "ok $name"
+      fi
+      ;;
+    missing-binary)
+      if [ "$rc" -ne 3 ] || [ "$count" -ne 0 ] || [ -n "$calls" ] \
+          || ! grep -q 'delegate lookup failed: binary .* missing or not executable' <<<"$output" \
+          || ! grep -q 'lookup could not run' <<<"$output" \
+          || ! grep -q 'archive copy above is the durable record' <<<"$output" \
+          || ! grep -q 'resolve delivery manually' <<<"$output" \
+          || grep -Eqi 'Claude session|SendMessage' <<<"$output"; then
+        fail "$name (rc=$rc count=$count calls=$calls output=$output)"
+      else
+        echo "ok $name"
+      fi
+      ;;
+    no-delegate-id)
+      if [ "$rc" -ne 3 ] || [ "$count" -ne 0 ] || [ -n "$calls" ] \
+          || ! grep -q 'is a mac Claude session' <<<"$output" \
+          || ! grep -q 'SendMessage to' <<<"$output"; then
+        fail "$name (rc=$rc count=$count calls=$calls output=$output)"
+      else
+        echo "ok $name"
+      fi
+      ;;
+  esac
+}
+
+run_mac_lookup_case list-has-id present 0 "$T/stub/delegate"
+run_mac_lookup_case list-lacks-claude-id claude 0 "$T/stub/delegate"
+run_mac_lookup_case list-fails present 1 "$T/stub/delegate"
+run_mac_lookup_case missing-binary present 0 "$T/nonexistent/delegate"
+run_mac_lookup_case no-delegate-id empty 0 "$T/stub/delegate"
+
 [ "$failures" -eq 0 ]

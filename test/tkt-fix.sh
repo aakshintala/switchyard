@@ -474,6 +474,32 @@ expect_ruling_refused() {
   [ -z "$(bash "$TKT_STATE" "$S" get fix_round.1.start 2>/dev/null || true)" ] || fail "$name wrote fix_round.1.start"
 }
 
+run_ruling_refutes_row() {
+  local name="$1" row="$2" prefix="$3" run_rc=0 out history
+  setup_case "$name"
+  printf 'P1 fix.txt:1 — a\n%s\n' "$row" >"$CDIR/findings.md"
+  bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+  write_ruling_comment 99 "refutes: $prefix"
+  printf 'ruling' >"$T/vermode"
+  out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 1 ] || fail "$name exited $run_rc, want 1: $out $(cat "$T/stderr")"
+  grep -Fq 'FIX-INCOMPLETE round=1' <<<"$out" || fail "$name did not preserve P1: $out"
+  awk -v target="$row" 'index($0, target) == 1 { if (getline <= 0 || $0 !~ /^refuted: recorded ruling /) exit 1; found=1 } END { exit !found }' \
+    "$T/verify-input-1.md" || fail "$name did not put its ruling directly under the row"
+  history="$(bash "$TKT_STATE" "$S" get findings_history)"
+  grep -F "$row [tkt-history:" "$history" | grep -Fq 'status=closed in fix round 1' || \
+    fail "$name did not close its row in history: $(cat "$history")"
+}
+
+run_ruling_no_match_row() {
+  local name="$1" row="$2" prefix="$3"
+  setup_case "$name"
+  printf '%s\n' "$row" >"$CDIR/findings.md"
+  bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+  write_ruling_comment 99 "refutes: $prefix"
+  expect_ruling_refused "$name" no-match 99
+}
+
 expect_fix_grant_refused() {
   local name="$1" reason="$2" id="$3" initial_round="${4:-2}" run_rc=0 out
   out="$(bash "$TKT" "$S" --verify --ruling "$id" 2>"$T/stderr")" || run_rc=$?
@@ -518,6 +544,32 @@ journal="${S%.state}.journal"
 grep -Fq "ruling $html_url refutes P2 fix.txt:2" "$journal" || fail "ruling-refutes-one journal lacks ruling record"
 fi
 
+if want ruling-refutes-backtick; then
+  run_ruling_refutes_row ruling-refutes-backtick 'P2 `fix.txt:2` — b' 'P2 fix.txt:2'
+fi
+
+if want ruling-refutes-backtick-prefix; then
+  run_ruling_refutes_row ruling-refutes-backtick-prefix 'P2 `fix.txt:2` — b' 'P2 `fix.txt:2`'
+fi
+
+if want ruling-bad-refutes-markup-only; then
+setup_case ruling-bad-refutes-markup-only
+write_ruling_comment 99 'refutes: P2 **'
+expect_ruling_refused ruling-bad-refutes-markup-only bad-refutes 99
+fi
+
+if want ruling-refutes-markdown; then
+  run_ruling_refutes_row ruling-refutes-markdown 'P2 **fix.txt:2** — b' 'P2 fix.txt:2'
+fi
+
+if want ruling-refutes-range; then
+  run_ruling_refutes_row ruling-refutes-range 'P2 fix.txt:2-4 — b' 'P2 fix.txt:2-4'
+fi
+
+if want ruling-refutes-no-path; then
+  run_ruling_refutes_row ruling-refutes-no-path 'P3 mutant shards unread: run 1 head abc — x' 'P3 mutant shards unread:'
+fi
+
 if want ruling-no-match; then
 setup_case ruling-no-match
 write_ruling_comment 99 'refutes: P2 missing.sh:1'
@@ -530,6 +582,22 @@ printf 'P2 a.sh:1 — x\nP2 a.sh:1 — y\n' >"$CDIR/findings.md"
 bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
 write_ruling_comment 99 'refutes: P2 a.sh:1'
 expect_ruling_refused ruling-ambiguous ambiguous 99
+fi
+
+if want ruling-range-prefix-longer; then
+  run_ruling_no_match_row ruling-range-prefix-longer 'P2 fix.txt:2-40 — b' 'P2 fix.txt:2-4'
+fi
+
+if want ruling-range-prefix-shorter; then
+  run_ruling_no_match_row ruling-range-prefix-shorter 'P2 fix.txt:2-4 — b' 'P2 fix.txt:2'
+fi
+
+if want ruling-ambiguous-prefix; then
+  setup_case ruling-ambiguous-prefix
+  printf 'P2 mutant shards unread: run 1 head abc — x\nP2 mutant shards unread: run 2 head def — y\n' >"$CDIR/findings.md"
+  bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+  write_ruling_comment 99 'refutes: P2 mutant shards unread:'
+  expect_ruling_refused ruling-ambiguous-prefix ambiguous 99
 fi
 
 if want ruling-prefix; then
@@ -546,10 +614,10 @@ write_ruling_comment 99 'refutes: P2'
 expect_ruling_refused ruling-bad-refutes-bare bad-refutes 99
 fi
 
-if want ruling-bad-refutes-no-line; then
-setup_case ruling-bad-refutes-no-line
+if want ruling-refutes-no-line-no-match; then
+setup_case ruling-refutes-no-line-no-match
 write_ruling_comment 99 'refutes: P2 fix.txt'
-expect_ruling_refused ruling-bad-refutes-no-line bad-refutes 99
+expect_ruling_refused ruling-refutes-no-line-no-match no-match 99
 fi
 
 if want ruling-author-none; then

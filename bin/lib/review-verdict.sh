@@ -114,9 +114,11 @@ parse_p3_verify_findings() {
   if [ "$decoded_ok" = 1 ]; then
     : >"$output"
     while IFS= read -r line || [ -n "$line" ]; do
+      # A finding is a line that starts with a priority token once markup and any
+      # list marker are gone; prose that mentions a fixed P1 or P2 is not one.
       # Fixed and not-judged sections can contain priority rows that are closed,
       # so exclude them before classifying open findings.
-      line="$(printf '%s' "$line" | tr -d '*`' | sed -E -e 's/^[[:space:]]*//' -e 's/^([-+]|[0-9]+[.)])[[:space:]]+//' -e 's/[[:space:]]*$//')"
+      line="$(normalize_finding_line "$line")"
       case "$line" in
         Fixed|Open|New|"Not judged") section="$line"; continue ;;
       esac
