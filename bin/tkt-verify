@@ -127,6 +127,8 @@ if [ -n "$issue" ]; then set_namebase "$repo" "$issue"; else namebase="${repo##*
 part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
 history_file="$(history_path "$knum")"
 vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --model "$verifymodel" --verify "$findings" --since "$reviewed")
+verify_ruling="$(t get ruling.verify 2>/dev/null || true)"
+if [ -n "$verify_ruling" ]; then vargs+=(--model-ruling "$verify_ruling"); fi
 
 advance_round() {
   if [ "$has_p_lines" -eq 1 ]; then

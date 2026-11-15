@@ -3762,6 +3762,26 @@ fn model_pool_ruling_run_resume_and_model_check_contracts() {
 
     for (args, expected_code) in [
         (&["model-check", "claude-haiku-5-5"][..], 0),
+        (&["model-check", "claude-sonnet-5-5"][..], 2),
+        (
+            &[
+                "model-check",
+                "claude-sonnet-5-5",
+                "--model-ruling",
+                model_ruling::TEST_MODEL_RULING,
+            ][..],
+            0,
+        ),
+        (&["model-check", "claude-sonnet-5-5:medium"][..], 2),
+        (
+            &[
+                "model-check",
+                "claude-sonnet-5-5:medium",
+                "--model-ruling",
+                model_ruling::TEST_MODEL_RULING,
+            ][..],
+            0,
+        ),
         (&["model-check", "openai/gpt-6.1-sol"][..], 2),
         (
             &[
@@ -3786,19 +3806,70 @@ fn model_pool_ruling_run_resume_and_model_check_contracts() {
         }
     }
 
-    let allowed = e.delegate_env_raw(
-        &["run", "--model", "claude-sonnet-5-5"],
-        Some("allowed model"),
+    for model in ["claude-sonnet-5-5", "claude-sonnet-5-5:medium"] {
+        let refused = e.delegate_env_raw(
+            &["run", "--model", model],
+            Some("must not launch"),
+            &backend_env,
+        );
+        assert_eq!(refused.status.code(), Some(2), "{model}: {refused:?}");
+        assert!(refused.stdout.is_empty(), "{model}: {refused:?}");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("allowed pool"),
+            "{model}: {}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
+    assert!(
+        !e.jobs_dir().exists(),
+        "unruled Sonnet refusal created a job record directory"
+    );
+
+    let ruled = e.delegate_env_raw(
+        &[
+            "run",
+            "--model",
+            "claude-sonnet-5-5",
+            "--model-ruling",
+            model_ruling::TEST_MODEL_RULING,
+        ],
+        Some("ruled Sonnet model"),
         &backend_env,
     );
-    assert!(allowed.status.success(), "{allowed:?}");
-    let allowed_id = String::from_utf8(allowed.stdout)
+    assert!(ruled.status.success(), "{ruled:?}");
+    let ruled_id = String::from_utf8(ruled.stdout).unwrap().trim().to_string();
+    let ruled_record = e.wait_terminal(&ruled_id);
+    assert_eq!(ruled_record["resume"]["model"], "claude-sonnet-5-5");
+    assert_eq!(
+        ruled_record["resume"]["modelRuling"],
+        model_ruling::TEST_MODEL_RULING
+    );
+
+    let ruled_medium = e.delegate_env_raw(
+        &[
+            "run",
+            "--model",
+            "claude-sonnet-5-5:medium",
+            "--model-ruling",
+            model_ruling::TEST_MODEL_RULING,
+        ],
+        Some("ruled Sonnet medium model"),
+        &backend_env,
+    );
+    assert!(ruled_medium.status.success(), "{ruled_medium:?}");
+    let ruled_medium_id = String::from_utf8(ruled_medium.stdout)
         .unwrap()
         .trim()
         .to_string();
-    let allowed_record = e.wait_terminal(&allowed_id);
-    assert_eq!(allowed_record["resume"]["model"], "claude-sonnet-5-5");
-    assert!(allowed_record["resume"]["modelRuling"].is_null());
+    let ruled_medium_record = e.wait_terminal(&ruled_medium_id);
+    assert_eq!(
+        ruled_medium_record["resume"]["model"],
+        "claude-sonnet-5-5:medium"
+    );
+    assert_eq!(
+        ruled_medium_record["resume"]["modelRuling"],
+        model_ruling::TEST_MODEL_RULING
+    );
 
     let refusal = Env::new("model-refusal");
     let refusal_profile = refusal.dir.join("missing-profile.json");
@@ -3812,7 +3883,7 @@ fn model_pool_ruling_run_resume_and_model_check_contracts() {
     assert!(refused.stdout.is_empty());
     assert_eq!(
         String::from_utf8_lossy(&refused.stderr).trim(),
-        "model \"openai/gpt-6.1-sol\" is not in the allowed pool (models.json rows with \"allowed\": true: claude-haiku-5-5, claude-sonnet-5-5, fiber/codex/gpt-6-luna:medium, fiber/codex/gpt-6-luna:xhigh, openai/gpt-6-luna:medium, openai/gpt-6-luna:xhigh, opencode-go/muse-spark-1.3-contributor); pass --model-ruling <comment URL> for a ruled exception"
+        "model \"openai/gpt-6.1-sol\" is not in the allowed pool (models.json rows with \"allowed\": true: claude-haiku-5-5, fiber/codex/gpt-6-luna:medium, fiber/codex/gpt-6-luna:xhigh, openai/gpt-6-luna:medium, openai/gpt-6-luna:xhigh, opencode-go/muse-spark-1.3-contributor); pass --model-ruling <comment URL> for a ruled exception"
     );
     assert!(
         !refusal.jobs_dir().exists(),

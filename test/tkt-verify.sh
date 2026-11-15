@@ -46,11 +46,17 @@ chmod +x "$T/bin/gh"
 cat >"$T/bin/review-pr" <<'EOF'
 #!/usr/bin/env bash
 printf 'review-pr|%s\n' "$*" >>"$T/calls.log"
-verify_file=""; previous=""
+verify_file=""; previous=""; model=""; model_ruling=""
 for arg in "$@"; do
   if [ "$previous" = --verify ]; then verify_file="$arg"; fi
+  if [ "$previous" = --model ]; then model="$arg"; fi
+  if [ "$previous" = --model-ruling ]; then model_ruling="$arg"; fi
   previous="$arg"
 done
+if [ "$model" = claude-sonnet-5-5 ] && [ -z "$model_ruling" ]; then
+  echo 'delegate: claude-sonnet-5-5 is not in the allowed pool; pass --model-ruling <comment URL>' >&2
+  exit 2
+fi
 [ -n "$verify_file" ] && cp "$verify_file" "$T/verify-input.md"
 case "$(cat "$T/vermode")" in
   ok) printf 'FIX-OK\n';;
@@ -563,5 +569,26 @@ run_verify
 [ "$RC" = 2 ] || fail "held lock exited $RC, want 2: $OUT $(cat "$T/stderr")"
 grep -Fq 'state locked' "$T/stderr" || fail "held-lock error missing: $(cat "$T/stderr")"
 assert_no_review 'held lock'
+
+# An unruled Sonnet verify passes its ruling through to delegate.
+SONNET_RULING='https://github.com/example/repo/issues/1#issuecomment-1'
+setup_case sonnet-ruling
+set_state model.verify claude-sonnet-5-5
+set_state ruling.verify "$SONNET_RULING"
+run_verify
+[ "$RC" = 0 ] || fail "ruled Sonnet verify exited $RC: $OUT $(cat "$T/stderr")"
+grep -Fq -- "--model claude-sonnet-5-5" "$T/calls.log" || fail "Sonnet verify model reaches review-pr"
+grep -Fq -- "--model-ruling $SONNET_RULING" "$T/calls.log" || fail "ruling.verify reaches review-pr"
+! grep -Fq "$SONNET_RULING" "${S%.state}.journal" || fail "verify ruling is not journalled"
+
+# Without ruling.verify, review-pr's refusal reaches tkt-verify.
+setup_case sonnet-ruling-refusal
+set_state model.verify claude-sonnet-5-5
+set_state ruling.review "$SONNET_RULING"
+run_verify
+[ "$RC" = 1 ] || fail "unruled Sonnet verify returns VERIFY-FAIL (rc=$RC)"
+assert_first_verdict VERIFY-FAIL 'unruled Sonnet verify'
+grep -Fq -- '--model-ruling <comment URL>' "$T/stderr" || fail "unruled Sonnet verify surfaces the remedy"
+[ ! -e "${S%.state}.journal" ] || ! grep -Fq "$SONNET_RULING" "${S%.state}.journal" || fail "wrong-slot verify ruling is not journalled"
 
 echo 'tkt-verify: all cases passed'

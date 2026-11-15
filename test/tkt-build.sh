@@ -80,18 +80,24 @@ mode="\$(cat "$T/delegate-mode")"
 cmd="\${1:-}"; shift || true
 case "\$cmd" in
   run)
-    model=""; prompt=""
+    model=""; prompt=""; model_ruling=""
     while [ \$# -gt 0 ]; do
       case "\$1" in
         --model) model="\$2"; shift 2 ;;
+        --model-ruling) model_ruling="\$2"; shift 2 ;;
         --prompt-file) prompt="\$2"; shift 2 ;;
         *) shift ;;
       esac
     done
+    if [ "\$model" = "claude-sonnet-5-5" ] && [ -z "\$model_ruling" ]; then
+      echo 'delegate: claude-sonnet-5-5 is not in the allowed pool; pass --model-ruling <comment URL>' >&2
+      exit 2
+    fi
     n="\$((\$(cat "$T/dcounter") + 1))"
     printf '%s' "\$n" >"$T/dcounter"
     id="stub-\$n"
     printf 'run|id=%s|model=%s|prompt=%s\n' "\$id" "\$model" "\$prompt" >>"$T/calls.log"
+    if [ -n "\$model_ruling" ]; then printf 'runmodelruling=%s\n' "\$model_ruling" >>"$T/calls.log"; fi
     slot="other"
     case "\$prompt" in *-lane-*) slot="lane" ;; *-map-*) slot="map" ;; esac
     status="DONE"
@@ -118,8 +124,8 @@ held: every invariant survived its breaking input"
       commits='[]'
     fi
     mkdir -p "\$jobsdir"
-    jq -n --arg status "\$status" --arg text "\$text" --argjson commits "\$commits" --argjson concerns "\$concerns" \
-      '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log"}, changeSet: {headBefore: "a", headAfter: "b", newCommits: \$commits, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: \$concerns}, supervisorPid: 1}' \
+      jq -n --arg status "\$status" --arg text "\$text" --argjson commits "\$commits" --argjson concerns "\$concerns" --arg cwd "\$PWD" --arg model "\$model" --arg model_ruling "\$model_ruling" \
+        '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log", startedAtMs: 1700000000000, durationMs: 0}, changeSet: {headBefore: "a", headAfter: "b", newCommits: \$commits, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: \$concerns}, supervisorPid: 1, startedAtMs: 1700000000000, endedAtMs: 1700000001000, caller: "test", callerPid: 1, callerCommand: "test", callerCwd: \$cwd, resume: ({model: \$model, backend: "test", cwd: \$cwd, sessionId: "test-session", gate: "", toolIdleMs: 7200000, idleMs: null, wallMs: null, addDirs: []} + (if \$model_ruling == "" then {} else {modelRuling: \$model_ruling} end))}' \
       >"\$jobsdir/\$id.json"
     printf '%s\n' "\$id"
     ;;
@@ -267,15 +273,24 @@ if [ "\$sub" = "start" ]; then
     exit 1
   fi
   axes="standards,spec,overbuild"
-  prev=""
+  prev=""; review_model=""; overbuild_model=""; model_ruling=""
   for a in "\$@"; do
     if [ "\$prev" = "--axes" ]; then axes="\$a"; fi
+    if [ "\$prev" = "--model" ]; then review_model="\$a"; fi
+    if [ "\$prev" = "--overbuild-model" ]; then overbuild_model="\$a"; fi
+    if [ "\$prev" = "--model-ruling" ]; then model_ruling="\$a"; fi
     prev="\$a"
   done
   axes="\$(printf '%s' "\$axes" | tr ',' ' ')"
   for ax in \$axes; do
     case " \$ax " in " standards "|" spec "|" overbuild "*) ;;
       *) echo "stub review-pr: unknown axis \$ax" >&2; exit 2;; esac
+    selected_model="\$review_model"
+    [ "\$ax" != overbuild ] || selected_model="\$overbuild_model"
+    if [ "\$selected_model" = "claude-sonnet-5-5" ] && [ -z "\$model_ruling" ]; then
+      echo 'review-pr: claude-sonnet-5-5 is not in the allowed pool; pass --model-ruling <comment URL>' >&2
+      exit 2
+    fi
     if [ "\$mode" = "die-after-one" ] && [ "\$ax" = "spec" ]; then
       echo "review-pr: died after one launch" >&2
       exit 1
@@ -2607,5 +2622,59 @@ expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "lane-clean-stale"
 grep -q "merges cleanly" "$CDIR/stderr.txt" && fail "lane-clean-stale: lane must not continue cleanly"
 grep -q "merges cleanly" <<<"$OUT" && fail "lane-clean-stale: lane must not continue cleanly"
 grep -q "^run|" "$T/calls.log" && fail "lane-clean-stale: the lane never dispatches"
+
+# --- Sonnet rulings are scoped to the review and overbuild slots ---
+SLOT_REVIEW_URL='https://github.com/example/repo/issues/1#issuecomment-1'
+SLOT_OVERBUILD_URL='https://github.com/example/repo/issues/1#issuecomment-2'
+setup_case slot-ruling-review
+bash "$TKT_STATE" "$S" set model.review claude-sonnet-5-5 || fail "slot-ruling-review: set review model"
+bash "$TKT_STATE" "$S" set model.overbuild claude-sonnet-5-5 || fail "slot-ruling-review: set overbuild model"
+bash "$TKT_STATE" "$S" set ruling.review "$SLOT_REVIEW_URL" || fail "slot-ruling-review: set review ruling"
+bash "$TKT_STATE" "$S" set ruling.overbuild "$SLOT_OVERBUILD_URL" || fail "slot-ruling-review: set overbuild ruling"
+run_build
+[ "$RC" -eq 0 ] || fail "slot-ruling-review exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -Fq -- "--axes standards --full-rereview tkt-build round-0 full review --model-ruling $SLOT_REVIEW_URL" "$T/calls.log" || fail "standards receives ruling.review"
+grep -Fq -- "--axes spec --full-rereview tkt-build round-0 full review --model-ruling $SLOT_REVIEW_URL" "$T/calls.log" || fail "spec receives ruling.review"
+grep -Fq -- "--axes overbuild --full-rereview tkt-build round-0 full review --model-ruling $SLOT_OVERBUILD_URL" "$T/calls.log" || fail "overbuild receives ruling.overbuild"
+! grep -Fq "$SLOT_REVIEW_URL" "${S%.state}.journal" || fail "review rulings are not journalled"
+! grep -Fq "$SLOT_OVERBUILD_URL" "${S%.state}.journal" || fail "overbuild rulings are not journalled"
+
+# --- an unruled Sonnet review surfaces delegate's refusal ---
+setup_case slot-ruling-review-refusal
+bash "$TKT_STATE" "$S" set model.review claude-sonnet-5-5 || fail "slot-ruling-review-refusal: set review model"
+bash "$TKT_STATE" "$S" set ruling.overbuild "$SLOT_OVERBUILD_URL" || fail "slot-ruling-review-refusal: set wrong-slot overbuild ruling"
+run_build
+[ "$RC" -eq 2 ] || fail "slot-ruling-review-refusal exits 2 (rc=$RC)"
+grep -Fq -- '--model-ruling <comment URL>' <<<"$OUT" || fail "unruled Sonnet review names the remedy"
+! grep -Fq "$SLOT_OVERBUILD_URL" "${S%.state}.journal" || fail "wrong-slot overbuild ruling is not journalled"
+
+# --- an unruled Sonnet overbuild review also surfaces the refusal ---
+setup_case slot-ruling-overbuild-refusal
+bash "$TKT_STATE" "$S" set model.overbuild claude-sonnet-5-5 || fail "slot-ruling-overbuild-refusal: set overbuild model"
+bash "$TKT_STATE" "$S" set ruling.review "$SLOT_REVIEW_URL" || fail "slot-ruling-overbuild-refusal: set wrong-slot review ruling"
+run_build
+[ "$RC" -eq 2 ] || fail "slot-ruling-overbuild-refusal exits 2 (rc=$RC)"
+grep -Fq -- '--model-ruling <comment URL>' <<<"$OUT" || fail "unruled Sonnet overbuild names the remedy"
+! grep -Fq "$SLOT_REVIEW_URL" "${S%.state}.journal" || fail "wrong-slot review ruling is not journalled"
+
+# --- the map role forwards ruling.map and exposes refusal without it ---
+MAP_RULING_URL='https://github.com/example/repo/issues/1#issuecomment-3'
+setup_case map-slot-ruling
+printf 'mutant_job=%s\n' Selection >>"$S"
+bash "$TKT_STATE" "$S" set model.map claude-sonnet-5-5 || fail "map-slot-ruling: set map model"
+bash "$TKT_STATE" "$S" set ruling.map "$MAP_RULING_URL" || fail "map-slot-ruling: set ruling.map"
+run_build
+[ "$RC" -eq 1 ] || fail "map-slot-ruling exits 1 (rc=$RC)"
+grep -qx "runmodelruling=$MAP_RULING_URL" "$T/calls.log" || fail "map receives ruling.map"
+! grep -Fq "$MAP_RULING_URL" "${S%.state}.journal" || fail "map ruling is not journalled"
+
+setup_case map-slot-ruling-refusal
+printf 'mutant_job=%s\n' Selection >>"$S"
+bash "$TKT_STATE" "$S" set model.map claude-sonnet-5-5 || fail "map-slot-ruling-refusal: set map model"
+bash "$TKT_STATE" "$S" set ruling.review "$SLOT_REVIEW_URL" || fail "map-slot-ruling-refusal: set wrong-slot review ruling"
+run_build
+[ "$RC" -eq 1 ] || fail "map-slot-ruling-refusal exits 1"
+grep -Fq -- '--model-ruling <comment URL>' <<<"$OUT" || fail "map refusal reaches the build digest"
+! grep -Fq "$SLOT_REVIEW_URL" "${S%.state}.journal" || fail "wrong-slot map ruling is not journalled"
 
 echo "tkt-build: all cases passed"

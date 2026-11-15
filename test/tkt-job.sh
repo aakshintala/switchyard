@@ -85,10 +85,11 @@ recs="$T/records"
 cmd="\${1:-}"; shift || true
 case "\$cmd" in
   run)
-    model=""; cwd=""; gate=""; prompt=""; idle=""; idle_ms=""; wall_ms=""
+    model=""; cwd=""; gate=""; prompt=""; idle=""; idle_ms=""; wall_ms=""; model_ruling=""
     while [ \$# -gt 0 ]; do
       case "\$1" in
         --model) model="\$2"; shift 2 ;;
+        --model-ruling) model_ruling="\$2"; shift 2 ;;
         --cwd) cwd="\$2"; shift 2 ;;
         --gate) gate="\$2"; shift 2 ;;
         --prompt-file) prompt="\$2"; shift 2 ;;
@@ -98,9 +99,14 @@ case "\$cmd" in
         *) shift ;;
       esac
     done
+    if [ "\$model" = "claude-sonnet-5-5" ] && [ -z "\$model_ruling" ]; then
+      echo 'delegate: claude-sonnet-5-5 is not in the allowed pool; pass --model-ruling <comment URL>' >&2
+      exit 2
+    fi
     n="\$((\$(cat "$T/counter") + 1))"
     printf '%s' "\$n" >"$T/counter"
     printf 'run|model=%s|cwd=%s|gate=%s|prompt=%s\n' "\$model" "\$cwd" "\$gate" "\$prompt" >>"\$log"
+    if [ -n "\$model_ruling" ]; then printf 'runmodelruling=%s\n' "\$model_ruling" >>"\$log"; fi
     if [ -n "\$idle" ]; then printf 'idle=%s\n' "\$idle" >>"\$log"; fi
     if [ -n "\$idle_ms" ]; then printf 'idleMs=%s\n' "\$idle_ms" >>"\$log"; fi
     if [ -n "\$wall_ms" ]; then printf 'wallMs=%s\n' "\$wall_ms" >>"\$log"; fi
@@ -108,20 +114,26 @@ case "\$cmd" in
     ;;
   resume)
     id="\${1:-}"; shift || true
-    prompt=""; gate=""; rmodel=""
+    prompt=""; gate=""; rmodel=""; model_ruling=""
     while [ \$# -gt 0 ]; do
       case "\$1" in
         --prompt-file) prompt="\$2"; shift 2 ;;
         --gate) gate="\$2"; shift 2 ;;
         --model) rmodel="\$2"; shift 2 ;;
+        --model-ruling) model_ruling="\$2"; shift 2 ;;
         *) shift ;;
       esac
     done
+    if [ "\$rmodel" = "claude-sonnet-5-5" ] && [ -z "\$model_ruling" ]; then
+      echo 'delegate: claude-sonnet-5-5 is not in the allowed pool; pass --model-ruling <comment URL>' >&2
+      exit 2
+    fi
     n="\$((\$(cat "$T/counter") + 1))"
     printf '%s' "\$n" >"$T/counter"
     printf 'resume|id=%s|prompt=%s|new=stub-%s\n' "\$id" "\$prompt" "\$n" >>"\$log"
     if [ -n "\$gate" ]; then printf 'resumegate=%s\n' "\$gate" >>"\$log"; fi
     if [ -n "\$rmodel" ]; then printf 'resumemodel=%s\n' "\$rmodel" >>"\$log"; fi
+    if [ -n "\$model_ruling" ]; then printf 'resumemodelruling=%s\n' "\$model_ruling" >>"\$log"; fi
     printf 'stub-%s\n' "\$n"
     ;;
   watch)
@@ -192,7 +204,7 @@ reset_stub() {
 make_record() {
   local id="$1" status="$2" gate="$3" ncommits="$4" ntext="$5" ntail="$6"
   local concerns="${7:-none}" sup="${8:-}" nuncomm="${9:-0}"
-  local i text="" tail="" comms="" dirt=""
+  local i text="" tail="" comms="" dirt="" cwd="$PWD"
   for ((i = 1; i <= ntext; i++)); do text="${text}result line ${i}
 "; done
   for ((i = 1; i <= ntail; i++)); do tail="${tail}gate log line ${i}
@@ -208,12 +220,14 @@ make_record() {
     --arg dirt "$dirt" \
     --arg concerns "$concerns" \
     --arg sup "$sup" \
+    --arg cwd "$cwd" \
     '($comms | split(" ") | map(select(length > 0))) as $nc
      | ($dirt | split(" ") | map(select(length > 0))) as $uf
      | (if $gate == "none" then null
         else {passed: ($gate == "0"), command: "bash gate.sh",
               exitCode: ($gate | tonumber), outputTail: $tail,
-              outputPath: "/tmp/gate-test.log"} end) as $g
+              outputPath: "/tmp/gate-test.log", startedAtMs: 1700000000000,
+              durationMs: 0} end) as $g
      | (if $concerns == "none" then null else $concerns end) as $c
      | {status: $status,
         result: {status: $status, text: $text, gateResult: $g,
@@ -221,7 +235,11 @@ make_record() {
                              newCommits: $nc, uncommittedFiles: $uf,
                              filesChanged: [], diffstat: "", dirtyAfter: false},
                  concerns: $c},
-        supervisorPid: 1}
+        supervisorPid: 1, startedAtMs: 1700000000000, endedAtMs: 1700000001000,
+        caller: "test", callerPid: 1, callerCommand: "test", callerCwd: $cwd,
+        resume: {model: "test-model", backend: "test", cwd: $cwd,
+                 sessionId: null, gate: "", toolIdleMs: 7200000,
+                 idleMs: null, wallMs: null, addDirs: []}}
        + (if $sup == "" then {} else {supersededBy: $sup} end)' \
     >"$T/records/$id.json" || fail "make_record $id"
 }
@@ -234,7 +252,7 @@ run_job() {
 # Adds a resume.sessionId to the canned record: add_resume ID SESSION
 add_resume() {
   local f="$T/records/$1.json"
-  jq --arg s "$2" '.resume = {sessionId: $s}' "$f" >"$f.tmp" && mv "$f.tmp" "$f" || fail "add_resume $1"
+  jq --arg s "$2" '.resume.sessionId = $s' "$f" >"$f.tmp" && mv "$f.tmp" "$f" || fail "add_resume $1"
 }
 
 # Replaces the canned record's result text: set_text ID TEXT
@@ -1673,5 +1691,37 @@ reset_stub
 run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --gate true --gate-from-plan
 [ "$RC" -eq 2 ] || fail "resume with both gates exits 2"
 grep -q "^resume|" "$T/stub.log" && fail "both gates dispatch nothing"
+
+# --- per-slot model ruling reaches delegate run/resume, without journaling it ---
+RULING_URL='https://github.com/example/repo/issues/1#issuecomment-1'
+setup_case ruling-run
+bash "$TKT_STATE" "$S" set model.lane claude-sonnet-5-5 || fail "set Sonnet lane model"
+bash "$TKT_STATE" "$S" set ruling.lane "$RULING_URL" || fail "set ruling.lane"
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "ruling run exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -qx "runmodelruling=$RULING_URL" "$T/stub.log" || fail "ruling.lane reaches delegate run"
+! grep -Fq "$RULING_URL" "${S%.state}.journal" || fail "ruling.lane writes no journal line"
+
+# --- without ruling.<slot>, Sonnet's delegate refusal reaches the caller ---
+setup_case ruling-run-refusal
+bash "$TKT_STATE" "$S" set model.lane claude-sonnet-5-5 || fail "set unruled Sonnet lane model"
+bash "$TKT_STATE" "$S" set ruling.review "$RULING_URL" || fail "set wrong-slot ruling.review"
+reset_stub
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 2 ] || fail "unruled Sonnet run surfaces refusal (rc=$RC)"
+grep -Fq -- '--model-ruling <comment URL>' "$CDIR/stderr.txt" || fail "unruled Sonnet run names the remedy"
+! grep -q '^watch|' "$T/stub.log" || fail "refused Sonnet run never watches a job"
+[ ! -e "${S%.state}.journal" ] || ! grep -Fq "$RULING_URL" "${S%.state}.journal" || fail "a wrong-slot ruling is not journalled"
+
+# --- a resume forwards the ruling for its slot to delegate resume ---
+setup_case ruling-resume
+bash "$TKT_STATE" "$S" set ruling.lane "$RULING_URL" || fail "set resume ruling.lane"
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --model claude-sonnet-5-5
+[ "$RC" -eq 0 ] || fail "ruled Sonnet resume exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -qx "resumemodelruling=$RULING_URL" "$T/stub.log" || fail "ruling.lane reaches delegate resume"
 
 echo "tkt-job: all cases passed"
