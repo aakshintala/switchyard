@@ -2,16 +2,18 @@
 # tkt-fix: one review-loop fix round; slot fix<max(round,fixslot)+1> keeps
 # rounds apart: tkt-job re-prints a terminal slot's digest.
 # A lane blocked before its PR resumes with tkt-job --resume <job.lane>; the resumed lane must finish its brief's push step (which opens the PR) before tkt-build --from gate. When no lane ran, use tkt-build --from lane.
-# Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>]
+# Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--collect-fix <job id>] [--findings <file>]
 #   [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>]
 #   [--fix-model <id>] [--verify-model <id>] [--collect-verify <job id>]
 #   --prompt appends orchestrator context to a fresh fix job; --resume requires --prompt.
+#   --collect-fix watches the stored job in the open fix slot and records its round.
 #   --collect-verify recollects the verify recorded for the latest tkt-fix round without adding a round.
 #   --fix-model overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model.
 set -euo pipefail
 
 usage() {
-  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify | --collect-verify <job id>) [--findings <file>] [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
+  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify | --collect-verify <job id> | --verify [--since <sha>] --collect-fix <job id> | --no-verify --collect-fix <job id>) [--findings <file>] [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
+  echo "  --collect-fix <job id> recollects the stored job in the open fix slot and continues the normal round; it does not dispatch another job." >&2
   echo "  --collect-verify <job id> recollects only the verify recorded for the latest tkt-fix round; it does not add a round." >&2
   echo "  --fix-model <id> overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model." >&2
   exit 2
@@ -19,7 +21,7 @@ usage() {
 
 [ $# -ge 2 ] || usage
 state="$1"; shift
-verify=0; noverify=0; findings=""; since=""; resume=""; prompt=""; fixmodel=""; verifymodel=""; collect_verify_job=""
+verify=0; noverify=0; findings=""; since=""; resume=""; prompt=""; fixmodel=""; verifymodel=""; collect_verify_job=""; collect_fix_job=""
 ruling_requested=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -33,14 +35,19 @@ while [ $# -gt 0 ]; do
     --fix-model) [ $# -ge 2 ] && [ -n "$2" ] || usage; fixmodel="$2"; shift 2 ;;
     --verify-model) [ $# -ge 2 ] && [ -n "$2" ] || usage; verifymodel="$2"; shift 2 ;;
     --collect-verify) [ $# -ge 2 ] && [ -n "$2" ] && [ -z "$collect_verify_job" ] || usage; collect_verify_job="$2"; shift 2 ;;
+    --collect-fix) [ $# -ge 2 ] && [ -n "$2" ] && [ -z "$collect_fix_job" ] || usage; collect_fix_job="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
 if [ -n "$collect_verify_job" ]; then
-  [ "$verify" -eq 0 ] && [ "$noverify" -eq 0 ] && [ -z "$findings" ] \
+  [ -z "$collect_fix_job" ] && [ "$verify" -eq 0 ] && [ "$noverify" -eq 0 ] && [ -z "$findings" ] \
     && [ "${#ruling_requested[@]}" -eq 0 ] && [ -z "$since" ] \
     && [ -z "$resume" ] && [ -z "$prompt" ] && [ -z "$fixmodel" ] \
     && [ -z "$verifymodel" ] || usage
+elif [ -n "$collect_fix_job" ]; then
+  [ -z "$resume" ] && [ -z "$prompt" ] && [ -z "$fixmodel" ] && [ -z "$findings" ] || usage
+  [ "$verify" -ne "$noverify" ] || usage
+  [ -z "$since" ] || [ "$verify" -eq 1 ] || usage
 else
   [ "$verify" -ne "$noverify" ] || usage
   [ -z "$since" ] || [ "$verify" -eq 1 ] || usage
@@ -299,11 +306,23 @@ if [ -n "$resume" ]; then
   fi
 fi
 knum="${slot#fix}"
+if [ -n "$collect_fix_job" ]; then
+  stored_collect_job="$(t get "job.$slot" 2>/dev/null || true)"
+  if [ "$collect_fix_job" != "$stored_collect_job" ]; then
+    echo "tkt-fix: --collect-fix $collect_fix_job is not the job of open slot $slot (job.$slot=$stored_collect_job)" >&2
+    exit 2
+  fi
+  # A hand-set job.fix<n> alone does not prove a dispatch passed ROUND-LIMIT.
+  # record_round_findings records this key on the dispatch path after ROUND-LIMIT.
+  findings="$(t get "fix_round.$knum.findings" 2>/dev/null || true)"
+  [ -n "$findings" ] || { echo "tkt-fix: missing recorded round findings: fix_round.$knum.findings" >&2; exit 2; }
+  [ -r "$findings" ] || { echo "tkt-fix: cannot read recorded round findings: fix_round.$knum.findings=$findings" >&2; exit 2; }
+fi
 history_file="$(history_path "$knum")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 limited=0
-if [ "$round" -ge 2 ] && [ -z "$resume" ] && [ -z "$collect_verify_job" ]; then limited=1; fi
+if [ "$round" -ge 2 ] && [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ -z "$collect_fix_job" ]; then limited=1; fi
 
 ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_notes=(); ruling_jsons=()
 ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
@@ -471,6 +490,10 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
       [ "$noverify" -eq 0 ] || ruling_refuse refutes-need-verify "$ruling_id"
     fi
     if [ -s "$ruling_grants_file" ]; then
+      if [ -n "$collect_fix_job" ]; then
+        emit "RULING-REFUSED reason=bad-grant comment=$ruling_id" 2 \
+          "a collect needs no grant because the collected dispatch already passed the round limit"
+      fi
       ruling_grant_ids+=("$ruling_id")
       grant_comment_count=$((grant_comment_count + 1))
     elif [ ! -s "$ruling_refutes_file" ]; then
@@ -674,13 +697,17 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
 fi
 if [ "$limited" -eq 1 ] && [ "${recover_unpushed:-0}" -ne 1 ]; then round_limit; fi
 recover_unpushed="${recover_unpushed:-0}"
-if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && job="$(t get "job.$slot" 2>/dev/null || true)" && [ -n "$job" ]; then emit "RECOVER" 3 "job=$job" "slot=$slot"; fi
+if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && [ -z "$collect_fix_job" ] && job="$(t get "job.$slot" 2>/dev/null || true)" && [ -n "$job" ]; then
+  recovery_cmd="tkt-fix $(printf '%q' "$state") [--verify|--no-verify] --collect-fix $(printf '%q' "$job")"
+  emit "RECOVER" 3 "job=$job" "slot=$slot" "recovery: $recovery_cmd" \
+    "choose --verify or --no-verify to match the mode used for this round"
+fi
 [ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
 [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
 # A fresh dispatch needs a finding to fix (#1879); nothing before this point
 # writes fix_round.*, job.* or fixslot. Rows match the way tkt-verify and
 # the round-findings checks read them: column-0 `P[123] `.
-if [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ "$recover_unpushed" -ne 1 ]; then
+if [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ -z "$collect_fix_job" ] && [ "$recover_unpushed" -ne 1 ]; then
   finding_rows input "$findings" >/dev/null || emit "FINDINGS-EMPTY file=$findings" 2 \
     "no column-0 P1-P3 finding rows in $findings" \
     "for a verify-only run, use: tkt-verify $state --findings $findings"
@@ -1096,7 +1123,9 @@ if [ "$recover_unpushed" -eq 1 ]; then
   t set fixopen 0
   echo "tkt-fix: pushed unpushed fix job head $recover_old_head -> $recover_new_head" >&2
 else
-  if [ -n "$resume" ]; then
+  if [ -n "$collect_fix_job" ]; then
+    args=(--slot "$slot" --expect-commits)
+  elif [ -n "$resume" ]; then
     resume_prompt="$prompt"
     if [ "${#ruling_ids[@]}" -gt 0 ]; then
       [ -r "$prompt" ] || { echo "tkt-fix: cannot read prompt: $prompt" >&2; exit 2; }
