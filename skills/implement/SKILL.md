@@ -43,6 +43,8 @@ When the ticket's spec is another issue, pass its number with `tkt-start --spec-
 
 The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `verifier-rN` and `verifier-rN-drift` → `verifier`, `confirm` → `verifier`, `planner` → `planner`, and `fixN` → `fix`. `verifier` is the plan Verifier; `verify` is review-loop's scoped verify.
 
+A slot whose stored job came from a different prompt needs no ruling to clear it when that job has finished: `tkt-job` journals `tkt-job slot <slot> replaced job=<old id> ...`, clears the slot and dispatches the new prompt fresh. It still exits 2 with `ERROR slot <slot> holds job ... from a different prompt` while the job is running or queued, or when its record is missing or unreadable.
+
 `tkt-job`, `tkt-build`, and `tkt-drive` send journaled stop reports to `TKT_STOP_INBOX`; when unset, it defaults to the `inbox` directory beside the state file (flywheel's run/inbox), while an explicitly empty value disables sending and records a warning. A failed send journals a warning and is retried by the next write of the same stop.
 
 | Tool | Driver behavior / next action | Stop verdicts to route |
