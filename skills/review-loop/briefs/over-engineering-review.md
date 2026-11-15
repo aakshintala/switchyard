@@ -6,4 +6,6 @@ The ticket text (body, then comments) is in __TICKET_FILES__ in your working dir
 
 Name for each finding the gate its fix will land on, such as mutants, a lint or a test, and say which side wins when the fix would trip that gate.
 
+Wait for every background command to finish before you give your verdict. If you take another turn after the verdict, make that turn the full review again, verdict line first.
+
 Max 150 words. End with a STATUS line.
