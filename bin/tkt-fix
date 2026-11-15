@@ -675,7 +675,7 @@ if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && job="$(t get "job.$slot"
 [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
 # A fresh dispatch needs a finding to fix (#1879); nothing before this point
 # writes fix_round.*, job.* or fixslot.
-if [ -z "$resume" ] && [ "$recover_unpushed" -ne 1 ]; then
+if [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ "$recover_unpushed" -ne 1 ]; then
   findings_has_rows=0
   while IFS= read -r finding_row || [ -n "$finding_row" ]; do
     if [[ "$(normalize_finding_line "$finding_row")" =~ ^P[0123]\  ]]; then findings_has_rows=1; break; fi

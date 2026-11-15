@@ -1253,6 +1253,9 @@ incomplete_findings="$(bash "$TKT_STATE" "$S" get findings)"
 grep -Fq 'P1 open finding' "$incomplete_findings" || fail "incomplete collect-verify records open findings"
 
 # The recorded verify collects, updates findings, and does not add to round.
+# A state findings file with no finding rows does not block a collect (#1879).
+printf 'no open findings\n' >"$CDIR/collect-empty-findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/collect-empty-findings.md" >/dev/null
 printf 'ok' >"$T/collectmode"
 run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = 0 ] || fail "valid collect-verify exited $run_rc: $out $(cat "$T/stderr")"
