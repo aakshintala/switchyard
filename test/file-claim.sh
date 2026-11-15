@@ -1353,6 +1353,35 @@ grep -qF 'active-6103.txt' <<<"$(claims_blob "$R")" || fail "active lane claim r
 ! grep -qF 'phase-6104.txt' <<<"$(claims_blob "$R")" || fail "retired phase-holder claim is reaped"
 grep -qF 'REAP claim before-6101.txt by fiber-6101' <<<"$out" || fail "reaped retired-lane claim is reported: $out"
 
+# Re-claiming an owned path must reap an overlapping retired holder whose claim
+# predates its done stamp, while retaining a retired holder claimed afterward.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6184 --grant --worktree t:retired-a --repo test/repo retired-reclaim-before.txt >/dev/null 2>&1 || fail "retired re-claim before-stamp holder setup"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6185 --grant --worktree t:retired-b --repo test/repo retired-reclaim-before.txt >/dev/null 2>&1 || fail "retired re-claim before-stamp own holder setup"
+set_claim_timestamp "$R" retired-reclaim-before.txt 2020-01-01T00:00:00Z
+printf 'fiber-6184\t2021-01-01T00:00:00Z\n' >"$LANECHECK_RETIRED_FILE"
+out="$(GH_TICKET_STATES='6184:OPEN,6185:OPEN' FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6185 --grant --worktree t:retired-b --repo test/repo retired-reclaim-before.txt 2>"$T/e-reclaim-retired-before")" \
+  || fail "re-claim beside a retired before-stamp holder succeeds: $(cat "$T/e-reclaim-retired-before")"
+grep -qF 'REAP claim retired-reclaim-before.txt by fiber-6184 (retired lane claimed at or before done stamp)' <<<"$out" \
+  || fail "re-claim reaps the retired before-stamp holder: $out"
+! grep -qF 'OVERLAP retired-reclaim-before.txt lane:fiber-6184' <<<"$out" \
+  || fail "re-claim does not report the reaped retired holder as an overlap: $out"
+! grep -q "^retired-reclaim-before.txt${TAB}fiber-6184${TAB}" <<<"$(claims_blob "$R")" \
+  || fail "re-claim removes the retired before-stamp holder row"
+
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6186 --grant --worktree t:retired-newer-a --repo test/repo retired-reclaim-newer.txt >/dev/null 2>&1 || fail "retired re-claim newer-stamp holder setup"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6187 --grant --worktree t:retired-newer-b --repo test/repo retired-reclaim-newer.txt >/dev/null 2>&1 || fail "retired re-claim newer-stamp own holder setup"
+set_claim_timestamp "$R" retired-reclaim-newer.txt 2022-01-01T00:00:00Z
+printf 'fiber-6186\t2021-01-01T00:00:00Z\n' >"$LANECHECK_RETIRED_FILE"
+out="$(GH_TICKET_STATES='6186:OPEN,6187:OPEN' FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6187 --grant --worktree t:retired-newer-b --repo test/repo retired-reclaim-newer.txt 2>"$T/e-reclaim-retired-newer")" \
+  || fail "re-claim beside a retired newer-stamp holder succeeds: $(cat "$T/e-reclaim-retired-newer")"
+grep -qF 'OVERLAP retired-reclaim-newer.txt lane:fiber-6186' <<<"$out" \
+  || fail "re-claim keeps overlap with a retired newer-stamp holder: $out"
+grep -q "^retired-reclaim-newer.txt${TAB}fiber-6186${TAB}" <<<"$(claims_blob "$R")" \
+  || fail "re-claim retains the retired newer-stamp holder row"
+: >"$LANECHECK_RETIRED_FILE"
+
 # A failed retired-lane lookup disables only retirement-based drops; closed-ticket
 # cleanup still runs, and an open claim on a retired lane remains held.
 R="$(fresh)"

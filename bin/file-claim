@@ -388,19 +388,20 @@ claim_diff_paths() {
 }
 
 # Return success only when each requested path has an own hold, no sweep row
-# overlaps, and no terminal other-lane ticket/PR overlap requires reap.
+# overlaps, and no terminal or reapable retired other-lane overlap requires reap.
 claim_can_skip_reap() {
-  local lane="$1" repo="$2" claim_tip="$3" p claim_path holder_lane holder_pr ticket pr_number i
-  local own_hold prefix lookup_rc expected actual
+  local lane="$1" repo="$2" claim_tip="$3" p claim_path holder_lane holder_at holder_pr ticket pr_number i
+  local own_hold prefix lookup_rc expected actual retired_loaded=0
   shift 3
-  local -a paths=("$@") claim_paths=() claim_lanes=() claim_prs=() pr_numbers=()
-  local claims_file="$W/noop-claims" numbers_file="$W/noop-ticket-numbers"
+  local -a paths=("$@") claim_paths=() claim_lanes=() claim_ats=() claim_prs=() pr_numbers=()
+  local claims_file="$W/noop-claims" numbers_file="$W/noop-ticket-numbers" retired_lanes="$W/noop-retired-lanes"
   [ "${#paths[@]}" -gt 0 ] || return 1
   load_claims "$claim_tip" "$claims_file"
-  while IFS="$TAB" read -r claim_path holder_lane _holder_kind _holder_at _holder_wt holder_pr || [ -n "$claim_path" ]; do
+  while IFS="$TAB" read -r claim_path holder_lane _holder_kind holder_at _holder_wt holder_pr || [ -n "$claim_path" ]; do
     [ -n "$claim_path" ] || continue
     claim_paths+=("$claim_path")
     claim_lanes+=("$holder_lane")
+    claim_ats+=("$holder_at")
     claim_prs+=("$holder_pr")
   done <"$claims_file"
 
@@ -416,7 +417,16 @@ claim_can_skip_reap() {
           own_hold=1
         else
           ticket="$(lane_ticket_num "$holder_lane")"
-          [ -z "$ticket" ] || printf '%s\n' "$ticket" >>"$numbers_file"
+          if [ -n "$ticket" ]; then
+            printf '%s\n' "$ticket" >>"$numbers_file"
+            if [ "$retired_loaded" = 0 ]; then
+              load_retired_lanes "$retired_lanes" || return 1
+              retired_loaded=1
+            fi
+            if claim_is_retired_before_done "$holder_lane" "${claim_ats[$i]}" "$retired_lanes"; then
+              return 1
+            fi
+          fi
           holder_pr="${claim_prs[$i]-}"
           if [ -n "$holder_pr" ]; then
             IFS=',' read -r -a pr_numbers <<<"$holder_pr"
@@ -669,9 +679,23 @@ claim_is_retired_before_done() {
   [[ "$claimed_at" < "$done_at" || "$claimed_at" == "$done_at" ]]
 }
 
+# Load and validate lanecheck's retired-lane TSV. Return 1 on lookup failure and
+# 2 on malformed output; callers decide whether to warn or fail closed.
+load_retired_lanes() {
+  local retired_file="$1" lanecheck="${FW_LANECHECK:-$script_dir/lanecheck}"
+  if ! "$lanecheck" retired >"$retired_file" 2>"$W/lanecheck.err"; then
+    : >"$retired_file"
+    return 1
+  fi
+  if ! awk -F '\t' 'NF != 2 || $1 !~ /^fiber-[0-9]+$/ || $2 !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/ { bad = 1 } END { exit bad }' "$retired_file"; then
+    : >"$retired_file"
+    return 2
+  fi
+}
+
 cmd_reap() {
   local repo="$1" initial_main_tip="${2:-}" initial_tip="${3:-}" reuse_tips=0 remote run_dir attempt=1 tip claims numbers prefix lookup_rc expected actual
-  local line c_path c_lane c_kind c_at c_wt c_pr ticket pr_number reason path retired_lanes lanecheck
+  local line c_path c_lane c_kind c_at c_wt c_pr ticket pr_number reason path retired_lanes
   local kept dropped dropped_files grant_prs grant_file base grant_ticket closed_reason closed_pr
   remote="$(default_remote "$repo")"
   run_dir="$(ticket_states_run_dir)"
@@ -736,15 +760,19 @@ cmd_reap() {
     fi
 
     retired_lanes="$W/retired-lanes.tsv"
-    lanecheck="${FW_LANECHECK:-$script_dir/lanecheck}"
-    if ! "$lanecheck" retired >"$retired_lanes" 2>"$W/lanecheck.err"; then
-      cause="$(head -c 200 "$W/lanecheck.err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
-      [ -n "$cause" ] || cause="command exited nonzero"
-      echo "file-claim: warning: lanecheck retired-lane lookup failed ($cause); retirement-based drops disabled" >&2
-      : >"$retired_lanes"
-    elif ! awk -F '\t' 'NF != 2 || $1 !~ /^fiber-[0-9]+$/ || $2 !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/ { bad = 1 } END { exit bad }' "$retired_lanes"; then
-      echo "file-claim: warning: malformed lanecheck retired-lane list; retirement-based drops disabled" >&2
-      : >"$retired_lanes"
+    if load_retired_lanes "$retired_lanes"; then
+      :
+    else
+      case "$?" in
+        1)
+          cause="$(head -c 200 "$W/lanecheck.err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+          [ -n "$cause" ] || cause="command exited nonzero"
+          echo "file-claim: warning: lanecheck retired-lane lookup failed ($cause); retirement-based drops disabled" >&2
+          ;;
+        *)
+          echo "file-claim: warning: malformed lanecheck retired-lane list; retirement-based drops disabled" >&2
+          ;;
+      esac
     fi
 
     kept="$W/kept.tsv"; dropped="$W/dropped.tsv"; dropped_files="$W/dropped-files.tsv"; grant_prs="$W/grant-prs.tsv"
