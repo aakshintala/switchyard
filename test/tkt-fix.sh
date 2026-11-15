@@ -77,6 +77,30 @@ for a in "\$@"; do
   if [ "\$a" = "--gate-from-plan" ]; then gate_from_plan=1; fi
   prev="\$a"
 done
+watch_only=1
+for a in "\$@"; do
+  case "\$a" in --template|--brief|--model|--resume|--prompt|--gate|--gate-from-plan) watch_only=0;; esac
+done
+if [ "\$watch_only" -eq 1 ] && [[ " \$* " == *" --expect-commits "* ]]; then
+  jobid="\$($TKT_STATE "\$state" get "job.\$slot")"
+  record="\$(bash "$REAL_BIN/job-record" "\$jobid" 2>/dev/null || true)"
+  [ -n "\$record" ] && [ -r "\$record" ] || { echo "missing fixture record for \$jobid" >&2; exit 2; }
+  job_status="\$(jq -r '.result.status // .status // ""' "\$record")"
+  commits="\$(jq -r '.result.changeSet.newCommits // [] | length' "\$record")"
+  head_after="\$(jq -r '.result.changeSet.headAfter // ""' "\$record")"
+  gate_exit="\$(jq -r '.result.gateResult | if . == null then "none" elif .exitCode != null then (.exitCode | tostring) elif .passed == true then "0" else "1" end' "\$record")"
+  gate_word=none; [ "\$gate_exit" = none ] || gate_word=PASS
+  if [ "\$job_status" = DONE ] && [ "\$commits" = 0 ]; then
+    echo "TKT tkt-job NO-COMMITS id=\$jobid gate=\$gate_word log=x"
+    exit 1
+  fi
+  if [ "\$job_status" = DONE ]; then
+    echo "TKT tkt-job DONE id=\$jobid head=\$head_after commits=\$commits gate=\$gate_word log=x"
+    exit 0
+  fi
+  echo "TKT tkt-job UNKNOWN id=\$jobid status=\$job_status log=x"
+  exit 3
+fi
 if [ -r "$T/job-credit-mode" ] && { [ "\$(cat "$T/job-credit-mode")" = earlier-chain ] || [ "\$(cat "$T/job-credit-mode")" = chain-own-row ]; }; then
   stored_jobid=j1
   jobid=j2
@@ -90,6 +114,20 @@ commit_as_job() {
   git -C "\$wt" add "\$1"
   git -C "\$wt" -c user.email=t@t -c user.name=t commit -qm "fix: \$1"
 }
+if [ "\$(cat "$T/jobmode")" = wrapper-death ]; then
+  before="\$("$TKT_STATE" "\$state" get head)"
+  touch "$T/wrapper-waiting"
+  kill -KILL "\$PPID"
+  sleep 0.2
+  commit_as_job fix.txt "finished-after-wrapper-death"
+  after="\$(git -C "\$wt" rev-parse HEAD)"
+  mkdir -p "\$TMPDIR/delegate-jobs"
+  jq -n --arg before "\$before" --arg after "\$after" --arg cwd "\$wt" \\
+    '{status:"DONE",result:{status:"DONE",text:"Final report: gate PASS",changeSet:{headBefore:\$before,headAfter:\$after,newCommits:[\$after],uncommittedFiles:[],filesChanged:["fix.txt"],diffstat:"1 file changed",dirtyAfter:false},concerns:null},supervisorPid:1,startedAtMs:1700000000000,endedAtMs:1700000001000,caller:"test",callerPid:1,callerCommand:"test",callerCwd:\$cwd,resume:{model:"fix-model",backend:"test",cwd:\$cwd,sessionId:"test-session",gate:"true",toolIdleMs:7200000,idleMs:null,wallMs:null,addDirs:[]}}' \\
+    >"\$TMPDIR/delegate-jobs/\$jobid.json"
+  touch "$T/wrapper-finished"
+  exit 0
+fi
 case "\$(cat "$T/jobmode")" in
   done)
     n="\$((\$(cat "$T/jobcount") + 1))"
@@ -1991,9 +2029,73 @@ rc=$?; [ "$rc" = "3" ] || fail "recover exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "bad verdict: $(head -n 1 <<<"$out")"
 grep -q "job=j1" <<<"$out" || fail "job id missing from RECOVER digest"
 grep -q "slot=fix1" <<<"$out" || fail "slot missing from RECOVER digest"
+recovery="tkt-fix $(printf '%q' "$S") --verify --collect-fix $(printf '%q' j1)"
+grep -Fq "recovery: $recovery" <<<"$out" || fail "RECOVER omitted collect-fix recovery command: $out"
 grep -q "job|" "$T/calls.log" && fail "fix job dispatched on RECOVER"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "recover pushed"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "head moved on RECOVER"
+
+# --collect-fix only collects the id recorded for the computed open slot.
+setup_case collect-fix-wrong
+bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+cp "$S" "$T/state-before-wrong-collect"
+run_rc=0; bash "$TKT" "$S" --verify --collect-fix j2 >"$T/wrong.out" 2>"$T/stderr" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "wrong collect-fix id exited $run_rc, want 2"
+grep -Fq 'tkt-fix: --collect-fix j2 is not the job of open slot fix1 (job.fix1=j1)' "$T/stderr" || fail "wrong collect-fix id did not name both ids: $(cat "$T/stderr")"
+cmp -s "$S" "$T/state-before-wrong-collect" || fail "wrong collect-fix id changed state"
+grep -q 'job|' "$T/calls.log" && fail "wrong collect-fix id called tkt-job"
+
+# A wrapper dies during the fix-job wait. The job then commits and leaves a
+# completed delegate record; collecting it records and verifies the round.
+setup_case collect-fix-wrapper-death
+printf 'wrapper-death' >"$T/jobmode"
+bash "$TKT" "$S" --verify >"$T/wrapper.out" 2>"$T/wrapper.err" &
+wrapper_pid=$!
+wrapper_rc=0; wait "$wrapper_pid" || wrapper_rc=$?
+[ "$wrapper_rc" -ne 0 ] || fail "wrapper-death tkt-fix did not die"
+for tries in $(seq 1 100); do [ -f "$T/wrapper-finished" ] && break; sleep 0.1; done
+[ -f "$T/wrapper-finished" ] || fail "fix job did not finish after its wrapper died"
+[ "$(bash "$TKT_STATE" "$S" get job.fix1)" = j1 ] || fail "wrapper death did not preserve job.fix1"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = 1 ] || fail "wrapper death did not preserve open fix slot"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] || fail "wrapper death changed round"
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.1.head 2>/dev/null || true)" ] || fail "wrapper death recorded fix_round.1.head before collection"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.start)" = "$OLD" ] || fail "wrapper death did not record round start"
+[ -r "$(bash "$TKT_STATE" "$S" get fix_round.1.findings)" ] || fail "wrapper death did not record round findings"
+collected_record="$(bash "$REAL_BIN/job-record" j1)"
+[ -r "$collected_record" ] || fail "job-record did not locate the completed collected job"
+jq -e '.result.status == "DONE" and (.result.text | contains("gate PASS")) and .result.gateResult == null and (.result.changeSet.newCommits | length) == 1' "$collected_record" >/dev/null || fail "wrapper-death fixture does not copy the completed job record shape"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --collect-fix j1 2>"$T/stderr")" || fail "collect-fix exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK reviewed=' || fail "collect-fix did not apply the normal verify path: $out"
+collected_head="$(git -C "$WT" rev-parse HEAD)"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.head)" = "$collected_head" ] || fail "collect-fix did not record fix_round.1.head"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$collected_head" ] || fail "collect-fix did not record head"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 1 ] || fail "collect-fix did not bump round"
+[ "$(bash "$TKT_STATE" "$S" get fixslot)" = 1 ] || fail "collect-fix did not close the slot"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.verify_head)" = "$collected_head" ] || fail "collect-fix did not record verify_head"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.verify_slot)" = fix1 ] || fail "collect-fix did not record verify_slot"
+grep -Fq "job|$S --slot fix1 --expect-commits" "$T/calls.log" || fail "collect-fix did not use the watch-only tkt-job call: $(cat "$T/calls.log")"
+! grep -q 'tkt-fix gate PASS ' "${S%.state}.journal" || fail "collect-fix credited a report-only gate PASS without a passing record gateResult"
+
+# --collect-fix refuses dispatch modifiers and conflicting collection modes.
+setup_case collect-fix-usage
+for usage_case in resume prompt fix-model collect-verify duplicate; do
+  args=(--verify --collect-fix j1)
+  case "$usage_case" in
+    resume) args+=(--resume j1 --prompt "$CDIR/prompt.md");;
+    prompt) args+=(--prompt "$CDIR/prompt.md");;
+    fix-model) args+=(--fix-model alternate);;
+    collect-verify) args+=(--collect-verify verify-j1);;
+    duplicate) args+=(--collect-fix j2);;
+  esac
+  run_rc=0; bash "$TKT" "$S" "${args[@]}" >"$T/usage.out" 2>"$T/stderr" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "collect-fix $usage_case combination exited $run_rc, want usage 2"
+  grep -Fq 'usage: tkt-fix ' "$T/stderr" || fail "collect-fix $usage_case did not print usage: $(cat "$T/stderr")"
+done
+
+case "${CASE:-}" in collect-fix) exit 0;; esac
+
 # 10. DRIFT B: PR head rewound to an ancestor of state head exits 3.
 setup_case driftb
 printf 'fixed\n' >"$WT/fix.txt"
