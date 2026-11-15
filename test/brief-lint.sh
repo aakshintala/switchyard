@@ -66,4 +66,30 @@ out="$("$LINT" "${briefs[@]}" 2>"$T/pack-err.txt")"; rc=$?
 [ -z "$out" ] || fail "pack brief templates print nothing: [$out]"
 [ ! -s "$T/pack-err.txt" ] || fail "pack brief templates are silent on stderr"
 
+# bin/lib/template.md, template-tkt.md and template-pi.md share rules that
+# must read the same in all three (#1859; #1845 restored drifted wording).
+# Keep this list short and to sentences meant to be identical. A deliberate
+# wording change edits all three templates and this list together.
+shared_sentences=(
+  'your final message is the path, then its STATUS line.'
+  'never cat a lane brief or lane addendum into it: lane-only rules (no CI waits) contradict fix.md'"'"'s wait-then-push (#2319).'
+  '"Cause: open" is deliberate: the repro test picks among the candidates.'
+  'Rewrite the code so no form remains that no test can catch (docs/testing.md, "Proving a test bites")'
+)
+# check_shared <file>...: print "<file>: <sentence>" for each listed sentence a file lacks.
+check_shared() {
+  local f s
+  for f in "$@"; do
+    for s in "${shared_sentences[@]}"; do
+      grep -qF -- "$s" "$f" || printf '%s: %s\n' "$f" "$s"
+    done
+  done
+}
+templates=("$SCRIPT_DIR/../bin/lib/template.md" "$SCRIPT_DIR/../bin/lib/template-tkt.md" "$SCRIPT_DIR/../bin/lib/template-pi.md")
+out="$(check_shared "${templates[@]}")"
+[ -z "$out" ] || fail "shared template sentences match in all three templates: [$out]"
+awk '{ sub(/picks among the candidates/, "picks a candidate") } 1' "${templates[2]}" >"$T/drifted.md"
+out="$(check_shared "$T/drifted.md")"
+[ "$out" = "$T/drifted.md: ${shared_sentences[2]}" ] || fail "a drifted shared sentence is named: [$out]"
+
 echo "brief-lint: all cases passed"
