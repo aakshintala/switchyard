@@ -585,7 +585,7 @@ fi
 if [ "$outcome" = measurement ]; then
   # The gate passed: no PR, review or CI follows. Record the terminal outcome
   # and the intentional review skip.
-  tkt set reviewed "$head"; tkt unset grants; tkt set round 0; tkt set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; tkt set review_status skipped
+  tkt set reviewed "$head"; tkt unset grants; tkt set round 0; stamp_verdict_at tkt; tkt set review_status skipped
   emit "MEASURED head=$head" 0
 fi
 tkt set review_status ready
@@ -882,7 +882,7 @@ n_approve="$(grep -cE 'VERDICT (standards|spec|overbuild): APPROVE' <<<"$collect
 bad=$((3 - n_approve + p1 + p2 + merged))
 # A map note alone leaves the review state unwritten, so the review can re-run.
 if [ "$bad" -gt 0 ] || [ -z "$map_note" ]; then
-  tkt set reviewed "$head"; tkt set review_status done; tkt set findings "$findings_file"; tkt unset grants; tkt set round 0; tkt set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  tkt set reviewed "$head"; tkt set review_status done; tkt set findings "$findings_file"; tkt unset grants; tkt set round 0; stamp_verdict_at tkt
 fi
 [ -n "$map_note" ] && bad=$((bad + 1))
 approve_digest="$collect_out"; digest="$(cat "$findings_file")"

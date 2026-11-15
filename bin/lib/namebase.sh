@@ -47,6 +47,12 @@ part_findings_suffix() {
   if [ "$1" -ge 2 ] 2>/dev/null; then printf '%s' "-part$1"; fi
 }
 
+# stamp_verdict_at SETTER: write the current UTC timestamp through SETTER.
+stamp_verdict_at() {
+  local setter="$1"
+  "$setter" set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
 # findings_write_allowed STATE DEST: return 0 when DEST may be written as
 # this ticket's findings or findings_history file: it does not exist, the state
 # points to it, or the journal holds the corresponding `findings write` line.

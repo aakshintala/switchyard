@@ -1,6 +1,7 @@
 # Fetch and issue-check a GitHub issue comment used as a recorded ruling.
-# Callers provide repo and issue; failures are reported through
-# ruling_comment_failure as fetch, issue or author.
+# Callers provide repo and issue. check_round_grant also reads state, pr,
+# grant_comment_count and round_grant_limited; it sets grant_round and grant_url.
+# Failures are reported through ruling_comment_failure as fetch, issue or author.
 fetch_issue_comment() {
   local comment_id="$1" comment_json="$2" comment_error="$3" alternate_issue="${4:-}"
   ruling_comment_failure=""
