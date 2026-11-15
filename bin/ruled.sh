@@ -301,13 +301,11 @@ lanejid=$(printf '%s' "$lane" | cut -f3)
 
 case "${INBOX_HOST:-$lanehost}" in
     mac)
-        # `mac` names two kinds of lane: bglaunch.sh starts a Claude session,
-        # maclaunch.sh a muse delegate session. Only the local delegate store
-        # can tell them apart, and calling every mac lane a Claude session sent
-        # #4272's and #4273's rulings to a SendMessage address that does not
-        # exist (switchyard #1069). Ask for this row's one session rather than
-        # listing the store: a failed lookup must be loud, not mistaken for a
-        # Claude lane and routed incorrectly (switchyard #1865).
+        # Column 5 holds a delegate id for a muse/maclaunch lane and a Claude
+        # --bg id for a bglaunch lane, so only the store's list tells them
+        # apart. A failed list is loud (switchyard #1865), not read as "not a
+        # delegate session"; treating every mac lane as Claude sent #4272 and
+        # #4273's rulings to a SendMessage address that does not exist (#1069).
         if [ -n "$lanejid" ]; then
             delegate_bin=${FW_DELEGATE:-$HOME/.local/bin/delegate}
             delegate_command=$delegate_bin
@@ -316,34 +314,28 @@ case "${INBOX_HOST:-$lanehost}" in
                 *) delegate_command=$(command -v "$delegate_bin" 2>/dev/null || true) ;;
             esac
             if [ -z "$delegate_command" ] || [ ! -x "$delegate_command" ]; then
-                echo "delegate lookup failed: binary '$delegate_bin' is missing or not executable; session status lookup could not run." >&2
+                echo "delegate lookup failed: binary '$delegate_bin' is missing or not executable; delegate session list lookup could not run." >&2
                 echo "  the archive copy above is the durable record; resolve delivery manually." >&2
                 exit 3
             fi
 
-            lookup_output=$("$delegate_bin" session status "$lanejid" 2>&1)
+            lookup_output=$("$delegate_bin" session list 2>&1)
             lookup_rc=$?
-            case "$lookup_rc" in
-                0)
-                    deliver_session_ruling mac "" "$lanejid" "$dest" "$lanesess"
-                    delivery_rc=$?
-                    if [ "$delivery_rc" -eq 0 ]; then
-                        exit 0
-                    fi
-                    echo "  a mac lane has no lane-inbox to fall back to. Resolve delivery manually and say so." >&2
-                    exit 3
-                    ;;
-                3)
-                    echo "delegate lookup failed: the roster names delegate session $lanejid but the delegate store has no such session." >&2
-                    echo "  the archive copy above is the durable record; resolve delivery manually." >&2
-                    exit 3
-                    ;;
-                *)
-                    echo "delegate lookup failed: delegate session status $lanejid failed (exit $lookup_rc): $lookup_output" >&2
-                    echo "  the archive copy above is the durable record; resolve delivery manually." >&2
-                    exit 3
-                    ;;
-            esac
+            if [ "$lookup_rc" -ne 0 ]; then
+                echo "delegate lookup failed: delegate session list failed (exit $lookup_rc): $lookup_output" >&2
+                echo "  the archive copy above is the durable record; resolve delivery manually." >&2
+                exit 3
+            fi
+
+            if printf '%s\n' "$lookup_output" | awk -v id="$lanejid" 'index($0, id " ") == 1 { found = 1 } END { exit !found }'; then
+                deliver_session_ruling mac "" "$lanejid" "$dest" "$lanesess"
+                delivery_rc=$?
+                if [ "$delivery_rc" -eq 0 ]; then
+                    exit 0
+                fi
+                echo "  a mac lane has no lane-inbox to fall back to. Resolve delivery manually and say so." >&2
+                exit 3
+            fi
         fi
         echo "lane $ticket is a mac Claude session ($lanesess), which has no inbox file to deliver to." >&2
         echo "  send it yourself: SendMessage to '$lanesess' with the ruling's text." >&2
