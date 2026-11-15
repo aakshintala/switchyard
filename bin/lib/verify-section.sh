@@ -18,6 +18,18 @@ normalize_finding_line() {
     -e 's/[[:space:]]*$//'
 }
 
+# finding_rows CLASS FILE: print raw, column-0 finding rows. Input findings
+# files contain P1-P3; review output also permits P0. Keep these classes apart.
+finding_rows() {
+  local row_class="$1" file="$2" pattern
+  case "$row_class" in
+    input) pattern='^P[123] ' ;;
+    verify-output) pattern='^P[0123] ' ;;
+    *) return 2 ;;
+  esac
+  grep "$pattern" "$file"
+}
+
 verify_section_lines() {
   local line norm in_verify=0
   while IFS= read -r line || [ -n "$line" ]; do

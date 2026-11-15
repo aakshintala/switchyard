@@ -104,6 +104,39 @@ review_verdict() {
   esac
 }
 
+finding_section_heading() {
+  local line="$1" heading
+  line="$(normalize_finding_line "$line")"
+  heading="$(printf '%s' "$line" | sed -E -e 's/^#+[[:space:]]*//' -e 's/:[[:space:]]*$//')"
+  case "$heading" in
+    Fixed|Open|New|"Not judged") printf '%s' "$heading" ;;
+    *) return 1 ;;
+  esac
+}
+
+finding_row_is_closed() {
+  local section="$1" line="$2"
+  [ "$section" = Fixed ] || [ "$section" = "Not judged" ] || [[ "$line" == *": fixed." ]]
+}
+
+# review_incomplete_rows FILE: populate the bare P0-P3 rows and whether an
+# open P0-P2 row remains. The input is review-pr's digest, which need not have
+# a ## verify heading, so inspect the whole file while matching rows raw.
+review_incomplete_rows() {
+  local file="$1" line heading section=""
+  REVIEW_INCOMPLETE_ROWS="$(finding_rows verify-output "$file" | head -n 30 || true)"
+  REVIEW_INCOMPLETE_HAS_OPEN_P12=0
+  [ -n "$REVIEW_INCOMPLETE_ROWS" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    if heading="$(finding_section_heading "$line")"; then
+      section="$heading"
+      continue
+    fi
+    finding_row_is_closed "$section" "$line" && continue
+    if [[ "$line" == P[012]\ * ]]; then REVIEW_INCOMPLETE_HAS_OPEN_P12=1; fi
+  done <"$file"
+}
+
 parse_p3_verify_findings() {
   local encoded="$1" output="$2" decoded="${2}.comment" line heading section="" count=0 decoded_ok=1 valid=1 result=1
   if ! printf '%s' "$encoded" | base64 -D >"$decoded" 2>/dev/null; then
@@ -119,11 +152,11 @@ parse_p3_verify_findings() {
       # Fixed and not-judged sections can contain priority rows that are closed,
       # so exclude them before classifying open findings.
       line="$(normalize_finding_line "$line")"
-      heading="$(printf '%s' "$line" | sed -E -e 's/^#+[[:space:]]*//' -e 's/:[[:space:]]*$//')"
-      case "$heading" in
-        Fixed|Open|New|"Not judged") section="$heading"; continue ;;
-      esac
-      if [ "$section" = Fixed ] || [ "$section" = "Not judged" ] || [[ "$line" == *": fixed." ]]; then continue; fi
+      if heading="$(finding_section_heading "$line")"; then
+        section="$heading"
+        continue
+      fi
+      if finding_row_is_closed "$section" "$line"; then continue; fi
       if [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then
         if [[ "$line" =~ ^P3[[:space:]]+[^[:space:]] ]]; then
           printf '%s\n' "$line" >>"$output"
