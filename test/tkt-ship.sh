@@ -9,6 +9,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TKT="$SCRIPT_DIR/../bin/tkt-ship"
+TKT_VERIFY="$SCRIPT_DIR/../bin/tkt-verify"
 REAL_BIN="$SCRIPT_DIR/../bin"
 
 fail() {
@@ -31,6 +32,19 @@ cat >"$T/bin/ship-pr" <<EOF
 #!/usr/bin/env bash
 printf 'ship-pr|cwd=%s|%s\n' "\$(pwd)" "\$*" >>"$T/calls.log"
 for a in "\$@"; do printf 'arg|%s\n' "\$a" >>"$T/calls.log"; done
+if [ -r "$T/incomplete-p3-expected" ]; then
+  expected="\$(cat "$T/incomplete-p3-expected")"
+  reviewed_arg=""; previous=""
+  for a in "\$@"; do
+    [ "\$previous" != --reviewed ] || reviewed_arg="\$a"
+    previous="\$a"
+  done
+  if [ "\$reviewed_arg" != "\$expected" ]; then
+    echo 'ship-pr: refused REVIEW because reviewed head is not the P3 verify head' >&2
+    exit 5
+  fi
+  echo 'review-verdict: incomplete-p3' >&2
+fi
 n="\$(cat "$T/count")"; printf '%s' "\$((n+1))" >"$T/count"
 codes="\$(cat "$T/exitcodes")"
 code="\$(printf '%s' "\$codes" | awk -v i="\$((n+1))" '{print (i<=NF ? \$i : \$NF)}')"
@@ -64,7 +78,13 @@ if [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "edit" ]; then
   exit 0
 fi
 case " \$* " in
-  *" headRefOid "*) cat "$T/prhead"; exit 0 ;;
+  *" headRefOid "*)
+    if [[ " \$* " == *" --jq .headRefOid "* ]]; then
+      cat "$T/prhead"
+    else
+      jq -cn --arg head "\$(cat "$T/prhead")" '{headRefOid:\$head}'
+    fi
+    exit 0 ;;
   *"--json body"*) [ ! -f "$T/body-read-fail" ] || exit 1; { cat "$T/prbody" 2>/dev/null || printf ''; }; exit 0 ;;
 esac
 if [ "\${1:-}" = "pr" ]; then cat "$T/ghstate"; fi
@@ -88,7 +108,7 @@ chmod +x "$T/bin/lanecheck"
 reset_stub() {
   printf '0' >"$T/count"
   : >"$T/calls.log"
-  rm -f "$T/shiplog" "$T/failures-log" "$T/ghci-fail" "$T/sha" "$T/ghstate" "$T/exitcodes" "$T/body-read-fail" "$T/body-write-fail"
+  rm -f "$T/shiplog" "$T/failures-log" "$T/ghci-fail" "$T/sha" "$T/ghstate" "$T/exitcodes" "$T/body-read-fail" "$T/body-write-fail" "$T/incomplete-p3-expected"
   printf '7' >"$T/exitcodes"
   printf 'OPEN' >"$T/ghstate"
   : >"$T/prhead"
@@ -203,6 +223,41 @@ expect_journal merged MERGED
 expect_logfile merged
 [ ! -e "$S.lock" ] || fail "merged: lock not released"
 [ "$(printf '%s\n' "$OUT" | wc -l)" -le 41 ] || fail "merged: over 40 digest lines"
+
+# A P3-only incomplete verify records its head for tkt-ship's ship-pr call.
+reset_stub; setup_case incomplete-p3
+mkdir -p "$CDIR/origin.git"
+git init -q --bare "$CDIR/origin.git"
+git -C "$WT" checkout -qb feature
+git -C "$WT" remote add origin "$CDIR/origin.git"
+git -C "$WT" push -q -u origin feature
+OLD="$(git -C "$WT" rev-parse HEAD^)"
+git -C "$WT" update-ref refs/remotes/origin/main "$OLD"
+grep -v '^reviewed=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+printf 'reviewed=%s\nbranch=feature\nmodel.verify=verify-model\nround=0\nfixopen=0\n' "$OLD" >>"$S"
+printf 'P1 src/a.go:1 — initial finding\n' >"$CDIR/verify-findings.md"
+cat >"$T/bin/review-pr" <<'EOF'
+#!/usr/bin/env bash
+printf 'FIX-INCOMPLETE round=1\nP3 src/a.go:3 — non-blocking finding\n'
+EOF
+chmod +x "$T/bin/review-pr"
+run_rc=0
+verify_out="$(bash "$TKT_VERIFY" "$S" --findings "$CDIR/verify-findings.md" 2>"$CDIR/verify-stderr")" || run_rc=$?
+[ "$run_rc" -eq 1 ] || fail "P3-only tkt-verify exited $run_rc: $verify_out $(cat "$CDIR/verify-stderr")"
+head -n 1 <<<"$verify_out" | grep -q 'TKT tkt-verify FIX-INCOMPLETE' || fail "P3-only tkt-verify verdict changed: $verify_out"
+[ "$(bash "$REAL_BIN/tkt-state" "$S" get reviewed)" = "$H" ] \
+  || fail "P3-only verify did not record the head needed for ship-pr"
+printf '%s' "$H" >"$T/incomplete-p3-expected"
+printf '0' >"$T/exitcodes"
+run_ship
+[ "$RC" -eq 0 ] || fail "P3-only reviewed head ship exited $RC: $OUT"
+expect_line1 "MERGED sha=" "P3-only reviewed head"
+grep -Fq -- "--reviewed $H" "$T/calls.log" \
+  || fail "ship-pr did not receive the P3-only verify head: $(cat "$T/calls.log")"
+reviewed_arg="$(grep -A1 -x -F 'arg|--reviewed' "$T/calls.log" | sed -n '2s/^arg|//p')"
+[ "$reviewed_arg" = "$H" ] || fail "ship-pr reviewed arg [$reviewed_arg] wants [$H]"
+log_file="$(sed -n 's/.* log=//p' <<<"$(head -n 1 <<<"$OUT")")"
+grep -Fq 'review-verdict: incomplete-p3' "$log_file" || fail "ship-pr did not reach incomplete-p3"
 
 # MERGED reports a scoped retirement for the caller and prints dependents without invoking lanecheck.
 reset_stub; setup_case merged-lane
