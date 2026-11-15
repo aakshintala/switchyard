@@ -642,6 +642,7 @@ setup_case grant-bad-form
 set_state round 2
 write_ruling_comment 913 'grants: round 2'
 expect_grant_refused bad-grant bad-grant 913
+grep -Fq 'state round=2; this grant must read `grants: round 3` on a single line' <<<"$OUT" || fail "grant-bad-form hint is missing: $OUT"
 
 setup_case grant-not-limited
 set_state round 1
@@ -652,6 +653,7 @@ setup_case grant-multiple-lines
 set_state round 2
 write_ruling_comment 915 $'grants: round 3\ngrants: round 3'
 expect_grant_refused multiple-lines bad-grant 915
+grep -Fq 'state round=2; this grant must read `grants: round 3` on a single line' <<<"$OUT" || fail "grant-multiple-lines hint is missing: $OUT"
 fi
 
 # A grant can be attached to the PR, and CRLF line endings are accepted.
