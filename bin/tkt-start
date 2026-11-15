@@ -609,7 +609,7 @@ tkt journal "tkt-start preflight core=$core out=$out"
 # resume the same job again (#1833). Returns 0 with the resumed report reparsed.
 resume_diag=()
 resume_preflight() {
-  local slug="$1" text="$2" job attempted prompt rc=0 txt jobhead ok=0 new failure="" previous_core="$core" previous_nb="$nb" previous_tagged_core="${tagged_core:-}" previous_tagged_nonblocking="${tagged_nonblocking:-}"
+  local slug="$1" text="$2" job attempted prompt rc=0 txt jobhead ok=0 new failure="" previous_core="$core" previous_nb="$nb" previous_tagged_core="${tagged_core:-}" previous_tagged_nonblocking="${tagged_nonblocking:-}" previous_report="$report"
   job="$(tkt get job.preflight 2>/dev/null || true)"
   attempted="$(tkt get preflight.resume_attempted 2>/dev/null || true)"
   [ -n "$job" ] || return 1
@@ -644,9 +644,10 @@ resume_preflight() {
     if [ "$slug" = tags ]; then
       core="$previous_core"; nb="$previous_nb"
       tagged_core="$previous_tagged_core"; tagged_nonblocking="$previous_tagged_nonblocking"
+      report="$previous_report"
     fi
-    resume_diag=("tkt-start: preflight $slug resume failed (rc=0): $failure")
-    tkt journal "tkt-start preflight resume failed job=$job rc=0 head=$failure"
+    resume_diag=("tkt-start: preflight $slug resume failed (rc=0): $failure ($jobhead)")
+    tkt journal "tkt-start preflight resume failed job=$job rc=0 head=$jobhead reason=$failure"
     return 1
   fi
   tkt journal "tkt-start preflight resumed job=${new:-$job} core=$core out=$out"

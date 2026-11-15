@@ -91,7 +91,7 @@ if [ -n "\$resume_id" ]; then
   jobid="stub-resume-\$resume_count"
   report="$T/job-\$jobid.out"; cp "\$old_report" "\$report"
   bash "$SCRIPT_DIR/../bin/tkt-state" "\$state" set job.preflight "\$jobid"
-  printf 'TKT tkt-job DONE id=%s resumed_from=%s log=x\n' "\$jobid" "\$resume_id" >>"$T/job-results.log"
+  printf 'TKT tkt-job DONE id=%s resumed_from=%s log=x\n' "\$jobid" "\$resume_id" | tee -a "$T/job-results.log"
 else
   jobid="\$(bash "$SCRIPT_DIR/../bin/tkt-state" "\$state" get job.preflight 2>/dev/null || true)"
   case "\$jobid" in *[![:space:]]*)
@@ -657,7 +657,7 @@ grep -qF 'tkt-start: preflight footer resume failed (rc=0): resumed report has n
   || fail "resume-footer-only: refusal does not name the missing STATUS line: $OUT"
 [ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
   || fail "resume-footer-only: refused resume did not clear the job slot"
-grep -qF 'tkt-start preflight resume failed job=stub-1 rc=0 head=resumed report has no STATUS: line' "$RUN/widget-42.journal" \
+grep -qF 'tkt-start preflight resume failed job=stub-1 rc=0 head=TKT tkt-job DONE id=stub-resume-1 resumed_from=stub-1 log=x reason=resumed report has no STATUS: line' "$RUN/widget-42.journal" \
   || fail "resume-footer-only: journal misses the failed resume"
 
 # A file-path reply with STATUS but no findings still has no footer and must refuse.
@@ -689,6 +689,7 @@ run_start
 want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 resume-nonblocking-mismatch
 grep -qF 'tkt-start: preflight tags resume failed (rc=0): resumed report has 1 tagged non-blocking lines but footer says 2' <<<"$OUT" \
   || fail "resume-nonblocking-mismatch: refusal does not name the undercount: $OUT"
+case "$OUT" in *"Non-blocking items: 2"*) fail "resume-nonblocking-mismatch: refusal shows the rejected resumed body: $OUT" ;; esac
 [ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
   || fail "resume-nonblocking-mismatch: refused resume did not clear the job slot"
 
