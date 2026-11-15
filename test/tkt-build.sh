@@ -2408,6 +2408,49 @@ run_build
 grep -F -q "tkt-build: refusing to overwrite $CDIR/run/switchyard-528-findings-r0.md: switchyard-528-findings-r0.md names are reserved for this ticket's own findings output; write hand-kept notes to switchyard-528-dispositions-r0.md instead" "$CDIR/stderr.txt" || fail "findings-failed-collect rerun stderr missing refusal: $(cat "$CDIR/stderr.txt")"
 cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-failed-collect-copy.md" || fail "findings-failed-collect rerun: existing file changed"
 
+# --- --from gate stops a stale ruling-backed plan before recovery side effects ---
+setup_case gate-ruled-stale
+{
+  printf 'Base: %s\n' "$H"
+  printf '\n## Files\n\n- `src/a.txt` (new-confirmed)\n- `base.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "gate-ruled-stale: seed LINES"
+bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "gate-ruled-stale: seed plan verdict time"
+bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2001-01-01T00:00:00Z || fail "gate-ruled-stale: seed stop verdict time"
+jq -n '{body:"Steward ruling RULING-1890 approves this plan.",issue_url:"https://api.github.com/repos/switchyard/issues/528",author_association:"OWNER",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
+RULE_OUT="$(bash "$TKT_PLAN" "$S" rule-ok --by surveyor --ruling RULING-1890 --comment 721489 2>"$CDIR/rule-stderr.txt")"; RULE_RC=$?
+[ "$RULE_RC" -eq 0 ] || fail "gate-ruled-stale: rule-ok records the ruling (rc=$RULE_RC): $(cat "$CDIR/rule-stderr.txt")"
+expect_state plan_verdict ok "gate-ruled-stale"
+expect_state plan_verdict_by surveyor "gate-ruled-stale"
+expect_state plan_verdict_ruling RULING-1890 "gate-ruled-stale"
+expect_state plan_verdict_comment 721489 "gate-ruled-stale"
+{
+  printf 'main drift line\n' >"$CDIR/seed/base.txt"
+  git -C "$CDIR/seed" add base.txt
+  git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "ruled drift commit"
+  git -C "$CDIR/seed" push -q origin main
+}
+git -C "$WT" fetch -q origin
+bash "$TKT_STATE" "$S" set head "$H" || fail "gate-ruled-stale: set stored head"
+bash "$TKT_STATE" "$S" set pr 7 || fail "gate-ruled-stale: set PR"
+printf '%s\n' "$(grep '^plan_verdict' "$S")" >"$CDIR/plan-verdict-before"
+run_build --from gate
+[ "$RC" -eq 1 ] || fail "gate-ruled-stale exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-build STALE-RULED n=1 base=* ruling=RULING-1890 log=*" "gate-ruled-stale"
+grep -Fq 'base.txt |' <<<"$OUT" || fail "gate-ruled-stale prints stale Files stat: $OUT"
+grep -Fq 'ruled drift commit' <<<"$OUT" || fail "gate-ruled-stale prints the drifting commit: $OUT"
+grep -Fq '+main drift line' <<<"$OUT" || fail "gate-ruled-stale prints the Files hunk: $OUT"
+grep -Fq 'The plan verdict came from ruling RULING-1890 by surveyor; tkt-build did not re-verify.' <<<"$OUT" || fail "gate-ruled-stale explains the ruling provenance: $OUT"
+grep -Fq "tkt-plan $S set $CDIR/plan.md" <<<"$OUT" || fail "gate-ruled-stale routes through tkt-plan set: $OUT"
+grep -Fq "tkt-plan $S rule-ok --by <ruling role> --ruling <RULING-id> --comment <id>" <<<"$OUT" || fail "gate-ruled-stale routes through rule-ok: $OUT"
+grep -Fq "tkt-plan $S verify to re-verify instead" <<<"$OUT" || fail "gate-ruled-stale offers re-verification: $OUT"
+[ "$(git -C "$WT" rev-parse HEAD)" = "$H" ] || fail "gate-ruled-stale does not merge origin/main"
+[ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-528)" = "$H" ] || fail "gate-ruled-stale does not push the branch"
+[ "$(head -n 1 "$CDIR/plan.md")" = "Base: $H" ] || fail "gate-ruled-stale leaves the plan Base unchanged"
+[ "$(grep '^plan_verdict' "$S")" = "$(cat "$CDIR/plan-verdict-before")" ] || fail "gate-ruled-stale preserves every plan_verdict_* key"
+! grep -Eq '^run\|id=stub-|verifier-r[0-9]' "$T/calls.log" || fail "gate-ruled-stale dispatches no Verifier"
+[ "$(grep -F -c 'tkt-build stale recovery ruled ruling=RULING-1890' "$CDIR/tkt.journal")" -eq 1 ] || fail "gate-ruled-stale journals the ruling stop once"
+
 # --- --from gate merges a clean stale update, refreshes state and continues ---
 setup_case gate-clean-merge
 printf 'main change\n' >"$CDIR/seed/base.txt"
