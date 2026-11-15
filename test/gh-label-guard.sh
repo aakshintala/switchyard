@@ -308,6 +308,15 @@ home_refused issue create -t "$home_text"
 home_refused pr create --body "$home_text"
 home_refused pr comment 1 --body "$home_text"
 home_refused pr edit 1 --body "$home_text"
+home_refused issue edit 1 --body "$home_text"
+home_refused issue edit 1 --body-file "$T/home-body.txt"
+home_refused issue edit 1 -t "$home_text"
+home_refused pr review 1 -b "$home_text"
+home_refused pr review 1 --body-file "$T/home-body.txt"
+# pr review's -a, -c and -r are booleans, so they must not swallow -b.
+home_refused pr review 1 -r -b "$home_text"
+home_refused pr review 1 -a -F "$T/home-body.txt"
+passed pr review 1 -c -b clean
 
 # gh api uses a separate flag table; only body/title fields and input are read.
 home_refused api endpoint -f "body=$home_text"

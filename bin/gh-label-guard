@@ -2,7 +2,8 @@
 # gh-label-guard shim
 # Refuses a lane's attempt to add or remove the needs-owner or needs-triage
 # label through gh issue/pr edit/create, and refuses absolute home paths in
-# text posted by issue/pr create/comment/edit and gh api field/input options.
+# text posted by issue/pr create/comment/edit, pr review, and gh api
+# field/input options.
 # Installed as `gh` in a directory placed first on a lane's PATH; see
 # autonomous-flywheel. Runs the real gh for everything else.
 import csv
@@ -45,6 +46,9 @@ API_VALUE_FLAGS = {
     "preview", "raw-field", "repo", "template",
 }
 API_VALUE_SHORTHANDS = set("fFHXqptR")
+# gh pr review has its own table: its -a, -c and -r are booleans.
+REVIEW_VALUE_FLAGS = {"body", "body-file", "repo"}
+REVIEW_VALUE_SHORTHANDS = set("bFR")
 
 
 def fail(code, msg):
@@ -252,12 +256,16 @@ def guarded_home_paths(args):
     elif len(positionals) >= 2 and positionals[0] in ("issue", "pr"):
         group, verb = positionals[:2]
         watched_verbs = {
-            "issue": {"comment", "create"},
-            "pr": {"create", "comment", "edit"},
+            "issue": {"comment", "create", "edit"},
+            "pr": {"create", "comment", "edit", "review"},
         }
         if verb not in watched_verbs[group]:
             return False, None
-        _, flags = option_values(args, VALUE_FLAGS, VALUE_SHORTHANDS)
+        if group == "pr" and verb == "review":
+            table = (REVIEW_VALUE_FLAGS, REVIEW_VALUE_SHORTHANDS)
+        else:
+            table = (VALUE_FLAGS, VALUE_SHORTHANDS)
+        _, flags = option_values(args, *table)
         for name, value in flags:
             if name in ("body", "b", "title", "t"):
                 sources.append(("text", os.fsencode(value)))
