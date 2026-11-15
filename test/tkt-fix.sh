@@ -479,6 +479,7 @@ expect_fix_grant_refused() {
   ! grep -q '^job|' "$T/calls.log" || fail "$name dispatched a fix job: $(cat "$T/calls.log")"
   ! grep -q '^grant[.]' "$S" || fail "$name wrote grant state: $(grep '^grant[.]' "$S")"
   [ "$(bash "$TKT_STATE" "$S" get round)" = "$initial_round" ] || fail "$name changed round"
+  refused_out="$out"
 }
 
 # A ruling closes only the named finding, and is passed as recorded context.
@@ -3371,6 +3372,7 @@ setup_case roundgrant-stale
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
 write_ruling_comment 930 'grants: round 3' 529 OWNER '2026-11-12T00:00:00Z'
 expect_fix_grant_refused stale stale 930
+! grep -Fq 'state round=' <<<"$refused_out" || fail "roundgrant-stale printed the bad-grant hint: $refused_out"
 
 setup_case roundgrant-author
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
@@ -3386,6 +3388,7 @@ setup_case roundgrant-bad-form
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
 write_ruling_comment 933 'grants: round 2'
 expect_fix_grant_refused bad-grant bad-grant 933
+grep -Fq 'state round=2; this grant must read `grants: round 3` on a single line' <<<"$refused_out" || fail "roundgrant-bad-form hint is missing: $refused_out"
 
 setup_case roundgrant-not-limited
 bash "$TKT_STATE" "$S" set round 1 >/dev/null
@@ -3402,6 +3405,7 @@ setup_case roundgrant-multiple-lines
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
 write_ruling_comment 935 $'grants: round 3\ngrants: round 3'
 expect_fix_grant_refused multiple-lines bad-grant 935
+grep -Fq 'state round=2; this grant must read `grants: round 3` on a single line' <<<"$refused_out" || fail "roundgrant-multiple-lines hint is missing: $refused_out"
 
 setup_case roundgrant-multiple-comments
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
@@ -3410,6 +3414,7 @@ write_ruling_comment 937 'grants: round 3'
 run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 936 --ruling 937 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = 2 ] || fail "roundgrant-multiple-comments exited $run_rc, want 2: $out"
 grep -Fq 'RULING-REFUSED reason=bad-grant comment=936' <<<"$out" || fail "roundgrant-multiple-comments did not refuse bad-grant: $out"
+grep -Fq 'state round=2; pass one --ruling grant comment, with the single line `grants: round 3`' <<<"$out" || fail "roundgrant-multiple-comments hint is missing: $out"
 ! grep -q '^job|' "$T/calls.log" || fail "roundgrant-multiple-comments dispatched a fix job"
 ! grep -q '^grant[.]' "$S" || fail "roundgrant-multiple-comments wrote a grant"
 [ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "roundgrant-multiple-comments changed round"

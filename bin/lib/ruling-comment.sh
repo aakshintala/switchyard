@@ -122,6 +122,11 @@ check_round_grant() {
   if [ "$grant_count" -ne 1 ] || [ "$grant_number" != "$next_round" ] \
     || [ "${grant_comment_count:-1}" -gt 1 ]; then
     ruling_comment_failure=bad-grant
+    if [ "${grant_comment_count:-1}" -gt 1 ]; then
+      ruling_comment_hint="state round=$round; pass one --ruling grant comment, with the single line \`grants: round $next_round\`"
+    else
+      ruling_comment_hint="state round=$round; this grant must read \`grants: round $next_round\` on a single line"
+    fi
     return 1
   fi
   if [ "${round_grant_limited:-0}" -ne 1 ]; then
