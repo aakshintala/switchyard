@@ -94,8 +94,11 @@ gh() (
           if [ "$prev" = "--jq" ]; then jq_expr="$a"; break; fi
           case "$a" in --jq) prev="--jq";; esac
         done
-        [ -n "$jq_expr" ] || { echo "fake gh: missing --jq for comments" >&2; exit 2; }
-        jq -r "$jq_expr" "$T/state/comments.json"
+        if [ -n "$jq_expr" ]; then
+          jq -r "$jq_expr" "$T/state/comments.json"
+        else
+          cat "$T/state/comments.json"
+        fi
         exit 0
         ;;
       repos/O/N/commits/*/check-runs) ;;

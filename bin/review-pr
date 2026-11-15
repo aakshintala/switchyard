@@ -92,6 +92,7 @@ while [ -L "$script_path" ]; do
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 . "$script_dir/lib/verify-section.sh"
+. "$script_dir/lib/review-verdict.sh"
 skills_dir="$(dirname "$script_dir")/skills"
 briefs_dir="$skills_dir/review-loop/briefs"
 fill_brief="$script_dir/fill-brief"
@@ -250,23 +251,11 @@ ci_state() {
     }'
 }
 
-review_comments_sorted() {
-  # review_comments_sorted REPO PR: print review-pr comments as sorted TSV rows:
-  # created_at, numeric id, header, and base64-encoded full body. The shared
-  # fetch and ordering keep verify scope aligned with the bare-review guard.
-  # Only an OWNER, MEMBER or COLLABORATOR comment counts; the repo is public (#1790).
-  local repo="$1" pr="$2" rows tab
-  rows="$(gh api --paginate --jq '.[] | select((.body // "") | startswith("review-pr: patch-id")) | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | [.created_at, (.id | tostring), (.body | split("\n")[0]), (.body | @base64)] | @tsv' "repos/$repo/issues/$pr/comments")" || return 1
-  [ -n "$rows" ] || return 0
-  tab="$(printf '\t')"
-  printf '%s\n' "$rows" | sort -t "$tab" -k1,1 -k2,2n
-}
-
 last_review_header() {
   # last_review_header REPO PR: print "<head> <patch-id>" for the newest
   # valid review-pr comment header, or nothing when no comment matches.
   local repo="$1" pr="$2" rows api_rc=0 last pid headv
-  rows="$(review_comments_sorted "$repo" "$pr")" || api_rc=$?
+  rows="$(review_comment_rows "$repo" "$pr")" || api_rc=$?
   if [ "$api_rc" -ne 0 ]; then return 1; fi
   [ -n "$rows" ] || return 0
   last="$(printf '%s\n' "$rows" | cut -f3 | { grep -E '^review-pr: patch-id ([0-9a-f]+|none), head [0-9a-f]{40}(,.*)?$' || true; } | tail -n 1)"
@@ -295,7 +284,7 @@ verify_posted_rounds() {
   local repo="$1" pr="$2" since="$3" rows row created id header body64 comment_head comment_since
   local since_index=-1 start_index i body
   local -a comment_rows=()
-  rows="$(review_comments_sorted "$repo" "$pr")" || return 1
+  rows="$(review_comment_rows "$repo" "$pr")" || return 1
   while IFS= read -r row; do
     [ -n "$row" ] && comment_rows[${#comment_rows[@]}]="$row"
   done <<<"$rows"

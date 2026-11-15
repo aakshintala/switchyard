@@ -1,16 +1,19 @@
 # Shared parsing of posted review-pr verdict comments. Callers source verify-section.sh first.
 
 review_comment_rows() {
-  local repo="$1" pr="$2" rows
-  rows="$(gh api --paginate "repos/$repo/issues/$pr/comments")" || return 1
-  printf '%s\n' "$rows" | jq -r '
+  local repo="$1" pr="$2" comments rows tab
+  comments="$(gh api --paginate "repos/$repo/issues/$pr/comments")" || return 1
+  rows="$(printf '%s\n' "$comments" | jq -r '
     .[] |
     select((.body // "") | startswith("review-pr: patch-id")) |
     # Only a trusted author can post a verdict; the repo is public (#1790).
     select(.author_association == "OWNER" or .author_association == "MEMBER"
       or .author_association == "COLLABORATOR") |
     [.created_at, (.id | tostring), (.body | split("\n")[0]), (.body | @base64)] | @tsv
-  ' | sort -t "$(printf '\t')" -k1,1 -k2,2n
+  ')" || return 1
+  [ -n "$rows" ] || return 0
+  tab="$(printf '\t')"
+  printf '%s\n' "$rows" | sort -t "$tab" -k1,1 -k2,2n
 }
 
 review_header_value() {
@@ -26,16 +29,17 @@ review_header_value() {
 # review_verdict REPO PR PATCH_ID: print the newest trusted review-pr verdict for
 # the patch-id. On FIX-INCOMPLETE, return readable P3 findings from that comment.
 review_verdict() {
-  local repo="$1" pr="$2" reviewed_pid="$3" rows tab last created id header verdicts axes axis body64 findings_file
+  local repo="$1" pr="$2" reviewed_pid="$3" rows tab last created id header verdicts axes axis body64 findings_file parsed
   local -a axis_list=()
-  rows="$(gh api --paginate "repos/$repo/issues/$pr/comments")" || return 1
-  rows="$(printf '%s\n' "$rows" | jq -r '
-    .[] | select((.body // "") | startswith("review-pr: patch-id")) |
-    # Only a trusted author can post a verdict; the repo is public (#1790).
-    select(.author_association == "OWNER" or .author_association == "MEMBER"
-      or .author_association == "COLLABORATOR") |
-    . as $comment |
-    ($comment.body | split("\n")) as $lines |
+  rows="$(review_comment_rows "$repo" "$pr")" || return 1
+  tab="$(printf '\t')"
+  last="$(printf '%s\n' "$rows" \
+    | { grep -E "^.*${tab}review-pr: patch-id ${reviewed_pid}, head [0-9a-f]{40}(,.*)?${tab}" || true; } \
+    | tail -n 1)"
+  [ -n "$last" ] || { printf 'missing'; return 0; }
+  IFS=$'\t' read -r created id header body64 <<<"$last"
+  parsed="$(jq -nr --arg body64 "$body64" '
+    ($body64 | @base64d | split("\n")) as $lines |
     ($lines[1:] | reduce .[] as $raw (
       {section:"", axes:[], verdicts:[]};
       ($raw | gsub("[*`]"; "") | gsub("^\\s+|\\s+$"; "")) as $line |
@@ -56,16 +60,12 @@ review_verdict() {
       elif ($line | test("^(VERDICT|FIX-)")) then .verdicts += ["INVALID"]
       else . end
     )) as $parsed |
-    [$comment.created_at, ($comment.id | tostring), $lines[0],
+    [
       ($parsed.verdicts | if length == 0 then "-" else join(",") end),
-      ($parsed.axes | unique | if length == 0 then "-" else join(",") end),
-      ($comment.body | @base64)] | @tsv
+      ($parsed.axes | unique | if length == 0 then "-" else join(",") end)
+    ] | @tsv
   ')" || return 1
-  tab="$(printf '\t')"
-  last="$(printf '%s\n' "$rows" | sort -t "$tab" -k1,1 -k2,2n \
-    | { grep -E "^.*${tab}review-pr: patch-id ${reviewed_pid}, head [0-9a-f]{40}(,.*)?${tab}" || true; } | tail -n 1)"
-  [ -n "$last" ] || { printf 'missing'; return 0; }
-  IFS=$'\t' read -r created id header verdicts axes body64 <<<"$last"
+  IFS=$'\t' read -r verdicts axes <<<"$parsed"
   case ",$verdicts," in *,INVALID,*) printf 'invalid'; return 0 ;; esac
   if [[ ",$verdicts," == *,verify:FIX-OK,* ]]; then
     # A verify may repeat its FIX-OK line; any other entry beside it is invalid.
