@@ -545,6 +545,16 @@ if want ruling-refutes-backtick; then
   run_ruling_refutes_row ruling-refutes-backtick 'P2 `fix.txt:2` — b' 'P2 fix.txt:2'
 fi
 
+if want ruling-refutes-backtick-prefix; then
+  run_ruling_refutes_row ruling-refutes-backtick-prefix 'P2 `fix.txt:2` — b' 'P2 `fix.txt:2`'
+fi
+
+if want ruling-bad-refutes-markup-only; then
+setup_case ruling-bad-refutes-markup-only
+write_ruling_comment 99 'refutes: P2 **'
+expect_ruling_refused ruling-bad-refutes-markup-only bad-refutes 99
+fi
+
 if want ruling-refutes-markdown; then
   run_ruling_refutes_row ruling-refutes-markdown 'P2 **fix.txt:2** — b' 'P2 fix.txt:2'
 fi
@@ -601,10 +611,10 @@ write_ruling_comment 99 'refutes: P2'
 expect_ruling_refused ruling-bad-refutes-bare bad-refutes 99
 fi
 
-if want ruling-bad-refutes-no-line; then
-setup_case ruling-bad-refutes-no-line
+if want ruling-refutes-no-line-no-match; then
+setup_case ruling-refutes-no-line-no-match
 write_ruling_comment 99 'refutes: P2 fix.txt'
-expect_ruling_refused ruling-bad-refutes-no-line no-match 99
+expect_ruling_refused ruling-refutes-no-line-no-match no-match 99
 fi
 
 if want ruling-author-none; then

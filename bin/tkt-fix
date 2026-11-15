@@ -108,6 +108,8 @@ ruling_match_begin() {
 
 ruling_match_file() {
   local prefix="$1" path="$2" kind="$3" row base status prior duplicate
+  # A ruling may copy the row's markup; compare both sides without it.
+  prefix="$(normalize_finding_line "$prefix")"
   [ -n "$path" ] && [ -r "$path" ] || return 0
   while IFS= read -r row; do
     base="$(findings_row_base "$row")"
@@ -492,7 +494,7 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
         'refutes: '*) ruling_prefix="${ruling_line#refutes: }" ;;
         *) ruling_prefix="${ruling_line#refutes:}" ;;
       esac
-      if [[ ! "$ruling_prefix" =~ $ruling_refutes_pattern ]]; then
+      if [[ ! "$(normalize_finding_line "$ruling_prefix")" =~ $ruling_refutes_pattern ]]; then
         ruling_refuse bad-refutes "${ruling_ids[$ruling_index]}"
       fi
       ruling_match_begin
