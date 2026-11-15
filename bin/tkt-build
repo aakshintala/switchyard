@@ -105,7 +105,7 @@ repair_hint() {
     pr)
       lane_job="$(tkt get job.lane 2>/dev/null || true)"
       if [ -n "$lane_job" ]; then
-        printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan --expect-commits, then tkt-build %s --from gate\n' "$state" "$lane_job" "$state"
+        printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan --expect-commits; the resumed lane must finish its push step and open the PR before tkt-build %s --from gate\n' "$state" "$lane_job" "$state"
       else
         printf 'Repair command: tkt-build %s --from lane (create the branch PR, then resume with --from review)\n' "$state"
       fi ;;
