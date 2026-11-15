@@ -41,7 +41,7 @@ When the ticket's spec is another issue, pass its number with `tkt-start --spec-
 - `preflight`: step 2 preflight job.
 - `planner`: step 3 plan writer (`--slot planner`). tkt-start refuses to start without it unless `--no-preflight` or `--takeover` is given or the state already stores a plan; a later `--slot planner` job and a tkt-plan `verify` that would resume a planner after PLAN-CHECK both refuse without it.
 
-The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `verifier-rN` and `verifier-rN-drift` → `verifier`, `confirm` → `verifier`, `planner` → `planner`, and `fixN` → `fix`. `verifier` is the plan Verifier; `verify` is review-loop's scoped verify.
+The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `verifier-rN` and `verifier-rN-drift` → `verifier`, `confirm` → `verifier`, `planner` → `planner`, and `fixN` → `fix`. `fixN` slots are dispatched only through `tkt-fix` (`tkt-job` refuses them otherwise). `verifier` is the plan Verifier; `verify` is review-loop's scoped verify.
 
 A slot whose stored job came from a different prompt needs no ruling to clear it when that job has finished: `tkt-job` journals `tkt-job slot <slot> replaced job=<old id> ...`, clears the slot and dispatches the new prompt fresh. It still exits 2 with `ERROR slot <slot> holds job ... from a different prompt` while the job is running or queued, or when its record is missing or unreadable.
 

@@ -24,7 +24,7 @@ export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
 mkdir -p "$T/home/.agents/bin"
 printf '{"providers":[]}\n' >"$T/quota.json"
 export QUOTA_FEED="file://$T/quota.json"
-unset DELEGATE_JOBS_DIR
+unset DELEGATE_JOBS_DIR TKT_FIX_DISPATCH
 
 [ -x "$REAL_BIN/fill-brief" ] || fail "real fill-brief missing"
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
@@ -312,6 +312,39 @@ EOF
 printf 'extra words here\n' >"$T/extra.md"
 printf 'do the thing\n' >"$T/brief.md"
 printf 'resume prompt\n' >"$T/resume-prompt.md"
+
+# --- fix slots require tkt-fix, while its explicit dispatch marker is allowed --
+setup_case fix-slot-refused
+reset_stub
+cp "$S" "$CDIR/before.state"
+run_job --slot fix1 --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 2 ] || fail "unmarked fix1 exits 2 (rc=$RC)"
+grep -Fq "tkt-fix $S (--verify|--no-verify) --findings <file>" "$CDIR/stderr.txt" || fail "fix1 refusal names the tkt-fix findings route"
+grep -Fq "tkt-fix $S --verify --resume <job id> --prompt <file>" "$CDIR/stderr.txt" || fail "fix1 refusal names the tkt-fix resume route"
+grep -Fq "tkt-state $S set job.fix1 ''" "$CDIR/stderr.txt" || fail "fix1 refusal names the job slot clear"
+grep -Fq "tkt-state $S set job.fix1.prompt ''" "$CDIR/stderr.txt" || fail "fix1 refusal names the prompt slot clear"
+! grep -q '^TKT tkt-job ' "$CDIR/stderr.txt" || fail "fix1 refusal uses plain stderr, not a verdict tag"
+! grep -q . "$T/stub.log" || fail "unmarked fix1 does not call delegate"
+! grep -Fq 'job.fix1=' "$S" || fail "unmarked fix1 leaves job.fix1 unset"
+! grep -Fq 'job.fix1.prompt=' "$S" || fail "unmarked fix1 leaves job.fix1.prompt unset"
+cmp -s "$S" "$CDIR/before.state" || fail "unmarked fix1 does not change state"
+
+setup_case fix-slot-dispatch
+reset_stub
+make_record stub-1 DONE none 0 1 0
+export TKT_FIX_DISPATCH=1
+run_job --slot fix1 --template "$T/tmpl-basic.md" --model test-model
+unset TKT_FIX_DISPATCH
+[ "$RC" -eq 0 ] || fail "marked fix1 proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^run|' "$T/stub.log" || fail "marked fix1 dispatches through delegate"
+[ "$(bash "$TKT_STATE" "$S" get job.fix1)" = stub-1 ] || fail "marked fix1 stores its job id"
+
+setup_case no-marker-lane
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 0 ] || fail "lane without fix marker remains unaffected (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^run|' "$T/stub.log" || fail "lane without fix marker dispatches"
 
 # --- a build slot self-grants from the posted plan when no grant exists ------
 setup_case fence-required
@@ -828,7 +861,49 @@ for st in ERROR STALLED; do
   grep -qx "result line 2" <<<"$OUT" || fail "$st digest keeps the text tail"
 done
 
-# --- ERROR with no resume session prints neither a session nor a hint ---
+# --- fix-slot ERROR resumes route through tkt-fix, not tkt-job ----------------
+setup_case fix-error-resume-hint
+reset_stub
+make_record stub-1 ERROR none 0 2 0
+add_resume stub-1 sess-fix
+export TKT_FIX_DISPATCH=1
+run_job --slot fix1 --template "$T/tmpl-basic.md" --model test-model
+unset TKT_FIX_DISPATCH
+[ "$RC" -eq 1 ] || fail "fix-slot ERROR exits 1 (rc=$RC)"
+grep -Fq "Continue it with: tkt-fix $S --verify --resume stub-1 --prompt <file>" <<<"$OUT" || fail "fix-slot ERROR hint routes through tkt-fix"
+! grep -Fq "Continue it with: tkt-job $S --slot fix1" <<<"$OUT" || fail "fix-slot ERROR hint does not suggest direct tkt-job resume"
+
+# --- fix-slot ASK resumes route through tkt-fix, while clear hint stays valid --
+setup_case fix-reused-ask-hint
+reset_stub
+make_record stub-1 NEEDS_CONTEXT none 0 2 0
+jq --arg h "$H" '.result.changeSet.headAfter = $h' "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp"
+mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json"
+bash "$TKT_STATE" "$S" set job.fix1 stub-1 || fail "seed fix-slot ASK"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m advance
+now="$(git -C "$WT" rev-parse --short=12 HEAD)"
+export TKT_FIX_DISPATCH=1
+run_job --slot fix1 --expect-commits
+unset TKT_FIX_DISPATCH
+[ "$RC" -eq 1 ] || fail "fix-slot ASK exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-job ASK id=stub-1 reused=stub-1 stale-head=$H now=$now log=*" "fix-slot ASK"
+grep -Fq "Answer with: tkt-fix $S --verify --resume stub-1 --prompt <file>" <<<"$OUT" || fail "fix-slot ASK hint routes through tkt-fix"
+! grep -Fq "Answer with: tkt-job $S --slot fix1" <<<"$OUT" || fail "fix-slot ASK hint does not suggest direct tkt-job resume"
+
+setup_case fix-reused-clear-hint
+reset_stub
+make_record stub-1 BLOCKED none 0 2 0
+jq --arg h "$H" '.result.changeSet.headAfter = $h' "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp"
+mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json"
+bash "$TKT_STATE" "$S" set job.fix1 stub-1 || fail "seed fix-slot clear hint"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m advance
+export TKT_FIX_DISPATCH=1
+run_job --slot fix1 --expect-commits
+unset TKT_FIX_DISPATCH
+[ "$RC" -eq 1 ] || fail "fix-slot BLOCKED exits 1 (rc=$RC)"
+grep -Fq "tkt-state $S set job.fix1 '';" <<<"$OUT" || fail "fix-slot clear hint still names the correct slot reset"
+
+# --- ERROR with no resume session prints neither a session nor a hint --------
 setup_case job-error-noresume
 reset_stub
 make_record stub-1 ERROR none 0 2 0
@@ -1655,7 +1730,9 @@ for slot in lane preflight confirm fix1 reviewer; do
   setup_case wall-no-$slot
   reset_stub
   make_record stub-1 DONE none 0 1 0
+  if [ "$slot" = fix1 ]; then export TKT_FIX_DISPATCH=1; else unset TKT_FIX_DISPATCH; fi
   run_job --slot $slot --template "$T/tmpl-basic.md" --model test-model
+  unset TKT_FIX_DISPATCH
   [ "$RC" -eq 0 ] || fail "$slot exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
   grep -q "^wallMs=" "$T/stub.log" && fail "$slot passes no wall cap"
 done

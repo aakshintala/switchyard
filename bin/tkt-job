@@ -71,6 +71,15 @@ while [ $# -gt 0 ]; do
 done
 inner_gate_cmd="$gate"
 [ -n "$slot" ] || usage
+case "$slot" in
+  fix[0-9]*)
+    if [ "${TKT_FIX_DISPATCH:-}" != "1" ]; then
+      printf 'tkt-job: dispatch fix slots through: tkt-fix %s (--verify|--no-verify) --findings <file>; resume a fix job with: tkt-fix %s --verify --resume <job id> --prompt <file>\n' "$state" "$state" >&2
+      printf "Clear an existing orphan with: tkt-state %s set job.%s ''; tkt-state %s set job.%s.prompt ''\n" "$state" "$slot" "$state" "$slot" >&2
+      exit 2
+    fi
+    ;;
+esac
 # A prompt file only resumes; a resume needs its prompt and takes no fresh
 # brief. A resume may carry a gate; the two gate sources never combine.
 { [ -z "$prompt" ] || [ -n "$resume" ]; } || usage
@@ -351,6 +360,14 @@ job_chain_contains() {
     [ "$candidate" = "$target" ] && return 0
   done
   return 1
+}
+
+resume_hint() {
+  local id="$1"
+  case "$slot" in
+    fix[0-9]*) printf 'tkt-fix %s --verify --resume %s --prompt <file>' "$state" "$id" ;;
+    *) printf 'tkt-job %s --slot %s --resume %s --prompt <file>' "$state" "$slot" "$id" ;;
+  esac
 }
 
 stored="$(tkt get "job.$slot" 2>/dev/null || true)"
@@ -662,9 +679,10 @@ $concerns"
     ERROR|STALLED)
       resume_sid="$(jq -r '.resume.sessionId // ""' "$record" 2>/dev/null || true)"
       if [ -n "$resume_sid" ]; then
+        hint_route="$(resume_hint "$jobid")"
         digest="$digest
 session=$resume_sid
-hint: this job ended $status with a resumable session; its text is below. Continue it with: tkt-job $state --slot $slot --resume $jobid --prompt <file>; start a fresh job only when the session is not worth keeping."
+hint: this job ended $status with a resumable session; its text is below. Continue it with: $hint_route; start a fresh job only when the session is not worth keeping."
       fi
       ;;
   esac
@@ -688,7 +706,7 @@ if [ "$reused" -eq 1 ]; then
     verdict="$verdict stale-head=$head_after now=$twelve"
   fi
   case "$verdict" in
-    ASK*) digest="hint: this job asked and has finished; a rerun only re-watches it. Answer with: tkt-job $state --slot $slot --resume $jobid --prompt <file>
+    ASK*) digest="hint: this job asked and has finished; a rerun only re-watches it. Answer with: $(resume_hint "$jobid")
 $digest" ;;
     *)
       if [ "$ec" -ne 0 ]; then
