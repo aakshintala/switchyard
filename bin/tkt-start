@@ -190,6 +190,11 @@ if [ -f "$state" ]; then
 else
   stored_plan=""
 fi
+stored_plan_skip=0
+if [ "$part_given" -eq 0 ] && [ "$takeover_given" -eq 0 ] && [ "$no_preflight" -eq 0 ] \
+  && [ -n "${stored_plan//[[:space:]]/}" ]; then
+  stored_plan_skip=1
+fi
 if [ "$no_preflight" -eq 0 ] && [ "$takeover_given" -eq 0 ]; then
   planner_available="$planner_flag_available"
   if [ "$planner_flag_seen" -eq 0 ] && state_has_planner_model; then planner_available=1; fi
@@ -473,8 +478,8 @@ tkt journal "tkt-start worktree $worktree $wt_note"; fpaths=()
 if [ -n "$files" ]; then IFS=',' read -ra parts <<<"$files"
   for p in ${parts[@]+"${parts[@]}"}; do p="$(printf '%s' "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"; [ -n "$p" ] && fpaths+=("$p"); done; fi
 stale=""; reason=""; filing=""; lognote="not run"; sincenote="no edit info"
-# --no-preflight skips the whole currency check: no issue-body read, no log.
-if [ "$no_preflight" -eq 0 ]; then
+# --no-preflight and a stored plan skip the whole currency check: no issue-body read, no log.
+if [ "$no_preflight" -eq 0 ] && [ "$stored_plan_skip" -eq 0 ]; then
 for p in ${fpaths[@]+"${fpaths[@]}"}; do git -C "$worktree" cat-file -e "origin/main:$p" 2>/dev/null || { stale=1; reason="missing-file:$p"; break; }; done
 if [ -z "$stale" ]; then
   body="$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>&1)" || fail_step github "$?" "$body"
@@ -501,7 +506,8 @@ fi
 fi
 dg=("state=$state" "worktree=$worktree $wt_note" "filing=${filing:-none} base=$base" "files=${files:-none}" "log ${filing:-none}..origin/main: $lognote" "$sincenote")
 # Merged PRs mentioning the issue run before the CURRENT exit, the
-# --no-preflight SKIPPED exit and the preflight dispatch. A Resolves line stops the
+# --no-preflight SKIPPED exit, the stored-plan PLANNED exit, and the
+# preflight dispatch. A Resolves line stops the
 # run, unless the issue recurred: OPEN with a comment strictly newer than
 # the newest Resolves merge. A recurrence only appends a NOTE naming the
 # newest PR and the run continues. A Part-of line notes the PR and its
@@ -570,6 +576,10 @@ if [ "$takeover_given" -eq 1 ] && [ -n "$files" ]; then
   tkt journal "tkt-start takeover claims files=${files}"
 fi
 if [ "$no_preflight" -eq 1 ]; then tkt journal "tkt-start check SKIPPED filing=${filing:-none}"; emit "SKIPPED filing=${filing:-none} files=${files:-none}" 0 "${dg[@]}"; fi
+if [ "$stored_plan_skip" -eq 1 ]; then
+  tkt journal "tkt-start check PLANNED plan=$stored_plan filing=${filing:-none}"
+  emit "PLANNED plan=$stored_plan" 0 "${dg[@]}"
+fi
 if [ -n "$stale" ]; then dg=("reason=$reason" ${dg[@]+"${dg[@]}"}); tkt journal "tkt-start check STALE reason=$reason filing=${filing:-none}"
 else tkt journal "tkt-start check CURRENT filing=$filing"; emit "CURRENT filing=$filing files=${files:-none}" 0 "${dg[@]}"; fi
 sweep_out="none"; out="$run/$namebase-preflight-out.md"

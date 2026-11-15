@@ -700,6 +700,14 @@ if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && [ -z "$collect_fix_job" 
 fi
 [ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
 [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
+# A fresh dispatch needs a finding to fix (#1879); nothing before this point
+# writes fix_round.*, job.* or fixslot. Rows match the way tkt-verify and
+# the round-findings checks read them: column-0 `P[123] `.
+if [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ "$recover_unpushed" -ne 1 ]; then
+  grep -qE '^P[123] ' "$findings" || emit "FINDINGS-EMPTY file=$findings" 2 \
+    "no column-0 P1-P3 finding rows in $findings" \
+    "for a verify-only run, use: tkt-verify $state --findings $findings"
+fi
 
 pass() {
   tool="$1"; output="$2"; ec="$3"; stderr_file="${4:-}"
@@ -724,7 +732,7 @@ write_findings() {
     echo "tkt-fix: refusing to overwrite $fr: $namebase$part_suffix-findings-r$round.md names are reserved for this ticket's own findings output; write hand-kept notes to $namebase$part_suffix-dispositions-r$round.md instead" >&2
     exit 2
   fi
-  if grep -q '^P[123] ' "$1" 2>/dev/null; then grep '^P[123] ' "$1" >"$fr"
+  if grep -q '^P[0123] ' "$1" 2>/dev/null; then grep '^P[0123] ' "$1" >"$fr"
   else printf 'no open findings\n' >"$fr"; fi
   t journal "findings write $fr"
   t set findings "$fr"
@@ -757,10 +765,13 @@ handle_verify_result() {
       write_findings "$verify_output"
       emit "FIX-OK reviewed=$verify_head" 0 "head=$verify_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
     FIX-INCOMPLETE*)
+      open="$(grep '^P[0123] ' "$verify_output" | head -n 30 || true)"
+      [ -n "$open" ] || emit "VERIFY-FAIL reason=no-finding-rows" 1 \
+        "FIX-INCOMPLETE verify output contains no bare P0/P1/P2/P3 finding rows; rerun verification with finding rows"
       stamp_verdict_at t
       write_findings_history verified "$verify_output" "$verify_rounds"
       write_findings "$verify_output"
-      open="$(grep '^P[123] ' "$verify_output" | head -n 30 || true)"
+      if ! grep -q '^P[012] ' "$verify_output"; then t set reviewed "$verify_head"; fi
       if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" ${notes[@]+"${notes[@]}"}; fi
       emit "FIX-INCOMPLETE round=$round" 1 "$open" ${notes[@]+"${notes[@]}"} ;;
     *) emit "VERIFY-FAIL" 1 "$(head -n 40 "$verify_output")" ;;

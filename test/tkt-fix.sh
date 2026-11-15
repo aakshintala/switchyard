@@ -276,6 +276,11 @@ case "\$(cat "$T/vermode")" in
   bad) printf 'BAD-VERDICT verify FIX-OKAY\n'; exit 1;;
   ruling)
     printf 'FIX-INCOMPLETE round=1\nP1 fix.txt:1 — a\n';;
+  p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 fix.txt:3 — non-blocking finding\n';;
+  p2-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 fix.txt:3 — non-blocking finding\nP2 fix.txt:2 — blocking finding\n';;
+  p0-p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 fix.txt:0 — critical finding\nP3 fix.txt:3 — non-blocking finding\n';;
+  p0-only-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 fix.txt:0 — critical finding\n';;
+  bullet-incomplete) printf 'FIX-INCOMPLETE round=1\n- **P3 fix.txt:3 — non-blocking finding.**\n';;
   incomplete)
     printf 'FIX-INCOMPLETE round=2\nP1 open finding in fix.txt\nP2 second finding\n';;
   history-one)
@@ -525,6 +530,17 @@ expect_ruling_refused() {
   grep -Fq "TKT tkt-fix RULING-REFUSED reason=$reason comment=$id" <<<"$out" || fail "$name refusal is missing: $out"
   ! grep -q '^job|' "$T/calls.log" || fail "$name dispatched a fix job: $(cat "$T/calls.log")"
   [ -z "$(bash "$TKT_STATE" "$S" get fix_round.1.start 2>/dev/null || true)" ] || fail "$name wrote fix_round.1.start"
+}
+
+expect_findings_empty_refusal() {
+  local name="$1" path="$2" out="$3" rc="$4" before_fixslot="$5"
+  [ "$rc" = 2 ] || fail "$name exited $rc, want 2: $out $(cat "$T/stderr")"
+  grep -Fq "TKT tkt-fix FINDINGS-EMPTY file=$path" <<<"$out" || fail "$name missing FINDINGS-EMPTY verdict: $out"
+  grep -Fq "$path" <<<"$out" || fail "$name did not name its findings file: $out"
+  grep -Fq "tkt-verify $S --findings $path" <<<"$out" || fail "$name did not point to tkt-verify: $out"
+  [ "$before_fixslot" = "$(bash "$TKT_STATE" "$S" get fixslot 2>/dev/null || true)" ] || fail "$name changed fixslot"
+  ! grep -Eq '^(fix_round[.]|job[.])' "$S" || fail "$name wrote fix round or job state: $(grep -E '^(fix_round[.]|job[.])' "$S")"
+  ! grep -q '^job|' "$T/calls.log" || fail "$name started a delegate job: $(cat "$T/calls.log")"
 }
 
 run_ruling_refutes_row() {
@@ -890,6 +906,40 @@ repair_out="$(eval "$repair_command" 2>"$T/stderr")" || fail "printed missing-ro
 head -n 1 <<<"$repair_out" | grep -q 'TKT tkt-fix FIX-OK' || fail "printed missing-round-findings repair did not pass coverage: $(head -n 1 <<<"$repair_out")"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.findings)" = "$FIX_ROUND_FINDINGS" ] || fail "missing-round-findings repair did not record the restored file"
 grep -q '^review-pr|' "$T/calls.log" || fail "missing-round-findings repair did not reach review-pr"
+fi
+
+if want findings-empty-argument; then
+setup_case findings-empty-argument
+EMPTY_FINDINGS="$CDIR/empty-findings.md"
+printf 'no open findings\n' >"$EMPTY_FINDINGS"
+before_fixslot="$(bash "$TKT_STATE" "$S" get fixslot 2>/dev/null || true)"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --findings "$EMPTY_FINDINGS" 2>"$T/stderr")" || run_rc=$?
+expect_findings_empty_refusal findings-empty-argument "$EMPTY_FINDINGS" "$out" "$run_rc" "$before_fixslot"
+fi
+
+# Readers match column-0 `P[123] `, so a bulleted, bolded or P0-only row is no row.
+if want findings-empty-markup; then
+setup_case findings-empty-markup
+EMPTY_FINDINGS="$CDIR/markup-findings.md"
+before_fixslot="$(bash "$TKT_STATE" "$S" get fixslot 2>/dev/null || true)"
+for row in '- P1 x' '**P1** x' 'P0 x'; do
+  printf '%s\n' "$row" >"$EMPTY_FINDINGS"
+  run_rc=0; out="$(bash "$TKT" "$S" --verify --findings "$EMPTY_FINDINGS" 2>"$T/stderr")" || run_rc=$?
+  expect_findings_empty_refusal "findings-empty-markup ($row)" "$EMPTY_FINDINGS" "$out" "$run_rc" "$before_fixslot"
+done
+fi
+
+if want findings-empty-state-ruling; then
+setup_case findings-empty-state-ruling
+EMPTY_FINDINGS="$CDIR/empty-state-findings.md"
+printf 'no open findings\n' >"$EMPTY_FINDINGS"
+bash "$TKT_STATE" "$S" set findings "$EMPTY_FINDINGS" >/dev/null
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+issue="$(bash "$TKT_STATE" "$S" get issue)"
+write_ruling_comment 99 'grants: round 3' "$issue" OWNER '2026-11-14T00:00:00Z'
+before_fixslot="$(bash "$TKT_STATE" "$S" get fixslot 2>/dev/null || true)"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || run_rc=$?
+expect_findings_empty_refusal findings-empty-state-ruling "$EMPTY_FINDINGS" "$out" "$run_rc" "$before_fixslot"
 fi
 
 if want no-p-round-findings; then
@@ -1276,6 +1326,9 @@ incomplete_findings="$(bash "$TKT_STATE" "$S" get findings)"
 grep -Fq 'P1 open finding' "$incomplete_findings" || fail "incomplete collect-verify records open findings"
 
 # The recorded verify collects, updates findings, and does not add to round.
+# A state findings file with no finding rows does not block a collect (#1879).
+printf 'no open findings\n' >"$CDIR/collect-empty-findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/collect-empty-findings.md" >/dev/null
 printf 'ok' >"$T/collectmode"
 run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = 0 ] || fail "valid collect-verify exited $run_rc: $out $(cat "$T/stderr")"
@@ -1419,6 +1472,68 @@ grep -q "P1 open finding" <<<"$out" || fail "finding headlines missing from dige
 [ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "round not 2"
 fr="$CDIR/run/switchyard-529-findings-r2.md"
 grep -q "P1 open finding in fix.txt" "$fr" || fail "findings-r2.md missing the open lines"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$OLD" ] || fail "FIX-INCOMPLETE with P1/P2 advanced reviewed"
+
+# A bullet-formatted incomplete verify is rejected without replacing findings.
+setup_case incomplete-bullets
+printf 'bullet-incomplete' >"$T/vermode"
+run_rc=0
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "bullet-incomplete exited $run_rc, want 1: $out"
+grep -q '^TKT tkt-fix VERIFY-FAIL reason=no-finding-rows' <<<"$out" \
+  || fail "bullet-incomplete did not fail for missing bare finding rows: $out"
+fr="$CDIR/run/switchyard-529-findings-r1.md"
+[ ! -e "$fr" ] || fail "bullet-incomplete wrote a findings file: $(cat "$fr")"
+[ "$(bash "$TKT_STATE" "$S" get findings)" = "$CDIR/findings.md" ] \
+  || fail "bullet-incomplete changed the findings state key"
+
+# P3-only FIX-INCOMPLETE advances reviewed so ship-pr can file the P3 findings.
+setup_case incomplete-p3
+printf 'p3-incomplete' >"$T/vermode"
+run_rc=0
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "P3-only FIX-INCOMPLETE exited $run_rc, want 1: $out"
+verify_head="$(git -C "$WT" rev-parse HEAD)"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "P3-only verdict changed: $out"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$verify_head" ] \
+  || fail "P3-only FIX-INCOMPLETE did not advance reviewed to $verify_head"
+fr="$CDIR/run/switchyard-529-findings-r1.md"
+grep -Fq 'P3 fix.txt:3 — non-blocking finding' "$fr" || fail "P3-only findings file lost the P3 row"
+
+# A mixed result containing P2 leaves reviewed at the prior verified head.
+setup_case incomplete-p2
+printf 'p2-incomplete' >"$T/vermode"
+run_rc=0
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "P2 FIX-INCOMPLETE exited $run_rc, want 1: $out"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "P2 verdict changed: $out"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$OLD" ] || fail "P2 FIX-INCOMPLETE changed reviewed"
+
+# P0 plus P3 remains incomplete and leaves reviewed unchanged; both rows persist.
+setup_case incomplete-p0-p3
+printf 'p0-p3-incomplete' >"$T/vermode"
+run_rc=0
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "P0+P3 FIX-INCOMPLETE exited $run_rc, want 1: $out"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "P0+P3 verdict changed: $out"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$OLD" ] || fail "P0+P3 FIX-INCOMPLETE changed reviewed"
+grep -Fq 'P0 fix.txt:0 — critical finding' <<<"$out" || fail "P0 digest row missing: $out"
+fr="$CDIR/run/switchyard-529-findings-r1.md"
+grep -Fq 'P0 fix.txt:0 — critical finding' "$fr" || fail "P0+P3 findings file lost the P0 row"
+
+# P0-only FIX-INCOMPLETE is a recorded incomplete result, not a missing-row failure.
+setup_case incomplete-p0-only
+printf 'p0-only-incomplete' >"$T/vermode"
+run_rc=0
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "P0-only FIX-INCOMPLETE exited $run_rc, want 1: $out"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "P0-only result was not FIX-INCOMPLETE: $out"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$OLD" ] || fail "P0-only FIX-INCOMPLETE changed reviewed"
+[ "$(bash "$TKT_STATE" "$S" get findings)" = "$CDIR/run/switchyard-529-findings-r1.md" ] \
+  || fail "P0-only FIX-INCOMPLETE did not record findings"
+grep -Fq 'P0 fix.txt:0 — critical finding' "$CDIR/run/switchyard-529-findings-r1.md" \
+  || fail "P0-only findings file lost the P0 row"
+grep -Fq 'P0 fix.txt:0 — critical finding' <<<"$out" || fail "P0-only digest row missing: $out"
 
 # 3. Ready, not pushed: CI wait runs, the push lands, failed jobs reach the digest.
 setup_case unpushed
