@@ -294,10 +294,11 @@ run_since() {
       skills/*)
         skills_changed=1
         ;;
-      *.md)
-        ;;
+      # bin/lib/*.md are lane brief templates, so this arm precedes *.md (#1868).
       bin/lib/*|test/run)
         [ -n "$full_reason" ] || full_reason="$path"
+        ;;
+      *.md)
         ;;
       test/*)
         relative="${path#test/}"

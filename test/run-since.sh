@@ -224,10 +224,11 @@ grep '^suite:' "$log" | sort >"$actual" || :
 diff -u "$expected" "$actual" >/dev/null || fail 'command-reference run selected the wrong suites'
 
 # Changes under bin/lib, test/run, a shared test helper, and unknown code paths run the full list.
-for fallback in bin-lib test-run test-helper claude-code-hook unknown-root; do
+for fallback in bin-lib bin-lib-md test-run test-helper claude-code-hook unknown-root; do
   new_fixture
   case "$fallback" in
     bin-lib) mkdir -p "$repo/bin/lib"; target="$repo/bin/lib/helper.sh" ;;
+    bin-lib-md) mkdir -p "$repo/bin/lib"; target="$repo/bin/lib/template-pi.md" ;;
     test-run) target="$repo/test/run" ;;
     test-helper) mkdir -p "$repo/test/lib"; target="$repo/test/lib/helper.sh" ;;
     claude-code-hook) mkdir -p "$repo/claude-code/hooks"; target="$repo/claude-code/hooks/x" ;;
@@ -244,6 +245,9 @@ for fallback in bin-lib test-run test-helper claude-code-hook unknown-root; do
     fail "$fallback fallback selection line missing"
   }
   assert_full_suite_ran
+  if [ "$fallback" = bin-lib-md ]; then
+    grep -Fx 'suite:brief-bounded.sh' "$log" >/dev/null || fail 'bin/lib/template-pi.md change did not select test/brief-bounded.sh'
+  fi
   echo "PASS: $fallback change ran the complete full-suite list"
 done
 
