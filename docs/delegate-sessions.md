@@ -24,12 +24,15 @@ When `send` reaches an idle session, the reply is `started`. When it reaches a r
 
 Each dispatched run spawns its child exactly once; a wall expiry during retry
 backoff performs no respawn. The first kill signal to a run's process group is
-SIGTERM. A clean wall kill and an idle stall each send just this one SIGTERM.
-A wall-expired child that ignores SIGTERM gets SIGKILL after the kill grace,
-and a user cancel after a watchdog kill sends SIGKILL at once, with no SIGTERM
-grace. A cancel after a wall kill reads the cancel wording, not the wall
-wording. Once the driver has reaped the child, further kill calls send
-nothing, so a late kill cannot hit a recycled pid.
+SIGTERM. A backend that exits on SIGTERM needs no second signal; if it ignores
+SIGTERM, both an idle stall and a wall expiry escalate to SIGKILL after the kill
+grace. After a terminated job's driver returns, the terminal record waits until
+the process group has no live processes, or until one further kill grace after
+SIGKILL; if processes remain, the output concern names their pids. A user cancel
+after a watchdog kill sends SIGKILL at once, with no SIGTERM grace. A cancel
+after a wall kill reads the cancel wording, not the wall wording. Once the driver
+has reaped the child, its kill closure sends nothing, so a late kill cannot hit
+a recycled pid; finalization signals a still-live group directly when needed.
 
 ## Inbox notes
 

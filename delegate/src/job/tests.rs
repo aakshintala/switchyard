@@ -6,6 +6,8 @@ use crate::output::derive_status;
 use crate::status_record::{CliRecordWriter, FileStatusRecordWriter, job_record_path};
 use crate::types::{Allowance, PollResult, ResumeContext};
 use std::collections::HashMap;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -105,6 +107,56 @@ impl FakeBackend {
             sleep(Duration::from_millis(2));
         }
         panic!("no handle {i}");
+    }
+}
+
+struct TermResistantGroupBackend {
+    child_pid_file: std::path::PathBuf,
+}
+
+impl Runner for TermResistantGroupBackend {
+    fn resume_argv(&self, _model: &str, _session: &str, prompt: &str) -> Vec<String> {
+        vec![prompt.into()]
+    }
+
+    fn run(&self, _spec: &JobSpec) -> Spawned {
+        let mut child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "sh -c 'trap \"\" TERM; echo $$ > \"$DELEGATE_TEST_CHILD_PID\"; while :; do sleep 1; done' & wait",
+            ])
+            .env("DELEGATE_TEST_CHILD_PID", &self.child_pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn process-group parent");
+        let group = child.id() as libc::pid_t;
+        let kill_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = Arc::clone(&kill_calls);
+        Spawned {
+            process_group: Some(group),
+            kill: Box::new(move || {
+                let signal = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    libc::SIGTERM
+                } else {
+                    libc::SIGKILL
+                };
+                unsafe {
+                    libc::kill(-group, signal);
+                }
+            }),
+            session_id: None,
+            drive: Box::new(move |on| {
+                on(Event::Progress(ProgressSnapshotRaw {
+                    phase: Some("running_tool".into()),
+                    ..Default::default()
+                }));
+                let _ = child.wait();
+                BackendResult::default()
+            }),
+        }
     }
 }
 
@@ -353,6 +405,55 @@ fn status_of(v: &serde_json::Value) -> &str {
 }
 
 #[test]
+fn a_sigterm_resistant_group_child_is_dead_before_the_stalled_record() {
+    let pid_file = std::env::temp_dir().join(format!("delegate-child-{}.pid", random_uuid()));
+    let backend = Arc::new(TermResistantGroupBackend {
+        child_pid_file: pid_file.clone(),
+    });
+    let spy = Arc::new(Spy::default());
+    let mut deps = JobDeps::new(backend, None, None);
+    deps.tool_idle_ms = Some(400.0);
+    deps.kill_grace_ms = 250;
+    deps.finalize = Arc::new(fake_finalize);
+    deps.finalize_stall = Arc::new(fake_finalize);
+    deps.status_writer = spy.clone();
+    let reg = JobHandle::new(deps);
+    let id = reg.dispatch(spec_of(|_| {}));
+
+    // The shell creates the file before `echo` writes the pid: wait for a parse.
+    let read_pid = || {
+        std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<libc::pid_t>().ok())
+    };
+    wait_until("SIGTERM-resistant child pid", Duration::from_secs(5), || {
+        read_pid().is_some()
+    });
+    let child_pid = read_pid().expect("parse child pid");
+
+    assert_eq!(settle(&reg, &id), "STALLED");
+    assert_eq!(status_of(&spy.last().1), "STALLED");
+    assert!(
+        !pid_is_live(child_pid),
+        "SIGTERM-resistant group child {child_pid} was still live at terminal record write"
+    );
+    let _ = std::fs::remove_file(pid_file);
+}
+
+fn pid_is_live(pid: libc::pid_t) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .any(|state| !state.is_empty() && !is_zombie(state))
+}
+
+#[test]
 fn ps_child_check_handles_claude_sessions_and_zombies() {
     let claude_background = "2906253 1 2906253 Ssl\n2906261 2906253 2906261 Sl\n2911236 2906261 2911236 Ss\n2911247 2911236 2911247 S\n";
     assert!(process_group_has_live_child_in_ps(
@@ -365,6 +466,33 @@ fn ps_child_check_handles_claude_sessions_and_zombies() {
         backend_and_zombie,
         2906261
     ));
+}
+
+#[test]
+fn a_stuck_process_group_adds_a_concern_with_live_pids_from_the_ps_snapshot() {
+    let ps = "700 1 700 S\n701 700 700 S\n702 701 702 Ss\n703 700 700 Z\n704 1 704 S\n";
+    let pids = process_group_live_pids_in_ps(ps, 700);
+    assert_eq!(pids, [701, 702]);
+
+    let ctx = FinalizeCtx {
+        cwd: "/tmp".into(),
+        head_before: None,
+        gate: String::new(),
+        gate_timeout_ms: None,
+        model: "test".into(),
+        backend: "test".into(),
+        price_map: HashMap::new(),
+        job_id: None,
+        run_gate: None,
+        signal: None,
+        git_delta: None,
+    };
+    let mut out = fake_finalize(&BackendResult::default(), &ctx);
+    add_live_process_group_concern(&mut out, &pids);
+    assert_eq!(
+        out.concerns.unwrap(),
+        vec!["Process group still has live pids after SIGKILL: 701, 702"]
+    );
 }
 
 #[test]
@@ -1143,7 +1271,7 @@ fn a_job_past_its_wall_budget_is_cancelled() {
     let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(300.0)));
     assert_eq!(s.reg.poll(&id), "RUNNING");
     assert_eq!(settle(&s.reg, &id), "CANCELLED");
-    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
+    // Contract (docs/delegate-sessions.md, Job kill contracts): the first kill is SIGTERM; a backend that exits on it needs no escalation.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
     wall_text(&s.reg, &id, 300.0);
 }
@@ -1195,7 +1323,7 @@ fn the_wall_budget_includes_the_retry_backoff() {
     let t = Instant::now();
     assert_eq!(settle(&s.reg, &id), "CANCELLED");
     assert!(t.elapsed() < Duration::from_secs(1));
-    // Contract (docs/delegate-sessions.md:13-22): a wall expiry during retry backoff performs no respawn.
+    // Contract (docs/delegate-sessions.md, Job kill contracts): a wall expiry during retry backoff performs no respawn.
     assert_eq!(argvs(&s).len(), 1);
     wall_text(&s.reg, &id, 100.0);
 }
@@ -1303,12 +1431,12 @@ fn the_first_termination_wins() {
     *s.fake.ignore_first_kill.lock().unwrap() = true;
     let id = s.reg.dispatch(spec_of(|_| {}));
     wait_killed(&s, &["SIGTERM"]);
-    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
+    // Contract (docs/delegate-sessions.md, Job kill contracts): an idle stall starts with SIGTERM before escalation.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
     let t = Instant::now();
     assert_eq!(s.reg.cancel(&id), "CANCELLED");
     assert!(t.elapsed() < Duration::from_secs(1));
-    // Contract (docs/delegate-sessions.md:13-22): a wall-expired child that ignores SIGTERM gets SIGKILL after the grace; a user cancel after a watchdog kill sends it at once.
+    // Contract (docs/delegate-sessions.md, Job kill contracts): ignored SIGTERM escalates after the grace; user cancel after a watchdog kill sends SIGKILL at once.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM", "SIGKILL"]);
     let text = terminal_text(&s.reg, &id);
     assert!(text.starts_with("Cancelled after"), "{text:?}");
@@ -1326,7 +1454,7 @@ fn a_cancel_after_wall_sigterm_reads_the_cancel_wording() {
     let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(50.0)));
     wait_killed(&s, &["SIGTERM"]);
     assert_eq!(s.reg.cancel(&id), "CANCELLED");
-    // Contract (docs/delegate-sessions.md:13-22): a wall-expired child that ignores SIGTERM gets SIGKILL after the grace; a user cancel after a watchdog kill sends it at once.
+    // Contract (docs/delegate-sessions.md, Job kill contracts): ignored SIGTERM escalates after the grace; user cancel after a watchdog kill sends SIGKILL at once.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM", "SIGKILL"]);
     let text = terminal_text(&s.reg, &id);
     assert!(text.starts_with("Cancelled after"), "{text:?}");
@@ -1341,10 +1469,10 @@ fn a_sigterm_resistant_child_is_killed_after_the_grace() {
     *s.fake.ignore_first_kill.lock().unwrap() = true;
     let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(50.0)));
     wait_killed(&s, &["SIGTERM"]);
-    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
+    // Contract (docs/delegate-sessions.md, Job kill contracts): ignored SIGTERM escalates after the grace for wall expiry and idle stall.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
     assert_eq!(settle(&s.reg, &id), "CANCELLED");
-    // Contract (docs/delegate-sessions.md:13-22): a wall-expired child that ignores SIGTERM gets SIGKILL after the grace; a user cancel after a watchdog kill sends it at once.
+    // Contract (docs/delegate-sessions.md, Job kill contracts): ignored SIGTERM escalates after the grace for wall expiry and idle stall.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM", "SIGKILL"]);
     wall_text(&s.reg, &id, 50.0);
 
@@ -1352,23 +1480,25 @@ fn a_sigterm_resistant_child_is_killed_after_the_grace() {
     let s = setup_with(|d| d.kill_grace_ms = 60_000);
     let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(50.0)));
     assert_eq!(settle(&s.reg, &id), "CANCELLED");
-    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
+    // Contract (docs/delegate-sessions.md, Job kill contracts): the first kill is SIGTERM; a backend that exits on it needs no escalation.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
 
-    // The escalation is wall-only: an idle stall keeps its single SIGTERM.
+    // An idle stall escalates like a wall expiry when the backend ignores SIGTERM.
     let s = setup_with(|d| {
         d.idle_ms = Some(50.0);
         d.kill_grace_ms = 400;
     });
     *s.fake.ignore_first_kill.lock().unwrap() = true;
+    let started = Instant::now();
     let id = s.reg.dispatch(spec_of(|_| {}));
-    wait_killed(&s, &["SIGTERM"]);
-    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
-    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
-    s.fake.handle(0).finish(done_ok());
     assert_eq!(settle(&s.reg, &id), "STALLED");
-    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
-    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
+    // #1889 acceptance: STALLED within idle + kill_grace + one grace.
+    assert!(
+        started.elapsed() < Duration::from_millis(50 + 400 + 400),
+        "idle stall took {:?}, beyond idle + kill grace + one grace",
+        started.elapsed()
+    );
+    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM", "SIGKILL"]);
 }
 
 #[test]
