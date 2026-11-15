@@ -643,6 +643,46 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --workt
 [ "$out" = "$(printf 'OVERLAP x.txt lane:fiber-4224\nGRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "re-claim overlap lines: $out"
 [ "$(claims_blob "$R" | grep -c "^x.txt${TAB}")" = "2" ] || fail "re-claim stores no second line"
 
+# A terminal overlapping holder is reaped before an owned path is re-claimed.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:dA --repo test/repo x.txt >/dev/null 2>&1 || fail "closed-overlap lane A setup claim exits 0"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4990 --grant --worktree t:dB --repo test/repo x.txt >/dev/null 2>&1 || fail "closed-overlap lane B setup claim exits 0"
+out="$(GH_TICKET_STATES='4990:CLOSED' FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:dA --repo test/repo x.txt 2>/dev/null)" \
+  || fail "re-claim with a closed overlapping holder exits 0"
+[ "$out" = "$(printf 'REAP claim x.txt by fiber-4990 (ticket #4990 closed)\nGRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] \
+  || fail "closed overlapping holder is reaped before re-claim output: $out"
+! grep -q "^x.txt${TAB}fiber-4990${TAB}" <<<"$(claims_blob "$R")" || fail "closed overlapping holder is removed"
+
+# Re-claiming every path already held by a lane skips a reap write blocked by
+# the claims ref lock and returns the normal successful claim output.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:dA --repo test/repo x.txt >/dev/null 2>&1 || fail "no-op lock setup claim exits 0"
+stale="$T/no-op-stale-claims"
+git -c init.defaultBranch=main init -q "$stale" || fail "init no-op stale claim fixture"
+git -C "$stale" config user.email t@t.t || fail "no-op stale fixture email"
+git -C "$stale" config user.name t || fail "no-op stale fixture name"
+git -C "$stale" remote add origin "$R" || fail "set no-op stale fixture remote"
+git -C "$stale" fetch -q origin refs/claims/live || fail "fetch no-op stale claim ref"
+git -C "$stale" checkout -q -b no-op-stale FETCH_HEAD || fail "checkout no-op stale claim ref"
+printf 'stale.txt\tfiber-4990\tgrant\t2026-01-02T03:04:05Z\tt:stale\t\n' >>"$stale/claims"
+git -C "$stale" add claims || fail "stage no-op stale claim row"
+git -C "$stale" commit -qm 'add stale no-op fixture' || fail "commit no-op stale claim row"
+git -C "$stale" push -q origin HEAD:refs/claims/live || fail "publish no-op stale claim row"
+before="$(claims_blob "$R")"
+mkdir -p "$T/no-sleep"
+cat >"$T/no-sleep/sleep" <<'STUB_EOF'
+#!/usr/bin/env bash
+exit 0
+STUB_EOF
+chmod +x "$T/no-sleep/sleep"
+mkdir -p "$R/refs/claims"
+printf 'held by another writer\n' >"$R/refs/claims/live.lock"
+out="$(GH_TICKET_STATES='4990:CLOSED' FILE_CLAIM_REMOTE="$R" PATH="$T/no-sleep:$PATH" bash "$FC" claim --lane fiber-4223 --grant --worktree t:dA --repo test/repo x.txt 2>"$T/e-no-op-lock")" \
+  || fail "no-op re-claim exits 0 with a locked registry: $(cat "$T/e-no-op-lock")"
+[ "$out" = "$(printf 'GRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "no-op re-claim keeps successful output: $out"
+[ "$(claims_blob "$R")" = "$before" ] || fail "no-op re-claim leaves the locked registry unchanged"
+rm -f "$R/refs/claims/live.lock"
+
 # --diff refreshes plan claims for paths changed since the previous push: changed
 # paths get old-side hunks; untouched plan paths keep their whole-file claims.
 R="$(fresh)"
