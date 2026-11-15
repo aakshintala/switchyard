@@ -2047,11 +2047,21 @@ rc=$?; [ "$rc" = "3" ] || fail "recover exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "bad verdict: $(head -n 1 <<<"$out")"
 grep -q "job=j1" <<<"$out" || fail "job id missing from RECOVER digest"
 grep -q "slot=fix1" <<<"$out" || fail "slot missing from RECOVER digest"
-recovery="tkt-fix $(printf '%q' "$S") --verify --collect-fix $(printf '%q' j1)"
+recovery="tkt-fix $(printf '%q' "$S") [--verify|--no-verify] --collect-fix $(printf '%q' j1)"
 grep -Fq "recovery: $recovery" <<<"$out" || fail "RECOVER omitted collect-fix recovery command: $out"
+grep -Fq 'choose --verify or --no-verify to match the mode used for this round' <<<"$out" || fail "RECOVER did not tell the caller to choose the original verify mode: $out"
 grep -q "job|" "$T/calls.log" && fail "fix job dispatched on RECOVER"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "recover pushed"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "head moved on RECOVER"
+
+# A bare stored job id is not proof that a tkt-fix dispatch passed ROUND-LIMIT.
+setup_case collect-fix-unrecorded-job
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+: >"$T/calls.log"
+run_rc=0; bash "$TKT" "$S" --verify --collect-fix j1 >"$T/unrecorded-job.out" 2>"$T/stderr" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "collect with only a stored job id exited $run_rc, want 2"
+grep -Fq 'tkt-fix: missing recorded round findings: fix_round.1.findings' "$T/stderr" || fail "unrecorded job collect did not explain the refusal: $(cat "$T/stderr")"
+! grep -q '^job|' "$T/calls.log" || fail "collect with only a stored job id called tkt-job"
 
 # --collect-fix only collects the id recorded for the computed open slot.
 setup_case collect-fix-wrong
@@ -2079,8 +2089,9 @@ collected_record="$(bash "$REAL_BIN/job-record" j1)"
 jq -e '.result.status == "DONE" and (.result.text | contains("gate PASS")) and .result.gateResult == null and (.result.changeSet.newCommits | length) == 1' "$collected_record" >/dev/null || fail "wrapper-death fixture does not copy the completed job record shape"
 printf 'P1 state-only decoy\n' >"$CDIR/decoy-findings.md"
 bash "$TKT_STATE" "$S" set findings "$CDIR/decoy-findings.md" >/dev/null
+write_ruling_comment 923 'refutes: P1 heading from review'
 : >"$T/calls.log"
-out="$(bash "$TKT" "$S" --verify --collect-fix j1 2>"$T/stderr")" || fail "collect-fix exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+out="$(bash "$TKT" "$S" --verify --collect-fix j1 --ruling 923 2>"$T/stderr")" || fail "collect-fix with refutes ruling exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
 head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK reviewed=' || fail "collect-fix did not apply the normal verify path: $out"
 collected_head="$(git -C "$WT" rev-parse HEAD)"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.head)" = "$collected_head" ] || fail "collect-fix did not record fix_round.1.head"
@@ -2092,6 +2103,7 @@ collected_head="$(git -C "$WT" rev-parse HEAD)"
 grep -Fq "job|$S --slot fix1 --expect-commits" "$T/calls.log" || fail "collect-fix did not use the watch-only tkt-job call: $(cat "$T/calls.log")"
 grep -Fq 'P1 heading from review' "$T/verify-input-1.md" || fail "collect-fix verify omitted the dispatch's recorded findings"
 ! grep -Fq 'P1 state-only decoy' "$T/verify-input-1.md" || fail "collect-fix used state findings instead of the dispatch's recorded findings"
+grep -Fq 'refuted: recorded ruling' "$T/verify-input-1.md" || fail "collect-fix did not apply the refutes ruling to the recorded finding"
 ! grep -q 'tkt-fix gate PASS ' "${S%.state}.journal" || fail "collect-fix credited a report-only gate PASS without a passing record gateResult"
 
 # Collect refuses missing or unreadable findings recorded for the dispatched slot.

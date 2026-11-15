@@ -301,14 +301,19 @@ if [ -n "$resume" ]; then
   else echo "tkt-fix: unknown job id: $resume" >&2; exit 2
   fi
 fi
+knum="${slot#fix}"
 if [ -n "$collect_fix_job" ]; then
   stored_collect_job="$(t get "job.$slot" 2>/dev/null || true)"
   if [ "$collect_fix_job" != "$stored_collect_job" ]; then
     echo "tkt-fix: --collect-fix $collect_fix_job is not the job of open slot $slot (job.$slot=$stored_collect_job)" >&2
     exit 2
   fi
+  # A hand-set job.fix<n> alone does not prove a dispatch passed ROUND-LIMIT.
+  # record_round_findings records this key on the dispatch path after ROUND-LIMIT.
+  findings="$(t get "fix_round.$knum.findings" 2>/dev/null || true)"
+  [ -n "$findings" ] || { echo "tkt-fix: missing recorded round findings: fix_round.$knum.findings" >&2; exit 2; }
+  [ -r "$findings" ] || { echo "tkt-fix: cannot read recorded round findings: fix_round.$knum.findings=$findings" >&2; exit 2; }
 fi
-knum="${slot#fix}"
 history_file="$(history_path "$knum")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
@@ -689,13 +694,9 @@ fi
 if [ "$limited" -eq 1 ] && [ "${recover_unpushed:-0}" -ne 1 ]; then round_limit; fi
 recover_unpushed="${recover_unpushed:-0}"
 if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && [ -z "$collect_fix_job" ] && job="$(t get "job.$slot" 2>/dev/null || true)" && [ -n "$job" ]; then
-  recovery_cmd="tkt-fix $(printf '%q' "$state") --verify --collect-fix $(printf '%q' "$job")"
-  emit "RECOVER" 3 "job=$job" "slot=$slot" "recovery: $recovery_cmd"
-fi
-if [ -n "$collect_fix_job" ]; then
-  findings="$(t get "fix_round.$knum.findings" 2>/dev/null || true)"
-  [ -n "$findings" ] || { echo "tkt-fix: missing recorded round findings: fix_round.$knum.findings" >&2; exit 2; }
-  [ -r "$findings" ] || { echo "tkt-fix: cannot read recorded round findings: fix_round.$knum.findings=$findings" >&2; exit 2; }
+  recovery_cmd="tkt-fix $(printf '%q' "$state") [--verify|--no-verify] --collect-fix $(printf '%q' "$job")"
+  emit "RECOVER" 3 "job=$job" "slot=$slot" "recovery: $recovery_cmd" \
+    "choose --verify or --no-verify to match the mode used for this round"
 fi
 [ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
 [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
