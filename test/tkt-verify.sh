@@ -167,7 +167,7 @@ assert_no_review() {
 }
 
 assert_no_slot() {
-  ! grep -q '^fix_round[.]' "$S" || fail "$1 wrote fix-round state before refusing: $(grep '^fix_round[.]' "$S")"
+  ! grep -q '^fix_round\.' "$S" || fail "$1 wrote fix-round state before refusing: $(grep '^fix_round\.' "$S")"
   ! grep -q '^fixslot=' "$S" || fail "$1 wrote fixslot before refusing: $(grep '^fixslot=' "$S")"
 }
 

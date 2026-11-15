@@ -131,7 +131,6 @@ if [ "$fixslot" -gt 0 ] \
   knum="$fixslot"
 elif [ "$round" -gt "$fixslot" ]; then knum=$((round + 1)); else knum=$((fixslot + 1)); fi
 
-mkdir -p "$run"
 if [ -n "$issue" ]; then set_namebase "$repo" "$issue"; else namebase="${repo##*/}"; fi
 part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
 history_file="$(history_path "$knum")"
@@ -143,7 +142,7 @@ advance_round() {
   if [ "$has_p_lines" -eq 1 ]; then
     round=$((round + 1))
     t set round "$round"
-    t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    stamp_verdict_at t
   fi
 }
 
@@ -173,7 +172,7 @@ record_fix_ok() {
   advance_round
   t set reviewed "$head"
   t set head "$head"
-  t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  stamp_verdict_at t
   write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
   if [ -n "$adoption_comment" ]; then
     t journal "tkt-verify ADOPT FIX-OK head=$head since=$adoption_since comment=$adoption_comment"
@@ -194,6 +193,7 @@ adopt_posted_fix_ok() {
   local refusal_head="$1" rows row created comment_id header body64 comment_head comment_pid comment_since verdict expected_pid
   local latest_comment_id="" latest_comment_head="" newer_verdict=""
   local patch_mismatch="" verdict_failure="" since_gap="" since_missing="" adopted=0
+  local -a candidate_rows=()
   [ "$refusal_head" = "$head" ] && [ "$refusal_head" = "$state_head" ] \
     || refuse_adoption "header head $refusal_head does not equal state head $state_head and validated worktree/origin/PR head $head" "$refusal_head"
   expected_pid="$(git -C "$worktree" diff "origin/main...$head" | git patch-id --stable | awk '{print $1}')"
@@ -203,15 +203,16 @@ adopt_posted_fix_ok() {
     [ -n "$row" ] || continue
     IFS=$'\t' read -r created comment_id header body64 <<<"$row"
     comment_pid="$(review_header_value patch-id "$header")"
+    comment_head="$(review_header_value head "$header")"
     if [ "$comment_pid" = "$expected_pid" ]; then
       latest_comment_id="$comment_id"
-      latest_comment_head="$(review_header_value head "$header")"
+      latest_comment_head="$comment_head"
     fi
+    if [ "$comment_head" = "$refusal_head" ]; then candidate_rows+=("$row"); fi
   done <<<"$rows"
   verdict="$(review_verdict "$repo" "$pr" "$expected_pid")" \
     || refuse_adoption "could not parse newest verdict for patch-id $expected_pid" "$refusal_head"
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
+  for row in ${candidate_rows[@]+"${candidate_rows[@]}"}; do
     IFS=$'\t' read -r created comment_id header body64 <<<"$row"
     comment_head="$(review_header_value head "$header")"
     [ "$comment_head" = "$refusal_head" ] || continue
@@ -248,7 +249,7 @@ adopt_posted_fix_ok() {
     printf 'FIX-OK adopted from comment %s\n' "$comment_id" >"$tmp/verify.out"
     adopted=1
     record_fix_ok "$comment_since" "$comment_id"
-  done <<<"$rows"
+  done
   [ "$adopted" -eq 1 ] && return 0
   if [ -n "$newer_verdict" ]; then refuse_adoption "newer verdict at head: $newer_verdict" "$refusal_head"; fi
   if [ -n "$patch_mismatch" ]; then refuse_adoption "patch-id mismatch: $patch_mismatch" "$refusal_head"; fi
@@ -288,7 +289,7 @@ case "$fixline" in
     write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
     t set findings "$verify_output"
     advance_round
-    t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    stamp_verdict_at t
     t journal "tkt-verify FIX-INCOMPLETE"
     open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
     emit "FIX-INCOMPLETE" 1 "$open"

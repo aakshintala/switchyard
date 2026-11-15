@@ -715,12 +715,12 @@ handle_verify_result() {
   case "$fixline" in
     FIX-OK*)
       t set reviewed "$verify_head"
-      t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      stamp_verdict_at t
       write_findings_history verified "$verify_output" "$verify_rounds"
       write_findings "$verify_output"
       emit "FIX-OK reviewed=$verify_head" 0 "head=$verify_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
     FIX-INCOMPLETE*)
-      t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      stamp_verdict_at t
       write_findings_history verified "$verify_output" "$verify_rounds"
       write_findings "$verify_output"
       open="$(grep '^P[123] ' "$verify_output" | head -n 30 || true)"
@@ -1057,7 +1057,7 @@ if [ "$recover_unpushed" -eq 1 ]; then
     gerr="$(grep -i -m 5 -E 'error|panick' "$recovery_log" || true)"
     if [ -n "$gerr" ]; then gate_digest="$gate_digest"$'\n'"$gerr"; fi
     printf 'TKT tkt-gate FAIL rc=%s log=%s\n%s\n' "$gate_rc" "$recovery_log" "$gate_digest" >"$tmp/gate.out"
-    round=$((round + 1)); t set round "$round"; t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; close_slot "$knum"
+    round=$((round + 1)); t set round "$round"; stamp_verdict_at t; close_slot "$knum"
     pass tkt-gate "$tmp/gate.out" 1 "$tmp/recovery-gate.err"
   fi
   if ! push_out="$(git -C "$worktree" push origin "$branch" 2>&1)"; then emit "PUSH-FAIL" 1 "$push_out"; fi
@@ -1187,7 +1187,7 @@ if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
 if [ "$grc" -eq 1 ]; then
   case "$(head -n 1 "$tmp/gate.out")" in
     "TKT tkt-gate STOP-LIST "*) close_slot "$knum" ;;
-    *) round=$((round + 1)); t set round "$round"; t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; close_slot "$knum" ;;
+    *) round=$((round + 1)); t set round "$round"; stamp_verdict_at t; close_slot "$knum" ;;
   esac
 fi
 if [ "$grc" -ne 0 ]; then
@@ -1253,7 +1253,7 @@ if [ "$recover_unpushed" -ne 1 ]; then
 fi
 
 # A successful gate counts the round even when verification is disabled.
-round=$((round + 1)); t set round "$round"; t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; close_slot "$knum"
+round=$((round + 1)); t set round "$round"; stamp_verdict_at t; close_slot "$knum"
 
 # Digest lines after the verdict: the CI notes, and the concerns file the
 # orchestrator reads before it accepts the verdict.
