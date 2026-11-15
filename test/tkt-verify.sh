@@ -70,6 +70,8 @@ case "$(cat "$T/vermode")" in
   bullet-incomplete) printf 'FIX-INCOMPLETE round=1\n- **P3 `src/main.sh:3` — non-blocking finding.**\n';;
   p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 src/main.sh:3 — non-blocking finding\n';;
   p2-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 src/main.sh:3 — non-blocking finding\nP2 src/main.sh:2 — blocking finding\n';;
+  p2-fixed-p3-incomplete) printf 'FIX-INCOMPLETE round=1\n## Fixed\nP2 src/main.sh:2: fixed.\n## Open\nP3 src/main.sh:3 — non-blocking finding\n';;
+  p2-open-under-fixed) printf 'FIX-INCOMPLETE round=1\n## Fixed\nP2 src/main.sh:1: fixed.\nP2 src/main.sh:2 — still broken\n';;
   p0-p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 src/main.sh:0 — critical finding\nP3 src/main.sh:3 — non-blocking finding\n';;
   p0-only-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 src/main.sh:0 — critical finding\n';;
   fail) printf 'review-pr failed\n' >&2; exit 7;;
@@ -416,6 +418,26 @@ run_verify
 [ "$RC" = 1 ] || fail "P2 FIX-INCOMPLETE exited $RC, want 1: $OUT"
 assert_first_verdict FIX-INCOMPLETE 'P2 FIX-INCOMPLETE'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "P2 FIX-INCOMPLETE changed reviewed"
+
+# A fixed P2 under a Fixed heading does not block reviewed from advancing, even
+# when review-pr's digest has no ## verify heading.
+setup_case p2-fixed-p3-incomplete
+printf 'p2-fixed-p3-incomplete\n' >"$T/vermode"
+run_verify
+[ "$RC" = 1 ] || fail "fixed-P2 FIX-INCOMPLETE exited $RC, want 1: $OUT"
+assert_first_verdict FIX-INCOMPLETE 'fixed-P2 FIX-INCOMPLETE'
+[ "$(read_state reviewed)" = "$HEAD" ] || fail "fixed P2 prevented reviewed from advancing"
+fixed_p2_file="$RUN/switchyard-1756-tkt-verify-${HEAD:0:12}.md"
+grep -Fq 'P2 src/main.sh:2: fixed.' "$fixed_p2_file" || fail "fixed P2 row was not preserved"
+grep -Fq 'P3 src/main.sh:3 — non-blocking finding' "$fixed_p2_file" || fail "open P3 row was not preserved"
+
+# An open P2 under a Fixed heading, with no `: fixed.` suffix, still holds reviewed.
+setup_case p2-open-under-fixed
+printf 'p2-open-under-fixed\n' >"$T/vermode"
+run_verify
+[ "$RC" = 1 ] || fail "open-P2-under-Fixed exited $RC, want 1: $OUT"
+assert_first_verdict FIX-INCOMPLETE 'open-P2-under-Fixed FIX-INCOMPLETE'
+[ "$(read_state reviewed)" = "$OLD" ] || fail "open P2 under a Fixed heading advanced reviewed"
 
 # P0 plus P3 remains incomplete and leaves reviewed unchanged; both rows persist.
 setup_case p0-p3-incomplete
