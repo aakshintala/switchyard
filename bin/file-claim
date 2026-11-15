@@ -387,79 +387,69 @@ claim_diff_paths() {
   ' "$diff"
 }
 
-# An already-held claim must not push the registry merely to reap unrelated rows.
-claim_noop_if_owned() {
-  local lane="$1" repo="$2" main_tip="$3" tip="$4" exempt_pr="$5" p held path claim_path holder_lane prs_for_path path_base reason pr holders holder
-  shift 5
-  local -a paths=() out=()
-  local granted=0 refused=0
-  local claims_file="$W/noop-claims"
-  for p in "$@"; do
-    held=0
-    if [ "${#paths[@]}" -gt 0 ]; then
-      for path in "${paths[@]}"; do [ "$path" = "$p" ] && { held=1; break; }; done
-    fi
-    [ "$held" = 1 ] || paths+=("$p")
-  done
+# Return success only when each requested path has an own hold, no sweep row
+# overlaps, and no terminal other-lane ticket/PR overlap requires reap.
+claim_can_skip_reap() {
+  local lane="$1" repo="$2" claim_tip="$3" p claim_path holder_lane holder_pr ticket pr_number i
+  local own_hold prefix lookup_rc expected actual
+  shift 3
+  local -a paths=("$@") claim_paths=() claim_lanes=() claim_prs=() pr_numbers=()
+  local claims_file="$W/noop-claims" numbers_file="$W/noop-ticket-numbers"
   [ "${#paths[@]}" -gt 0 ] || return 1
-  load_claims "$tip" "$claims_file"
+  load_claims "$claim_tip" "$claims_file"
+  while IFS="$TAB" read -r claim_path holder_lane _holder_kind _holder_at _holder_wt holder_pr || [ -n "$claim_path" ]; do
+    [ -n "$claim_path" ] || continue
+    claim_paths+=("$claim_path")
+    claim_lanes+=("$holder_lane")
+    claim_prs+=("$holder_pr")
+  done <"$claims_file"
+
+  : >"$numbers_file"
   for p in "${paths[@]}"; do
-    held=0
-    claim_path=""
-    while IFS="$TAB" read -r claim_path holder_lane _holder_kind _holder_at _holder_wt _holder_pr || [ -n "$claim_path" ]; do
-      [ -n "$claim_path" ] || continue
-      if [ "$holder_lane" = "$lane" ] && claim_paths_overlap "$p" "$claim_path"; then held=1; fi
-    done <"$claims_file"
-    [ "$held" = 1 ] || return 1
-  done
-  for p in "${paths[@]}"; do
-    claim_path=""
-    while IFS="$TAB" read -r claim_path holder_lane _holder_kind _holder_at _holder_wt _holder_pr || [ -n "$claim_path" ]; do
-      [ -n "$claim_path" ] || continue
-      if claim_paths_overlap "$p" "$claim_path" && [ "$holder_lane" != "$lane" ] &&
-          { [[ "$holder_lane" == sweep-* ]] || [[ "$lane" == sweep-* ]]; }; then
-        return 1
-      fi
-    done <"$claims_file"
-  done
-  build_prmap "$repo"
-  for p in "${paths[@]}"; do
-    path_base="$(claim_path_base "$p")"
-    prs_for_path="$(awk -F'\t' -v q="$path_base" -v s="$exempt_pr" '$2==q&&index(","s",", ","$1",")==0{print $1}' "$W/prmap" | sort -n)"
-    if [ -n "$prs_for_path" ]; then
-      [[ "$lane" == sweep-* ]] && return 1
-      while IFS= read -r pr || [ -n "$pr" ]; do
-        [ -n "$pr" ] || continue
-        out+=("OVERLAP $p pr#$pr")
-      done <<< "$prs_for_path"
-    fi
-    holders=""
-    claim_path=""
-    while IFS="$TAB" read -r claim_path holder_lane _holder_kind _holder_at _holder_wt _holder_pr || [ -n "$claim_path" ]; do
-      [ -n "$claim_path" ] || continue
+    own_hold=0
+    for ((i = 0; i < ${#claim_paths[@]}; i++)); do
+      claim_path="${claim_paths[$i]}"
+      holder_lane="${claim_lanes[$i]}"
       if claim_paths_overlap "$p" "$claim_path"; then
-        holders="${holders}${holders:+$NL}$holder_lane"
+        [[ "$lane" == sweep-* || "$holder_lane" == sweep-* ]] && return 1
+        if [ "$holder_lane" = "$lane" ]; then
+          own_hold=1
+        else
+          ticket="$(lane_ticket_num "$holder_lane")"
+          [ -z "$ticket" ] || printf '%s\n' "$ticket" >>"$numbers_file"
+          holder_pr="${claim_prs[$i]-}"
+          if [ -n "$holder_pr" ]; then
+            IFS=',' read -r -a pr_numbers <<<"$holder_pr"
+            for pr_number in "${pr_numbers[@]}"; do
+              case "$pr_number" in ''|*[!0-9]*|0*) continue;; esac
+              printf '%s\n' "$pr_number" >>"$numbers_file"
+            done
+          fi
+        fi
       fi
-    done <"$claims_file"
-    if [ -n "$holders" ]; then holders="$(printf '%s\n' "$holders" | sort -u)"; fi
-    while IFS= read -r holder || [ -n "$holder" ]; do
-      [ -n "$holder" ] || continue
-      [ "$holder" = "$lane" ] && continue
-      [[ "$holder" == sweep-* || "$lane" == sweep-* ]] && return 1
-      out+=("OVERLAP $p lane:$holder")
-    done <<< "$holders"
-    reason="new"
-    if [ "$(git -C "$W" cat-file -t "$main_tip:$path_base" 2>/dev/null)" = blob ]; then reason="exists"; fi
-    out+=("GRANT $p $reason")
-    granted=$((granted + 1))
+    done
+    [ "$own_hold" = 1 ] || return 1
   done
-  report 0
+  [ -s "$numbers_file" ] || return 0
+  sort -un "$numbers_file" -o "$numbers_file" 2>/dev/null || return 1
+  prefix="$W/noop-ticket-state"
+  lookup_rc=0
+  ticket_states_lookup "$repo" "$numbers_file" "$prefix" || lookup_rc=$?
+  [ "$lookup_rc" = 0 ] && [ ! -s "$prefix.warnings" ] || return 1
+  expected="$(awk 'NF { n++ } END { print n+0 }' "$numbers_file")"
+  actual="$(awk 'NF { n++ } END { print n+0 }' "$prefix.states")"
+  [ "$expected" = "$actual" ] || return 1
+  while IFS= read -r ticket || [ -n "$ticket" ]; do
+    [ -n "$ticket" ] || continue
+    if ticket_state_is_terminal "$ticket" "$prefix.states"; then return 1; fi
+  done <"$numbers_file"
+  return 0
 }
 
 cmd_claim() {
   local lane="$1" kind="$2" self_pr="$3" exempt_pr="$4" worktree="$5" repo="$6"
   local diff_worktree="$7" refresh="$8"; shift 8
-  local remote now main_tip prmap tip claims attempt paths requested_paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line saw_cap saw_prs hpr prs_for_path holders own_hold blocked path_base holder_path holder_lane own_existing claim_line claim_path claim_lane claim_base diff_base drop_claim reap_rc
+  local remote now main_tip prmap tip claims attempt paths requested_paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line saw_cap saw_prs hpr prs_for_path holders own_hold blocked path_base holder_path holder_lane own_existing claim_line claim_path claim_lane claim_base diff_base drop_claim reap_rc skip_reap
   local -a paths=() requested_paths=() diff_bases=()
   remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   new_workdir
@@ -483,16 +473,19 @@ cmd_claim() {
   # Fetch both tips here so reap can reuse this workdir and the same snapshots.
   if ! main_tip="$(fetch_main_tip "$remote")"; then die 2 "cannot reap claims before claim"; fi
   if ! tip="$(fetch_claim_tip "$remote")"; then die 2 "cannot reap claims before claim"; fi
-  if [ "$refresh" != 1 ]; then
-    claim_noop_if_owned "$lane" "$repo" "$main_tip" "$tip" "$exempt_pr" "${requested_paths[@]}" || :
+  skip_reap=0
+  if [ "$refresh" != 1 ] && claim_can_skip_reap "$lane" "$repo" "$tip" "${requested_paths[@]}"; then
+    skip_reap=1
   fi
-  # Run reap outside a condition context so its set -e still applies, as it did
-  # when reap was its own process; an `if !` or `||` here would disable errexit.
-  set +e
-  ( set -e; trap - EXIT; cmd_reap "$repo" "$main_tip" "$tip" )
-  reap_rc=$?
-  set -e
-  [ "$reap_rc" -eq 0 ] || die 2 "cannot reap claims before claim"
+  if [ "$skip_reap" != 1 ]; then
+    # Run reap outside a condition context so its set -e still applies, as it did
+    # when reap was its own process; an `if !` or `||` here would disable errexit.
+    set +e
+    ( set -e; trap - EXIT; cmd_reap "$repo" "$main_tip" "$tip" )
+    reap_rc=$?
+    set -e
+    [ "$reap_rc" -eq 0 ] || die 2 "cannot reap claims before claim"
+  fi
   for p in "${requested_paths[@]}"; do
     held=0
     if [ "${#paths[@]}" -gt 0 ]; then for i in "${paths[@]}"; do if [ "$i" = "$p" ]; then held=1; break; fi; done; fi

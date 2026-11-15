@@ -643,6 +643,16 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --workt
 [ "$out" = "$(printf 'OVERLAP x.txt lane:fiber-4224\nGRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "re-claim overlap lines: $out"
 [ "$(claims_blob "$R" | grep -c "^x.txt${TAB}")" = "2" ] || fail "re-claim stores no second line"
 
+# A terminal overlapping holder is reaped before an owned path is re-claimed.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:dA --repo test/repo x.txt >/dev/null 2>&1 || fail "closed-overlap lane A setup claim exits 0"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4990 --grant --worktree t:dB --repo test/repo x.txt >/dev/null 2>&1 || fail "closed-overlap lane B setup claim exits 0"
+out="$(GH_TICKET_STATES='4990:CLOSED' FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:dA --repo test/repo x.txt 2>/dev/null)" \
+  || fail "re-claim with a closed overlapping holder exits 0"
+[ "$out" = "$(printf 'REAP claim x.txt by fiber-4990 (ticket #4990 closed)\nGRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] \
+  || fail "closed overlapping holder is reaped before re-claim output: $out"
+! grep -q "^x.txt${TAB}fiber-4990${TAB}" <<<"$(claims_blob "$R")" || fail "closed overlapping holder is removed"
+
 # Re-claiming every path already held by a lane skips a reap write blocked by
 # the claims ref lock and returns the normal successful claim output.
 R="$(fresh)"
