@@ -625,8 +625,8 @@ want "PREFLIGHT core=0 nonblocking=1 out=" 0 fieldmissing-rerun
   || fail "fieldmissing-rerun: did not dispatch a new preflight job"
 
 setup resume-fixed TWO FILING
-printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"
-printf '1. non-blocking -- repaired\nCore items: 0\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobresumeout"
+printf '1. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"
+printf '1. non-blocking -- other\nCore items: 0\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobresumeout"
 run_start
 want "PREFLIGHT core=0 nonblocking=1 out=" 0 resume-fixed
 [ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] || fail "resume-fixed: no resume call"
@@ -692,6 +692,28 @@ grep -qF 'tkt-start: preflight tags resume failed (rc=0): resumed report has 1 t
 case "$OUT" in *"Non-blocking items: 2"*) fail "resume-nonblocking-mismatch: refusal shows the rejected resumed body: $OUT" ;; esac
 [ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
   || fail "resume-nonblocking-mismatch: refused resume did not clear the job slot"
+
+# A footer repair cannot drop a tagged core finding.
+setup resume-footer-core-drop TWO FILING
+printf '%s\n' '1. core -- first' 'STATUS: DONE' >"$T/jobout"
+printf '%s\n' 'Core items: 0' 'Non-blocking items: 0' 'STATUS: DONE' >"$T/jobresumeout"
+run_start
+want "PREFLIGHT core=unknown out=" 1 resume-footer-core-drop
+grep -qF 'tkt-start: preflight footer resume failed (rc=0): resumed report lowers Core items from 1 to 0' <<<"$OUT" \
+  || fail "resume-footer-core-drop: refusal does not name the lowered core count: $OUT"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "resume-footer-core-drop: refused resume did not clear the job slot"
+
+# A tags repair cannot lower the core count (two core findings would pass as core=0).
+setup resume-core-drop TWO FILING
+printf '%s\n' '**Core findings**' '1. first' '2. second' 'Core items: 2' 'Non-blocking items: 0' 'STATUS: DONE' >"$T/jobout"
+printf '%s\n' 'Core items: 0' 'Non-blocking items: 0' 'STATUS: DONE' >"$T/jobresumeout"
+run_start
+want "PREFLIGHT core=mismatch footer=2 tagged=0 out=" 1 resume-core-drop
+grep -qF 'tkt-start: preflight tags resume failed (rc=0): resumed report lowers Core items from 2 to 0' <<<"$OUT" \
+  || fail "resume-core-drop: refusal does not name the lowered core count: $OUT"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "resume-core-drop: refused resume did not clear the job slot"
 
 setup resume-failure TWO FILING
 printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"

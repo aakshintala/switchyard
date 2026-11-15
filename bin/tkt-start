@@ -609,7 +609,7 @@ tkt journal "tkt-start preflight core=$core out=$out"
 # resume the same job again (#1833). Returns 0 with the resumed report reparsed.
 resume_diag=()
 resume_preflight() {
-  local slug="$1" text="$2" job attempted prompt rc=0 txt jobhead ok=0 new failure="" previous_core="$core" previous_nb="$nb" previous_tagged_core="${tagged_core:-}" previous_tagged_nonblocking="${tagged_nonblocking:-}" previous_report="$report"
+  local slug="$1" text="$2" job attempted prompt rc=0 txt jobhead ok=0 new failure="" floor_core previous_core="$core" previous_nb="$nb" previous_tagged_core="${tagged_core:-}" previous_tagged_nonblocking="${tagged_nonblocking:-}" previous_report="$report"
   job="$(tkt get job.preflight 2>/dev/null || true)"
   attempted="$(tkt get preflight.resume_attempted 2>/dev/null || true)"
   [ -n "$job" ] || return 1
@@ -639,6 +639,16 @@ resume_preflight() {
     failure="resumed report has no STATUS: line"
   elif [ "$tagged_nonblocking" -lt "$nb" ]; then
     failure="resumed report has $tagged_nonblocking tagged non-blocking lines but footer says $nb"
+  else
+    # A resume may add findings or fix tags, never drop one: the floor is the
+    # larger of the original footer and the original tagged lines.
+    floor_core="$orig_tagged_core"
+    case "$previous_core" in ''|*[!0-9]*) ;; *) [ "$previous_core" -le "$floor_core" ] || floor_core="$previous_core" ;; esac
+    if [ "$core" != unknown ] && [ "$core" -lt "$floor_core" ]; then
+      failure="resumed report lowers Core items from $floor_core to $core"
+    elif [ "$nb" -lt "$orig_tagged_nonblocking" ]; then
+      failure="resumed report lowers Non-blocking items from $orig_tagged_nonblocking to $nb"
+    fi
   fi
   if [ -n "$failure" ]; then
     if [ "$slug" = tags ]; then
@@ -656,6 +666,7 @@ refuse_unknown() {
   clear_preflight_slot
   emit "PREFLIGHT core=unknown out=$out" 1 "tkt-start: rerun tkt-start for a fresh preflight" "${dg[@]}" ${resume_diag[@]+"${resume_diag[@]}"} "tkt-start: preflight report has no 'Core items:' line" "$report"
 }
+count_tags; orig_tagged_core="$tagged_core"; orig_tagged_nonblocking="$tagged_nonblocking"
 if [ "$core" = unknown ]; then
   resume_preflight footer 'Append the required footer lines exactly as skills/planning/briefs/preflight.md asks: Core items: <n> and Non-blocking items: <n>, using decimal counts. Do not change the findings. Reply with the complete corrected report as your message: every finding line tagged "- core:" or "- non-blocking:", the Writes/Reads sweep, both footer lines ("Core items: <n>" and "Non-blocking items: <n>") matching the tagged lines, and the STATUS line. Write no file, and change no finding.' || core=unknown
   [ "$core" != unknown ] || refuse_unknown
