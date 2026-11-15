@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# kill-guard shim
+# Refuses every pkill/killall invocation so a lane cannot signal processes by
+# name. Installed as `pkill` and `killall` in a lane's shim directory; see
+# autonomous-flywheel. It never runs another command.
+# Not covered: the `kill` shell builtin, an absolute /usr/bin/pkill, or
+# `kill $(pgrep ...)`; the lane brief's "No pkill" rule covers those.
+
+name="$(basename "$0")"
+printf '%s\n' "kill-guard: refused: $name: a lane may not signal processes by name, because other lanes' gates share the host; signal only pids you started yourself with kill <pid> (from \$! or a pid file)" >&2
+exit 1
