@@ -27,7 +27,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] | --brief <file> | --resume <job id> --prompt <file>) [--model <id>] [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]" >&2
-  echo "If a slot has a prompt hash, a different supplied prompt requires clearing the slot or using a new one." >&2
+  echo "If a slot has a prompt hash, a different supplied prompt replaces it only when the stored job has finished; otherwise it refuses." >&2
   echo "With --resume, --model is passed to delegate resume; without it the resumed job keeps its stored model." >&2
   exit 2
 }
@@ -129,6 +129,12 @@ bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 if [ -n "${TKT_BIN:-}" ]; then delegate="$TKT_BIN/delegate"; else delegate=delegate; fi
 fillbrief="$bin_dir/fill-brief"
 plangate="$bin_dir/plan-gate"
+
+# rec_of ID: print the winning job-record path, or nothing; it never fails,
+# so a missing record reads as "no record" under set -e.
+rec_of() {
+  bash "$script_dir/job-record" "$1" 2>/dev/null || true
+}
 
 tkt() {
   "$tkt_state" "$state" "$@"
@@ -359,14 +365,45 @@ if [ -z "$resume" ] && [ -n "$stored" ] && job_chain_contains "$stored"; then
   exit 2
 fi
 stored_prompt_hash=""
+brief_prepared=0
 if [ -n "$stored" ] && [ -z "$resume" ]; then
   stored_prompt_hash="$(tkt get "job.$slot.prompt" 2>/dev/null || true)"
   if [ -n "$stored_prompt_hash" ] && { [ -n "$template" ] || [ -n "$brief" ]; }; then
     prepare_brief
+    brief_prepared=1
     prompt_hash="$(shasum -a 256 <"$brief" | awk '{print $1}')"
     if [ "$prompt_hash" != "$stored_prompt_hash" ]; then
-      echo "ERROR slot $slot holds job $stored from a different prompt; clear it (tkt-state $state set job.$slot '') or use a new slot" >&2
-      exit 2
+      stored_record="$(rec_of "$stored")"
+      newest_record=""
+      chain_broken=0
+      if [ -n "$stored_record" ] && [ -r "$stored_record" ]; then
+        replaced_chain="$(job_walk_superseded "$stored")" || chain_broken=1
+        if [ "$chain_broken" -eq 0 ]; then
+          while IFS=$'\t' read -r chain_id chain_record; do
+            [ -n "$chain_id" ] || continue
+            newest_record="$chain_record"
+          done <<<"$replaced_chain"
+        fi
+      else
+        chain_broken=1
+      fi
+      changed_status=""
+      if [ "$chain_broken" -eq 0 ] && [ -n "$newest_record" ] && [ -r "$newest_record" ]; then
+        changed_status="$(jq -er 'if type == "object" then .status | select(type == "string") else empty end' "$newest_record" 2>/dev/null || true)"
+      fi
+      case "$changed_status" in
+        DONE|DONE_WITH_CONCERNS|BLOCKED|NEEDS_CONTEXT|ERROR|STALLED|CANCELLED)
+          tkt journal "tkt-job slot $slot replaced job=$stored prompt=$stored_prompt_hash: finished job, prompt changed"
+          tkt set "job.$slot" ""
+          tkt set "job.$slot.prompt" ""
+          stored=""
+          stored_prompt_hash=""
+          ;;
+        *)
+          echo "ERROR slot $slot holds job $stored from a different prompt; clear it (tkt-state $state set job.$slot '') or use a new slot" >&2
+          exit 2
+          ;;
+      esac
     fi
   fi
 fi
@@ -427,7 +464,9 @@ else
     build_gate_from_plan
   fi
   validate_gate_journal_command
-  prepare_brief
+  if [ "$brief_prepared" -eq 0 ]; then
+    prepare_brief
+  fi
   prompt_hash="$(shasum -a 256 <"$brief" | awk '{print $1}')"
   if [ -z "$model" ]; then
     model="$(tkt get "model.$slot" 2>/dev/null)" || {
@@ -461,11 +500,6 @@ watch_rc=0
 if [ "$watch_rc" -ne 0 ]; then
   echo "tkt-job: delegate watch failed (exit $watch_rc); checking the job record" >&2
 fi
-# rec_of ID: print the winning job-record path, or nothing; it never fails,
-# so a missing record reads as "no record" under set -e.
-rec_of() {
-  bash "$script_dir/job-record" "$1" 2>/dev/null || true
-}
 record="$(rec_of "$jobid")"
 
 # Keep one jobs.log line per job id. If watch failed or a rerun finds a missing

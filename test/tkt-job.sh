@@ -1062,18 +1062,77 @@ expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS reused=
 [ "$(grep -c '^resume|' "$T/stub.log")" -eq 1 ] || fail "original brief after a resume resumes nothing"
 [ "$(grep -c '^watch|stub-2' "$T/stub.log")" -eq 2 ] || fail "original brief after a resume watches the stored job"
 
-# --- a stored job refuses a prompt that differs from its dispatch -------------
-setup_case prompt-changed
+# --- a finished stored job is replaced when its prompt changes ----------------
+setup_case prompt-changed-finished
+reset_stub
+make_record stub-1 DONE 0 0 1 0
+make_record stub-2 DONE 0 1 2 0
+run_job --slot lane --brief "$T/brief.md"
+[ "$RC" -eq 0 ] || fail "initial prompt dispatch exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+old_prompt_hash="$(shasum -a 256 <"$T/brief.md" | awk '{print $1}')"
+printf 'a different prompt\n' >"$T/brief-changed.md"
+run_job --slot lane --brief "$T/brief-changed.md"
+[ "$RC" -eq 0 ] || fail "finished job with different prompt exits per new job verdict (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS log=*" "changed prompt dispatches a fresh job"
+expected_replacement="tkt-job slot lane replaced job=stub-1 prompt=$old_prompt_hash: finished job, prompt changed"
+awk -v expected="$expected_replacement" 'substr($0, 22) == expected { found++ } END { exit found != 1 }' "$CDIR/tkt.journal" || fail "finished prompt replacement journals the exact line"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 2 ] || fail "finished prompt replacement dispatches exactly one new job"
+[ "$(grep -c '^watch|stub-1$' "$T/stub.log")" -eq 1 ] || fail "finished prompt replacement does not watch the old job again"
+[ "$(grep -c '^watch|stub-2$' "$T/stub.log")" -eq 1 ] || fail "finished prompt replacement watches the new job"
+[ "$(bash "$TKT_STATE" "$S" get job.lane)" = stub-2 ] || fail "finished prompt replacement stores the new id"
+new_prompt_hash="$(shasum -a 256 <"$T/brief-changed.md" | awk '{print $1}')"
+[ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "$new_prompt_hash" ] || fail "finished prompt replacement stores the new prompt hash"
+
+# --- a running stored job keeps the different-prompt refusal -----------------
+setup_case prompt-changed-running
 reset_stub
 make_record stub-1 DONE 0 0 1 0
 run_job --slot lane --brief "$T/brief.md"
 [ "$RC" -eq 0 ] || fail "initial prompt dispatch exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+jq '.status = "RUNNING"' "$T/tmp/delegate-jobs/stub-1.json" >"$T/tmp/delegate-jobs/stub-1.json.tmp" \
+  && mv "$T/tmp/delegate-jobs/stub-1.json.tmp" "$T/tmp/delegate-jobs/stub-1.json" \
+  || fail "mark stored job running"
 printf 'a different prompt\n' >"$T/brief-changed.md"
 run_job --slot lane --brief "$T/brief-changed.md"
-[ "$RC" -eq 2 ] || fail "different prompt exits 2 (rc=$RC)"
-grep -Fq "ERROR slot lane holds job stub-1 from a different prompt; clear it (tkt-state $S set job.lane '') or use a new slot" "$CDIR/stderr.txt" || fail "different prompt explains how to clear or replace the slot: $(cat "$CDIR/stderr.txt")"
-[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "different prompt dispatches no new job"
-[ "$(grep -c '^watch|' "$T/stub.log")" -eq 1 ] || fail "different prompt does not watch the old job"
+[ "$RC" -eq 2 ] || fail "running job with different prompt exits 2 (rc=$RC)"
+grep -Fqx "ERROR slot lane holds job stub-1 from a different prompt; clear it (tkt-state $S set job.lane '') or use a new slot" "$CDIR/stderr.txt" || fail "running job keeps the exact different-prompt refusal: $(cat "$CDIR/stderr.txt")"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "running job with different prompt dispatches no new job"
+[ "$(grep -c '^watch|stub-1$' "$T/stub.log")" -eq 1 ] || fail "running job with different prompt does not watch the old job again"
+
+# --- a stopped stored job (BLOCKED, NEEDS_CONTEXT, STALLED) is replaced too ---
+# Answering such a job goes through --resume, which skips the prompt check.
+for stopped in BLOCKED NEEDS_CONTEXT STALLED; do
+  setup_case "prompt-changed-$stopped"
+  reset_stub
+  make_record stub-1 DONE 0 0 1 0
+  make_record stub-2 DONE 0 1 2 0
+  run_job --slot lane --brief "$T/brief.md"
+  [ "$RC" -eq 0 ] || fail "$stopped: initial prompt dispatch exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  jq --arg s "$stopped" '.status = $s' "$T/tmp/delegate-jobs/stub-1.json" >"$T/tmp/delegate-jobs/stub-1.json.tmp" \
+    && mv "$T/tmp/delegate-jobs/stub-1.json.tmp" "$T/tmp/delegate-jobs/stub-1.json" \
+    || fail "mark stored job $stopped"
+  old_prompt_hash="$(shasum -a 256 <"$T/brief.md" | awk '{print $1}')"
+  printf 'a different prompt\n' >"$T/brief-changed.md"
+  run_job --slot lane --brief "$T/brief-changed.md"
+  [ "$RC" -eq 0 ] || fail "$stopped job with different prompt is replaced (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  grep -Fq " tkt-job slot lane replaced job=stub-1 prompt=$old_prompt_hash: finished job, prompt changed" "$CDIR/tkt.journal" || fail "$stopped replacement journals the replaced line"
+  [ "$(grep -c '^run|' "$T/stub.log")" -eq 2 ] || fail "$stopped replacement dispatches exactly one new job"
+  [ "$(bash "$TKT_STATE" "$S" get job.lane)" = stub-2 ] || fail "$stopped replacement stores the new id"
+done
+
+# --- a missing stored-job record keeps the different-prompt refusal ----------
+setup_case prompt-changed-missing
+reset_stub
+make_record stub-1 DONE 0 0 1 0
+run_job --slot lane --brief "$T/brief.md"
+[ "$RC" -eq 0 ] || fail "initial prompt dispatch exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+rm "$T/tmp/delegate-jobs/stub-1.json"
+printf 'a different prompt\n' >"$T/brief-changed.md"
+run_job --slot lane --brief "$T/brief-changed.md"
+[ "$RC" -eq 2 ] || fail "missing-record job with different prompt exits 2 (rc=$RC)"
+grep -Fqx "ERROR slot lane holds job stub-1 from a different prompt; clear it (tkt-state $S set job.lane '') or use a new slot" "$CDIR/stderr.txt" || fail "missing-record job keeps the exact different-prompt refusal: $(cat "$CDIR/stderr.txt")"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "missing-record job with different prompt dispatches no new job"
+[ "$(grep -c '^watch|stub-1$' "$T/stub.log")" -eq 1 ] || fail "missing-record job with different prompt does not watch the old job again"
 
 # --- a slot holding only whitespace is empty: no refusal, a fresh dispatch ----
 setup_case slot-blank
