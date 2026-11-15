@@ -74,12 +74,13 @@ inner_gate_cmd="$gate"
 case "$slot" in
   fix[0-9]*)
     if [ "${TKT_FIX_DISPATCH:-}" != "1" ]; then
-      printf 'tkt-job: dispatch fix slots through: tkt-fix %s (--verify|--no-verify) --findings <file>; resume a fix job with: tkt-fix %s --verify --resume <job id> --prompt <file>\n' "$state" "$state" >&2
+      printf 'tkt-job: dispatch fix slots through: tkt-fix %s (--verify|--no-verify) --findings <file>; resume a fix job with: tkt-fix %s (--verify|--no-verify) --resume <job id> --prompt <file>\n' "$state" "$state" >&2
       printf "Clear an existing orphan with: tkt-state %s set job.%s ''; tkt-state %s set job.%s.prompt ''\n" "$state" "$slot" "$state" "$slot" >&2
       exit 2
     fi
     ;;
 esac
+unset TKT_FIX_DISPATCH
 # A prompt file only resumes; a resume needs its prompt and takes no fresh
 # brief. A resume may carry a gate; the two gate sources never combine.
 { [ -z "$prompt" ] || [ -n "$resume" ]; } || usage
@@ -365,7 +366,7 @@ job_chain_contains() {
 resume_hint() {
   local id="$1"
   case "$slot" in
-    fix[0-9]*) printf 'tkt-fix %s --verify --resume %s --prompt <file>' "$state" "$id" ;;
+    fix[0-9]*) printf 'tkt-fix %s (--verify|--no-verify) --resume %s --prompt <file>' "$state" "$id" ;;
     *) printf 'tkt-job %s --slot %s --resume %s --prompt <file>' "$state" "$slot" "$id" ;;
   esac
 }

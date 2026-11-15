@@ -106,6 +106,7 @@ case "\$cmd" in
     n="\$((\$(cat "$T/counter") + 1))"
     printf '%s' "\$n" >"$T/counter"
     printf 'run|model=%s|cwd=%s|gate=%s|prompt=%s\n' "\$model" "\$cwd" "\$gate" "\$prompt" >>"\$log"
+    printf 'fixdispatch=%s\n' "\${TKT_FIX_DISPATCH:-unset}" >>"\$log"
     if [ -n "\$model_ruling" ]; then printf 'runmodelruling=%s\n' "\$model_ruling" >>"\$log"; fi
     if [ -n "\$idle" ]; then printf 'idle=%s\n' "\$idle" >>"\$log"; fi
     if [ -n "\$idle_ms" ]; then printf 'idleMs=%s\n' "\$idle_ms" >>"\$log"; fi
@@ -131,6 +132,7 @@ case "\$cmd" in
     n="\$((\$(cat "$T/counter") + 1))"
     printf '%s' "\$n" >"$T/counter"
     printf 'resume|id=%s|prompt=%s|new=stub-%s\n' "\$id" "\$prompt" "\$n" >>"\$log"
+    printf 'fixdispatch=%s\n' "\${TKT_FIX_DISPATCH:-unset}" >>"\$log"
     if [ -n "\$gate" ]; then printf 'resumegate=%s\n' "\$gate" >>"\$log"; fi
     if [ -n "\$rmodel" ]; then printf 'resumemodel=%s\n' "\$rmodel" >>"\$log"; fi
     if [ -n "\$model_ruling" ]; then printf 'resumemodelruling=%s\n' "\$model_ruling" >>"\$log"; fi
@@ -320,7 +322,7 @@ cp "$S" "$CDIR/before.state"
 run_job --slot fix1 --template "$T/tmpl-basic.md" --model test-model
 [ "$RC" -eq 2 ] || fail "unmarked fix1 exits 2 (rc=$RC)"
 grep -Fq "tkt-fix $S (--verify|--no-verify) --findings <file>" "$CDIR/stderr.txt" || fail "fix1 refusal names the tkt-fix findings route"
-grep -Fq "tkt-fix $S --verify --resume <job id> --prompt <file>" "$CDIR/stderr.txt" || fail "fix1 refusal names the tkt-fix resume route"
+grep -Fq "tkt-fix $S (--verify|--no-verify) --resume <job id> --prompt <file>" "$CDIR/stderr.txt" || fail "fix1 refusal names both tkt-fix resume modes"
 grep -Fq "tkt-state $S set job.fix1 ''" "$CDIR/stderr.txt" || fail "fix1 refusal names the job slot clear"
 grep -Fq "tkt-state $S set job.fix1.prompt ''" "$CDIR/stderr.txt" || fail "fix1 refusal names the prompt slot clear"
 ! grep -q '^TKT tkt-job ' "$CDIR/stderr.txt" || fail "fix1 refusal uses plain stderr, not a verdict tag"
@@ -337,6 +339,7 @@ run_job --slot fix1 --template "$T/tmpl-basic.md" --model test-model
 unset TKT_FIX_DISPATCH
 [ "$RC" -eq 0 ] || fail "marked fix1 proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q '^run|' "$T/stub.log" || fail "marked fix1 dispatches through delegate"
+grep -qx 'fixdispatch=unset' "$T/stub.log" || fail "marked fix1 does not pass TKT_FIX_DISPATCH to delegate"
 [ "$(bash "$TKT_STATE" "$S" get job.fix1)" = stub-1 ] || fail "marked fix1 stores its job id"
 
 setup_case no-marker-lane
@@ -870,7 +873,7 @@ export TKT_FIX_DISPATCH=1
 run_job --slot fix1 --template "$T/tmpl-basic.md" --model test-model
 unset TKT_FIX_DISPATCH
 [ "$RC" -eq 1 ] || fail "fix-slot ERROR exits 1 (rc=$RC)"
-grep -Fq "Continue it with: tkt-fix $S --verify --resume stub-1 --prompt <file>" <<<"$OUT" || fail "fix-slot ERROR hint routes through tkt-fix"
+grep -Fq "Continue it with: tkt-fix $S (--verify|--no-verify) --resume stub-1 --prompt <file>" <<<"$OUT" || fail "fix-slot ERROR hint routes through tkt-fix with both modes"
 ! grep -Fq "Continue it with: tkt-job $S --slot fix1" <<<"$OUT" || fail "fix-slot ERROR hint does not suggest direct tkt-job resume"
 
 # --- fix-slot ASK resumes route through tkt-fix, while clear hint stays valid --
@@ -887,7 +890,7 @@ run_job --slot fix1 --expect-commits
 unset TKT_FIX_DISPATCH
 [ "$RC" -eq 1 ] || fail "fix-slot ASK exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-job ASK id=stub-1 reused=stub-1 stale-head=$H now=$now log=*" "fix-slot ASK"
-grep -Fq "Answer with: tkt-fix $S --verify --resume stub-1 --prompt <file>" <<<"$OUT" || fail "fix-slot ASK hint routes through tkt-fix"
+grep -Fq "Answer with: tkt-fix $S (--verify|--no-verify) --resume stub-1 --prompt <file>" <<<"$OUT" || fail "fix-slot ASK hint routes through tkt-fix with both modes"
 ! grep -Fq "Answer with: tkt-job $S --slot fix1" <<<"$OUT" || fail "fix-slot ASK hint does not suggest direct tkt-job resume"
 
 setup_case fix-reused-clear-hint
