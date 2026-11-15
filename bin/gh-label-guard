@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
 # gh-label-guard shim
 # Refuses a lane's attempt to add or remove the needs-owner or needs-triage
-# label through gh issue/pr edit/create. Installed as `gh` in a directory
-# placed first on a lane's PATH; see autonomous-flywheel. Runs the real gh
-# for everything else.
+# label through gh issue/pr edit/create, and refuses absolute home paths in
+# text posted by issue/pr create/comment/edit, pr review, and gh api
+# field/input options.
+# Installed as `gh` in a directory placed first on a lane's PATH; see
+# autonomous-flywheel. Runs the real gh for everything else.
 import csv
 import errno
 import io
 import os
+import re
 import signal
 import sys
+import tempfile
 
 MARKER = b"# gh-label-guard shim"
 REFUSAL = ("gh-label-guard: refused: a lane may not add or remove the "
            "needs-owner or needs-triage label; send the question to your "
            "orchestrator (flywheel) instead")
+PATH_REFUSAL = ("gh-label-guard: refused: text contains an absolute home path; "
+                "pipe it through ~/.agents/bin/lib/redact-paths")
+HOME_TOPS = ("home", "Users")
+HOME_PATH = re.compile(
+    rb"(?<![A-Za-z0-9._-])/(?:%s|%s)/[A-Za-z0-9._-]+/" %
+    tuple(re.escape(top.encode("ascii")) for top in HOME_TOPS)
+)
 GUARDED_LABELS = ("needs-owner", "needs-triage")
 # Value flags in `gh issue edit|create --help` and `gh pr edit|create --help`
 # (union); every other flag in those four tables is boolean.
@@ -29,6 +40,15 @@ VALUE_FLAGS = {
 }
 # Value shorthands in those four tables (union): a b B F H l m p r R t T.
 VALUE_SHORTHANDS = set("abBFHlmprRtT")
+# gh api has its own value flags; notably its -t is a template, not a title.
+API_VALUE_FLAGS = {
+    "cache", "field", "header", "hostname", "input", "jq", "method",
+    "preview", "raw-field", "repo", "template",
+}
+API_VALUE_SHORTHANDS = set("fFHXqptR")
+# gh pr review has its own table: its -a, -c and -r are booleans.
+REVIEW_VALUE_FLAGS = {"body", "body-file", "repo"}
+REVIEW_VALUE_SHORTHANDS = set("bFR")
 
 
 def fail(code, msg):
@@ -157,16 +177,149 @@ def guarded_labels(args):
     return False
 
 
+def option_values(args, value_flags, value_shorthands):
+    # Parse options using the selected command's value-flag table. In
+    # particular, gh api and issue/pr commands do not share short-flag names.
+    positionals = []
+    flags = []
+    options_done = False
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if options_done:
+            positionals.append(token)
+        elif token == "--":
+            options_done = True
+        elif token.startswith("--"):
+            name, sep, inline = token[2:].partition("=")
+            if sep:
+                flags.append((name, inline))
+            elif name in value_flags and i + 1 < len(args):
+                flags.append((name, args[i + 1]))
+                i += 1
+        elif token.startswith("-") and len(token) > 1:
+            j = 1
+            while j < len(token):
+                letter = token[j]
+                if letter in value_shorthands:
+                    if j + 1 < len(token):
+                        rest = token[j + 1:]
+                        if rest.startswith("="):
+                            rest = rest[1:]
+                        flags.append((letter, rest))
+                    elif i + 1 < len(args):
+                        flags.append((letter, args[i + 1]))
+                        i += 1
+                    break
+                j += 1
+        else:
+            positionals.append(token)
+        i += 1
+    return positionals, flags
+
+
+def read_file(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except (OSError, ValueError):
+        # Let gh report missing, unreadable, or invalid paths itself.
+        return None
+
+
+def contains_home_path(data):
+    return HOME_PATH.search(data) is not None
+
+
+def guarded_home_paths(args):
+    # Use the issue/pr table just to locate the top-level command. The
+    # command's actual flags are parsed again below with the right table.
+    positionals, _ = option_values(args, VALUE_FLAGS, VALUE_SHORTHANDS)
+    if not positionals:
+        return False, None
+
+    sources = []
+    if positionals[0] == "api":
+        _, flags = option_values(args, API_VALUE_FLAGS, API_VALUE_SHORTHANDS)
+        for name, value in flags:
+            if name in ("raw-field", "f", "field", "F"):
+                key, sep, field_value = value.partition("=")
+                if not sep or key not in ("body", "title"):
+                    continue
+                if name in ("field", "F") and field_value.startswith("@"):
+                    path = field_value[1:]
+                    sources.append(("stdin" if path == "-" else "file", path))
+                else:
+                    sources.append(("text", os.fsencode(field_value)))
+            elif name == "input":
+                sources.append(("stdin" if value == "-" else "file", value))
+    elif len(positionals) >= 2 and positionals[0] in ("issue", "pr"):
+        group, verb = positionals[:2]
+        watched_verbs = {
+            "issue": {"comment", "create", "edit"},
+            "pr": {"create", "comment", "edit", "review"},
+        }
+        if verb not in watched_verbs[group]:
+            return False, None
+        if group == "pr" and verb == "review":
+            table = (REVIEW_VALUE_FLAGS, REVIEW_VALUE_SHORTHANDS)
+        else:
+            table = (VALUE_FLAGS, VALUE_SHORTHANDS)
+        _, flags = option_values(args, *table)
+        for name, value in flags:
+            if name in ("body", "b", "title", "t"):
+                sources.append(("text", os.fsencode(value)))
+            elif name in ("body-file", "F"):
+                sources.append(("stdin" if value == "-" else "file", value))
+    else:
+        return False, None
+
+    stdin_needed = False
+    for kind, value in sources:
+        if kind == "text":
+            if contains_home_path(value):
+                return True, None
+        elif kind == "file":
+            data = read_file(value)
+            if data is not None and contains_home_path(data):
+                return True, None
+        else:
+            stdin_needed = True
+
+    if stdin_needed:
+        stdin_data = sys.stdin.buffer.read()
+        if contains_home_path(stdin_data):
+            return True, None
+        return False, stdin_data
+    return False, None
+
+
+def exec_real_with_stdin(real, args, stdin_data):
+    # Spool the already-inspected bytes to fd 0. This preserves the real
+    # gh's stdin and argv while avoiding a pipe writer that can outlive us.
+    with tempfile.TemporaryFile() as source:
+        source.write(stdin_data)
+        source.seek(0)
+        os.dup2(source.fileno(), 0)
+        exec_real(real, args)
+
+
 def main():
     args = sys.argv[1:]
     if guarded_labels(args):
         sys.stderr.write(REFUSAL + "\n")
         sys.exit(1)
+    refused, stdin_data = guarded_home_paths(args)
+    if refused:
+        sys.stderr.write(PATH_REFUSAL + "\n")
+        sys.exit(1)
     shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     real = find_real_gh(os.environ.get("PATH"), shim_dir)
     if real is None:
         fail(127, "no gh on PATH outside gh-label-guard")
-    exec_real(real, args)
+    if stdin_data is None:
+        exec_real(real, args)
+    exec_real_with_stdin(real, args, stdin_data)
 
 
 main()

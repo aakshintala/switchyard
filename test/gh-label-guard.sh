@@ -22,6 +22,7 @@ fail() {
 }
 
 REFUSED='gh-label-guard: refused: a lane may not add or remove the needs-owner or needs-triage label; send the question to your orchestrator (flywheel) instead'
+HOME_REFUSED='gh-label-guard: refused: text contains an absolute home path; pipe it through ~/.agents/bin/lib/redact-paths'
 NO_GH='gh-label-guard: no gh on PATH outside gh-label-guard'
 
 mkdir -p "$T/home" "$T/shims" "$T/real" "$T/py"
@@ -75,6 +76,14 @@ expect_refused() {
   [ ! -e "$T/calls" ] || fail "refused [$*]: the stub ran"
 }
 
+expect_home_refused() {
+  [ "$RC" = 1 ] || fail "home path refused [$*]: exit $RC, want 1"
+  [ -z "$OUT" ] || fail "home path refused [$*]: stdout [$OUT], want empty"
+  [ "$ERR" = "$HOME_REFUSED" ] ||
+    fail "home path refused [$*]: stderr [$ERR], want [$HOME_REFUSED]"
+  [ ! -e "$T/calls" ] || fail "home path refused [$*]: the stub ran"
+}
+
 # expect_passed ARGS...: the stub ran once with exactly these argv, and its
 # output and status came back unchanged.
 expect_passed() {
@@ -92,6 +101,10 @@ expect_passed() {
 refused() {
   lane "$@"
   expect_refused "$@"
+}
+home_refused() {
+  lane "$@"
+  expect_home_refused "$@"
 }
 passed() {
   lane "$@"
@@ -263,5 +276,74 @@ passed -R
 LANE_PATH="$T/shims:$T/py"
 refused issue edit 5 --add-label needs-owner
 unset LANE_PATH
+
+# Task 3: refuse absolute home paths only in the selected post text.
+users_top=Users
+home_top=home
+users_path="/$users_top/alice/project/trace.txt"
+home_path="/$home_top/bob/project/trace.txt"
+home_text="found $users_path and $home_path"
+home_refused issue comment 1 --body "$home_text"
+
+redact_paths="$SCRIPT_DIR/../bin/lib/redact-paths"
+redacted_body="$(printf '%s' "$home_text" | "$redact_paths")"
+passed issue comment 1 --body "$redacted_body"
+
+printf '%s' "$home_text" >"$T/home-body.txt"
+home_refused issue comment 1 --body-file "$T/home-body.txt"
+home_refused issue comment 1 --body-file - <<<"$home_text"
+
+clean_stdin='clean stdin body'
+STUB_READ_STDIN=1
+lane issue comment 1 --body-file - <<<"$clean_stdin"
+expect_passed issue comment 1 --body-file -
+printf '%s\n' "$clean_stdin" >"$T/stdin.expected"
+cmp -s "$T/stdin.expected" "$T/stdin" ||
+  fail "clean stdin body-file: stub did not receive identical bytes"
+unset STUB_READ_STDIN
+
+# Titles and every supported issue/PR post command use their own text flags.
+home_refused issue create --title "$home_text"
+home_refused issue create -t "$home_text"
+home_refused pr create --body "$home_text"
+home_refused pr comment 1 --body "$home_text"
+home_refused pr edit 1 --body "$home_text"
+home_refused issue edit 1 --body "$home_text"
+home_refused issue edit 1 --body-file "$T/home-body.txt"
+home_refused issue edit 1 -t "$home_text"
+home_refused pr review 1 -b "$home_text"
+home_refused pr review 1 --body-file "$T/home-body.txt"
+# pr review's -a, -c and -r are booleans, so they must not swallow -b.
+home_refused pr review 1 -r -b "$home_text"
+home_refused pr review 1 -a -F "$T/home-body.txt"
+passed pr review 1 -c -b clean
+
+# gh api uses a separate flag table; only body/title fields and input are read.
+home_refused api endpoint -f "body=$home_text"
+home_refused api endpoint --raw-field "title=$home_text"
+home_refused api endpoint -F "body=@$T/home-body.txt"
+home_refused api endpoint --field "body=@$T/home-body.txt"
+printf '%s' "$home_text" >"$T/home-input.json"
+home_refused api endpoint --input "$T/home-input.json"
+home_refused api endpoint -F 'body=@-' <<<"$home_text"
+
+passed api endpoint -F title=ok
+passed api endpoint -t "$home_text"
+passed issue comment 1 --body /srv/x/y
+passed issue comment 1 --body /tmp/x
+passed issue comment 1 --body "prefix${users_path}"
+passed issue comment 1 --repo "$users_path" --body clean
+passed api "$users_path"
+
+# A clean stdin source is replayed to real gh unchanged for API as well.
+STUB_READ_STDIN=1
+lane api endpoint --input - <<<"$clean_stdin"
+expect_passed api endpoint --input -
+cmp -s "$T/stdin.expected" "$T/stdin" ||
+  fail "clean api stdin: stub did not receive identical bytes"
+unset STUB_READ_STDIN
+
+# An unreadable file is left for gh to report, not refused by the shim.
+passed api endpoint --input "$T/missing-input"
 
 echo "gh-label-guard: all cases passed"
