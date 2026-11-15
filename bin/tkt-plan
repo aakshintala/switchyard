@@ -1299,7 +1299,12 @@ do_rule_questions() {
     emit "QUESTIONS-REFUSED reason=comment" 1 "comment $comment is empty or does not belong to $repo#$issue"
   fi
   question_verdict_at="$(t get plan_questions_verdict_at 2>/dev/null || true)"
-  if [ -z "$question_verdict_at" ] || ! jq -e --arg verdict_at "$question_verdict_at" '
+  if [ -z "$question_verdict_at" ]; then
+    rm -f "$comment_json" "$comment_error"
+    printf -v questions_route 'run tkt-plan %q verify first; it records the QUESTIONS verdict without dispatching a Verifier, then post the answer' "$state"
+    emit "QUESTIONS-REFUSED reason=no-questions-verdict" 1 "no QUESTIONS verdict is recorded for the current plan" "$questions_route"
+  fi
+  if ! jq -e --arg verdict_at "$question_verdict_at" '
     .created_at > $verdict_at
   ' "$comment_json" >/dev/null 2>&1; then
     rm -f "$comment_json" "$comment_error"
