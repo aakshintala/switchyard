@@ -402,6 +402,23 @@ rm -f "$T/hash-object-fail"
 [ "$RC" -eq 2 ] || fail "rule-questions hash-object failure exits 2 (rc=$RC)"
 [ -z "$(find "$T/tmp" -type f -name 'tkt-plan.*' -print -quit)" ] || fail "tkt-plan EXIT trap removes its suffixed temporary files"
 
+# --- open planner questions with no recorded QUESTIONS verdict get the verify route ---
+setup_case questions-no-verdict
+rebase_plan
+cat >>"$CDIR/plan.md" <<'EOF'
+
+## Open questions
+
+1. Which documented fallback applies?
+EOF
+[ -z "$(state_get plan_questions_verdict_at)" ] || fail "questions-no-verdict starts without a QUESTIONS timestamp"
+set_ruling_comment 'Use the documented fallback.'
+run_plan rule-questions --comment 654322
+[ "$RC" -eq 1 ] || fail "rule-questions without a QUESTIONS verdict exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=no-questions-verdict log=*" "missing QUESTIONS verdict"
+grep -Fq 'no QUESTIONS verdict is recorded for the current plan' <<<"$OUT" || fail "missing QUESTIONS verdict explains that no verdict is recorded for the current plan"
+grep -Fq "run tkt-plan $S verify first; it records the QUESTIONS verdict without dispatching a Verifier, then post the answer" <<<"$OUT" || fail "missing QUESTIONS verdict prints the verify-first route"
+
 # --- open planner questions stop before a Verifier until one ruling is recorded ---
 setup_case questions-stop
 rebase_plan
