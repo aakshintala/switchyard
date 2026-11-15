@@ -44,8 +44,8 @@ ruling_match_file() {
 # appends the validated rows to the caller's ruling_refute_* arrays.
 ruling_refutes_validate_file() {
   local comment_id="$1" comment_url="$2" refutes_file="$3"
-  local history_source="$4" findings_file="$5"
-  local ruling_line ruling_prefix
+  local ruling_line ruling_prefix source_index
+  local -a match_sources=("${@:4}")
   local ruling_refutes_pattern='^P[123] ([^[:space:]]|[^[:space:]].*[^[:space:]])$'
   ruling_refutes_failure=""
   ruling_refutes_failure_id="$comment_id"
@@ -62,8 +62,11 @@ ruling_refutes_validate_file() {
       return 1
     fi
     ruling_match_begin
-    ruling_match_file "$ruling_prefix" "$history_source" history
-    ruling_match_file "$ruling_prefix" "$findings_file" current
+    for ((source_index = 0; source_index < ${#match_sources[@]}; source_index += 2)); do
+      ruling_match_file "$ruling_prefix" \
+        "${match_sources[$((source_index + 1))]}" \
+        "${match_sources[$source_index]}"
+    done
     if [ "$ruling_match_count" -eq 0 ]; then
       ruling_refutes_failure=no-match
       ruling_refutes_failure_prefix="$ruling_prefix"
@@ -87,7 +90,6 @@ ruling_refutes_validate_file() {
 # ruling_refutes_prepare_failure and ruling_refutes_drift_{id,prefix}.
 ruling_refutes_prepare() {
   local source_file="$1" output_file="$2" marked_file="$3"
-  ruling_refutes_prepared_file="$output_file"
   ruling_refutes_prepare_failure=""
   ruling_refutes_drift_id=""
   ruling_refutes_drift_prefix=""

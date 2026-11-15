@@ -488,7 +488,7 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
       "${ruling_ids[$ruling_index]}" \
       "${ruling_urls[$ruling_index]}" \
       "$tmp/ruling-${ruling_ids[$ruling_index]}.refutes" \
-      "$ruling_history_source" "$findings"; then
+      history "$ruling_history_source" current "$findings"; then
       ruling_refuse "$ruling_refutes_failure" "$ruling_refutes_failure_id" \
         "$ruling_refutes_hint"
     fi

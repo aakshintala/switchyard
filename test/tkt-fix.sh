@@ -647,6 +647,15 @@ write_ruling_comment 99 'refutes: P2 missing.sh:1'
 expect_ruling_refused ruling-no-match no-match 99
 fi
 
+if want ruling-history-only; then
+setup_case ruling-history-only
+history_file="$CDIR/findings-history.md"
+printf '# Findings history\nP2 legacy.txt:1 — fixed historical finding [tkt-history: raised=review round 0; status=closed in fix round 1; unverified=none]\n' >"$history_file"
+bash "$TKT_STATE" "$S" set findings_history "$history_file" >/dev/null
+write_ruling_comment 100 'refutes: P2 legacy.txt:1'
+expect_ruling_refused ruling-history-only no-match 100
+fi
+
 # A reason on the refutes line makes it longer than the exact row prefix, so it is refused before dispatch.
 if want ruling-trailing-prose; then
 setup_case ruling-trailing-prose

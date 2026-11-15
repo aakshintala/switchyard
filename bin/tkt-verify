@@ -124,7 +124,6 @@ ruling_refuse() {
   emit "RULING-REFUSED reason=$reason comment=$comment" 2
 }
 
-ruling_history_source="$(t get findings_history 2>/dev/null || true)"
 for ruling_id in "${ruling_requested[@]+${ruling_requested[@]}}"; do
   case "$ruling_id" in
     ''|*[!0-9]*) ruling_refuse bad-id "$ruling_id" ;;
@@ -162,14 +161,9 @@ for ruling_index in "${!ruling_ids[@]}"; do
     "${ruling_ids[$ruling_index]}" \
     "${ruling_urls[$ruling_index]}" \
     "$tmp/ruling-${ruling_ids[$ruling_index]}.refutes" \
-    "$ruling_history_source" "$findings"; then
-    if [ "$ruling_refutes_failure" = no-match ]; then
-      emit "VERIFY-FAIL reason=ruling-drift" 1 \
-        "comment=$ruling_refutes_failure_id" \
-        "refutes=$ruling_refutes_failure_prefix" \
-        "$ruling_refutes_hint"
-    fi
-    ruling_refuse "$ruling_refutes_failure" "$ruling_refutes_failure_id" "$ruling_refutes_hint"
+    current "$findings"; then
+    ruling_refuse "$ruling_refutes_failure" "$ruling_refutes_failure_id" \
+      "$ruling_refutes_hint"
   fi
 done
 for grant_id in "${ruling_grant_ids[@]+${ruling_grant_ids[@]}}"; do
