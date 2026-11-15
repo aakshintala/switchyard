@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Only the last 2048 bytes of stdout+stderr are reported, so keep that much of each.
 const KEEP: usize = 2048;
@@ -188,6 +188,10 @@ fn run_gate_inner(
         None => (None, None, None),
     };
     let timeout = Duration::from_millis(opts.timeout_ms.unwrap_or(DEFAULT_GATE_TIMEOUT_MS));
+    let started_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as f64)
+        .unwrap_or(0.0);
     let start = Instant::now();
     let mut cmd = match captured_command("/bin/sh") {
         Ok(cmd) => cmd,
@@ -199,6 +203,8 @@ fn run_gate_inner(
                 exit_code: 1,
                 passed: false,
                 refused: false,
+                started_at_ms: Some(started_at_ms),
+                duration_ms: Some(0.0),
                 output_tail: output,
                 output_path: output_path.map(|p| p.to_string_lossy().into_owned()),
                 error: output_error,
@@ -224,6 +230,8 @@ fn run_gate_inner(
                 exit_code: 1,
                 passed: false,
                 refused: false,
+                started_at_ms: Some(started_at_ms),
+                duration_ms: Some(0.0),
                 output_tail: output,
                 output_path: output_path.map(|p| p.to_string_lossy().into_owned()),
                 error: output_error,
@@ -298,6 +306,8 @@ fn run_gate_inner(
         exit_code,
         passed: exit_code == 0 && !killed,
         refused: exit_code == 75 && !killed,
+        started_at_ms: Some(started_at_ms),
+        duration_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
         output_tail: tail(&strip_ansi(&combined_tail), KEEP),
         output_path: output_path.map(|p| p.to_string_lossy().into_owned()),
         error: gate_error(killed, exit_code, output_error),
@@ -309,7 +319,21 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::time::Instant;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn epoch_ms() -> f64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as f64)
+            .unwrap_or(0.0)
+    }
+
+    fn assert_timing_started_between(r: &GateResult, before_ms: f64, after_ms: f64) {
+        let started_at_ms = r.started_at_ms.expect("gate start timestamp");
+        assert!(started_at_ms >= before_ms, "{started_at_ms} < {before_ms}");
+        assert!(started_at_ms <= after_ms, "{started_at_ms} > {after_ms}");
+        assert!(r.duration_ms.expect("gate duration") >= 0.0);
+    }
 
     fn gate_opts() -> GateOpts<'static> {
         GateOpts {
@@ -320,6 +344,7 @@ mod tests {
 
     #[test]
     fn passing_command() {
+        let before_ms = epoch_ms();
         let r = run_gate(
             "echo hello && true",
             &std::env::current_dir().unwrap().to_string_lossy(),
@@ -328,13 +353,16 @@ mod tests {
                 signal: None,
             },
         );
+        let after_ms = epoch_ms();
         assert!(r.passed);
         assert_eq!(r.exit_code, 0);
         assert!(r.output_tail.contains("hello"));
+        assert_timing_started_between(&r, before_ms, after_ms);
     }
 
     #[test]
     fn failing_command() {
+        let before_ms = epoch_ms();
         let r = run_gate(
             "echo boom >&2; exit 5",
             &std::env::current_dir().unwrap().to_string_lossy(),
@@ -343,24 +371,42 @@ mod tests {
                 signal: None,
             },
         );
+        let after_ms = epoch_ms();
         assert!(!r.passed);
         assert_eq!(r.exit_code, 5);
         assert!(r.output_tail.contains("boom"));
+        assert_timing_started_between(&r, before_ms, after_ms);
     }
 
     #[test]
     fn exit_75_is_refused_not_passed() {
+        let before_ms = epoch_ms();
         let r = run_gate(
             "printf 'nothing tested\\n'; exit 75",
             &std::env::current_dir().unwrap().to_string_lossy(),
             gate_opts(),
         );
+        let after_ms = epoch_ms();
         assert_eq!(r.exit_code, 75);
         assert!(!r.passed);
         assert!(r.refused);
+        assert_timing_started_between(&r, before_ms, after_ms);
         let value = serde_json::to_value(r).unwrap();
         assert_eq!(value["refused"], true);
         assert_eq!(value["passed"], false);
+        assert!(value["startedAtMs"].is_number());
+        assert!(value["durationMs"].is_number());
+    }
+
+    #[test]
+    fn gate_duration_includes_command_runtime() {
+        let r = run_gate(
+            "sleep 0.1",
+            &std::env::current_dir().unwrap().to_string_lossy(),
+            gate_opts(),
+        );
+        assert!(r.passed);
+        assert!(r.duration_ms.unwrap() >= 80.0, "{r:?}");
     }
 
     #[test]
@@ -379,6 +425,7 @@ mod tests {
 
     #[test]
     fn never_throws_bad_cwd() {
+        let before_ms = epoch_ms();
         let r = run_gate(
             "true",
             "/no/such/dir-xyz",
@@ -387,8 +434,11 @@ mod tests {
                 signal: None,
             },
         );
+        let after_ms = epoch_ms();
         assert!(!r.passed);
         assert_ne!(r.exit_code, 0);
+        assert_timing_started_between(&r, before_ms, after_ms);
+        assert_eq!(r.duration_ms, Some(0.0));
     }
 
     #[test]

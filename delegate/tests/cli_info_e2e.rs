@@ -254,8 +254,8 @@ fn models_lists_every_row_with_default_marked() {
         .find(|line| line.contains("claude-sonnet-5-5"))
         .unwrap();
     assert!(
-        sonnet.split_whitespace().any(|column| column == "yes"),
-        "{sonnet}"
+        !sonnet.split_whitespace().any(|column| column == "yes"),
+        "Sonnet needs a ruling: {sonnet}"
     );
     let composer = stdout
         .lines()

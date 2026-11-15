@@ -455,7 +455,6 @@ mod tests {
             "fiber/codex/gpt-6-luna:medium",
             "fiber/codex/gpt-6-luna:xhigh",
             "claude-haiku-5-5",
-            "claude-sonnet-5-5",
             "opencode-go/muse-spark-1.3-contributor",
         ]
         .into_iter()
@@ -483,6 +482,7 @@ mod tests {
             "openai/gpt-6.1-terra",
             "muse/muse-spark-1.3-contributor",
             "claude-opus-5-5",
+            "claude-sonnet-5-5",
             "claude-sonnet-5",
             "claude-haiku-4-5",
         ]
