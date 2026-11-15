@@ -51,7 +51,6 @@ inherited_gate=0
 gate_from_plan=0
 expect_commits=0
 out_file=""
-absorb_stray_run=0
 fills=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -65,7 +64,6 @@ while [ $# -gt 0 ]; do
     --gate-from-plan) gate_from_plan=1; shift ;;
     --expect-commits) expect_commits=1; shift ;;
     --out-file) [ $# -ge 2 ] || usage; out_file="$2"; shift 2 ;;
-    --absorb-stray-run) shift ;; # Legacy no-op: every plan gate absorbs stray run files.
     --help|-h) usage ;;
     -* ) usage ;;
     *=*) fills+=("$1"); shift ;;

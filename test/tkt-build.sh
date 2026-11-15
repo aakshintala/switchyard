@@ -533,7 +533,7 @@ grep -q "CLOSING=Resolves #528" "$T/calls.log" || fail "happy: CLOSING reaches t
 grep -q "ATTRIBUTION=Co-authored with Test" "$T/calls.log" || fail "happy: ATTRIBUTION reaches the lane"
 grep -q "^run|id=stub-1|model=codex/test-model|prompt=.*-lane-1.md$" "$T/calls.log" || fail "happy: --lane-model wins"
 grep -q '^quota: provider=codex status=healthy$' <<<"$OUT" || fail "happy: quota pick is reported"
-grep -q '^job|.*--absorb-stray-run' "$T/calls.log" || fail "happy: lane tkt-job enables stray run handling"
+grep -q '^job|.*--gate-from-plan' "$T/calls.log" || fail "happy: lane tkt-job builds its gate from the plan (stray run handling)"
 brief="$(grep '^run|' "$T/calls.log" | sed 's/.*prompt=//')"
 grep -q "$H" "$brief" || fail "happy: the filled brief holds the base"
 grep -q "Resolves #528" "$brief" || fail "happy: the filled brief holds CLOSING"
