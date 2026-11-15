@@ -138,6 +138,16 @@ $step. tkt-build $state --from $from
 Resolve any step-1 conflicts, then finish the merge with git -C $worktree commit before step 2."
   printf '%s\n' "$recover"
 }
+stale_ruled_recovery() {
+  local ruling="$1" ruled_by="$2" state_arg worktree_arg plan_arg branch_arg
+  printf -v state_arg '%q' "$state"
+  printf -v worktree_arg '%q' "$worktree"
+  printf -v plan_arg '%q' "$plan"
+  printf -v branch_arg '%q' "$branch"
+  printf 'The plan verdict came from ruling %s by %s; tkt-build did not re-verify.\nTo refresh:\n1. git -C %s merge origin/main\n2. git -C %s push origin %s\n3. set the Base: line in %s to Base: <origin/main sha>\n4. tkt-plan %s set %s\n5. tkt-plan %s rule-ok --by %s --ruling <RULING-id> --comment <id> with a ruling that covers the drift\nAlternatively, run tkt-plan %s verify to re-verify instead.' \
+    "$ruling" "$ruled_by" "$worktree_arg" "$worktree_arg" "$branch_arg" "$plan_arg" \
+    "$state_arg" "$plan_arg" "$state_arg" "$ruled_by" "$state_arg"
+}
 write_plan_base() {
   local path="$1" newbase="$2" tmp_plan
   tmp_plan="$(mktemp "${path}.tmp.XXXXXX")" || return 1
@@ -403,6 +413,15 @@ if [ "${#stale_files[@]}" -gt 0 ]; then
   if [ -n "$stat_out" ]; then
     n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${stale_files[@]}" 2>/dev/null | wc -l | tr -d ' ')"
     if [ "$from" = gate ] || [ "$from" = review ]; then
+      stale_ruling="$(tkt get plan_verdict_ruling 2>/dev/null || true)"
+      if [ -n "$stale_ruling" ]; then
+        stale_ruled_by="$(tkt get plan_verdict_by 2>/dev/null || true)"
+        drift_commits="$(git -C "$worktree" log --oneline "$base..origin/main" -- "${stale_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+        drift_diff="$(git -C "$worktree" diff "$base...origin/main" -- "${stale_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+        ruled_recovery="$(stale_ruled_recovery "$stale_ruling" "$stale_ruled_by")"
+        journal_build "tkt-build stale recovery ruled ruling=$stale_ruling"
+        emit "STALE-RULED n=$n base=$base ruling=$stale_ruling" 1 "$stat_out" "$drift_commits" "$drift_diff" "$ruled_recovery"
+      fi
       # Do not merge a main change that overlaps a branch edit outside the
       # plan's Files. The planned-file stale check above still controls when
       # this recovery runs; this overlap check protects the merge's full diff.
