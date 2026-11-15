@@ -105,7 +105,7 @@ fi
 round="$(t get round 2>/dev/null || printf '0')"
 case "$round" in ''|*[!0-9]*) round=0 ;; esac
 has_p_lines=0
-if grep -qE '^P[123] ' "$findings"; then has_p_lines=1; fi
+if finding_rows input "$findings" >/dev/null; then has_p_lines=1; fi
 issue="$(t get issue 2>/dev/null || true)"
 mkdir -p "$run"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-verify.XXXXXX")"
@@ -361,15 +361,17 @@ fi
 
 case "$fixline" in
   FIX-INCOMPLETE*)
-    open="$(grep '^P[0123] ' "$tmp/verify.out" | head -n 30 || true)"
-    [ -n "$open" ] || emit "VERIFY-FAIL reason=no-finding-rows" 1 \
-      "FIX-INCOMPLETE verify output contains no bare P0/P1/P2/P3 finding rows; rerun verification with finding rows"
+    if ! review_incomplete_rows "$tmp/verify.out"; then
+      emit "VERIFY-FAIL reason=no-finding-rows" 1 \
+        "FIX-INCOMPLETE verify output contains no bare P0/P1/P2/P3 finding rows; rerun verification with finding rows"
+    fi
+    open="$REVIEW_INCOMPLETE_ROWS"
     short_head="$(git -C "$worktree" rev-parse --short=12 "$head")"
     verify_output="$run/$namebase-tkt-verify-$short_head.md"
     cp "$tmp/verify.out" "$verify_output"
     write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
     t set findings "$verify_output"
-    if ! grep -q '^P[012] ' "$tmp/verify.out"; then t set reviewed "$head"; fi
+    if [ "$REVIEW_INCOMPLETE_HAS_OPEN_P12" = 0 ]; then t set reviewed "$head"; fi
     advance_round
     stamp_verdict_at t
     t journal "tkt-verify FIX-INCOMPLETE"

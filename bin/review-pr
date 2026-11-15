@@ -1116,8 +1116,8 @@ cmd_run() {
 write_findings() {
   findings_dir="$(dirname "$1")"
   case "$findings_dir" in ""|".") ;; *) mkdir -p "$findings_dir";; esac
-  if grep -q '^P[123] ' "$2" 2>/dev/null; then
-    grep '^P[123] ' "$2" >"$1"
+  if finding_rows input "$2" >/dev/null 2>/dev/null; then
+    finding_rows input "$2" >"$1"
   else
     printf 'no open findings\n' >"$1"
   fi

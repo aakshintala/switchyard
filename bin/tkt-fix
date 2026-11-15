@@ -66,6 +66,10 @@ verify_section_lib="$script_dir/lib/verify-section.sh"
 if [ ! -r "$verify_section_lib" ]; then echo "tkt-fix: cannot read shared lib: $verify_section_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$verify_section_lib"
+review_verdict_lib="$script_dir/lib/review-verdict.sh"
+if [ ! -r "$review_verdict_lib" ]; then echo "tkt-fix: cannot read shared lib: $review_verdict_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$review_verdict_lib"
 job_walk_lib="$script_dir/lib/job-walk.sh"
 if [ ! -r "$job_walk_lib" ]; then echo "tkt-fix: cannot read shared lib: $job_walk_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -664,7 +668,7 @@ fi
 # writes fix_round.*, job.* or fixslot. Rows match the way tkt-verify and
 # the round-findings checks read them: column-0 `P[123] `.
 if [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ -z "$collect_fix_job" ] && [ "$recover_unpushed" -ne 1 ]; then
-  grep -qE '^P[123] ' "$findings" || emit "FINDINGS-EMPTY file=$findings" 2 \
+  finding_rows input "$findings" >/dev/null || emit "FINDINGS-EMPTY file=$findings" 2 \
     "no column-0 P1-P3 finding rows in $findings" \
     "for a verify-only run, use: tkt-verify $state --findings $findings"
 fi
@@ -692,8 +696,11 @@ write_findings() {
     echo "tkt-fix: refusing to overwrite $fr: $namebase$part_suffix-findings-r$round.md names are reserved for this ticket's own findings output; write hand-kept notes to $namebase$part_suffix-dispositions-r$round.md instead" >&2
     exit 2
   fi
-  if grep -q '^P[0123] ' "$1" 2>/dev/null; then grep '^P[0123] ' "$1" >"$fr"
-  else printf 'no open findings\n' >"$fr"; fi
+  if finding_rows verify-output "$1" >/dev/null 2>/dev/null; then
+    finding_rows verify-output "$1" >"$fr"
+  else
+    printf 'no open findings\n' >"$fr"
+  fi
   t journal "findings write $fr"
   t set findings "$fr"
 }
@@ -725,13 +732,15 @@ handle_verify_result() {
       write_findings "$verify_output"
       emit "FIX-OK reviewed=$verify_head" 0 "head=$verify_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
     FIX-INCOMPLETE*)
-      open="$(grep '^P[0123] ' "$verify_output" | head -n 30 || true)"
-      [ -n "$open" ] || emit "VERIFY-FAIL reason=no-finding-rows" 1 \
-        "FIX-INCOMPLETE verify output contains no bare P0/P1/P2/P3 finding rows; rerun verification with finding rows"
+      if ! review_incomplete_rows "$verify_output"; then
+        emit "VERIFY-FAIL reason=no-finding-rows" 1 \
+          "FIX-INCOMPLETE verify output contains no bare P0/P1/P2/P3 finding rows; rerun verification with finding rows"
+      fi
+      open="$REVIEW_INCOMPLETE_ROWS"
       stamp_verdict_at t
       write_findings_history verified "$verify_output" "$verify_rounds"
       write_findings "$verify_output"
-      if ! grep -q '^P[012] ' "$verify_output"; then t set reviewed "$verify_head"; fi
+      if [ "$REVIEW_INCOMPLETE_HAS_OPEN_P12" = 0 ]; then t set reviewed "$verify_head"; fi
       if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" ${notes[@]+"${notes[@]}"}; fi
       emit "FIX-INCOMPLETE round=$round" 1 "$open" ${notes[@]+"${notes[@]}"} ;;
     *) emit "VERIFY-FAIL" 1 "$(head -n 40 "$verify_output")" ;;
@@ -829,11 +838,11 @@ verify_round_coverage() {
           t set "fix_round.$owner.findings" "$round_findings"
         fi
       fi
-      if [ -n "$round_findings" ] && [ -r "$round_findings" ] && grep -q '^P[123] ' "$round_findings"; then
+      if [ -n "$round_findings" ] && [ -r "$round_findings" ] && finding_rows input "$round_findings" >/dev/null; then
         grep -qx "$owner" "$round_list_file" || printf '%s\n' "$owner" >>"$round_list_file"
       else
         printf '%s %s\n' "$commit" "$owner" >>"$unaccounted_file"
-        if [ -n "$round_findings" ] && [ -r "$round_findings" ] && ! grep -q '^P[123] ' "$round_findings"; then
+        if [ -n "$round_findings" ] && [ -r "$round_findings" ] && ! finding_rows input "$round_findings" >/dev/null; then
           case "$repair_note_rounds" in
             *",$owner,"*) ;;
             *)
@@ -887,7 +896,7 @@ verify_round_coverage() {
       for n in $(tr ',' ' ' <<<"$missing_rounds"); do
         round_findings="$(t get "fix_round.$n.findings" 2>/dev/null || true)"
         [ -n "$round_findings" ] || round_findings="$run/$namebase$part_suffix-fix-round-$n-findings.md"
-        if [ -r "$round_findings" ] && ! grep -q '^P[123] ' "$round_findings"; then
+        if [ -r "$round_findings" ] && ! finding_rows input "$round_findings" >/dev/null; then
           replacement_path="$run/$namebase$part_suffix-fix-round-$n-findings-replacement.md"
           replacement_index=2
           while [ -e "$replacement_path" ]; do
