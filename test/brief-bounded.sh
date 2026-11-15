@@ -54,15 +54,15 @@ done
 # Fixed /tmp root, not the caller's TMPDIR: the filled brief embeds these
 # paths, so a longer TMPDIR (test/run's) would change the measured bytes.
 TMP_ROOT="$(mktemp -d /tmp/brief-bounded.XXXXXX)" || fail "create temporary directory"
-# The tkt fill copies flywheel's launch selftest inputs byte for byte (#1852):
+# Both fills use the same lengths as flywheel's launch selftest inputs (#1852):
 # its run dir is /tmp/<9 chars>.XXXXXX/runt, its HOME is 18 chars, and its
-# worktree root is HOME/work/fiber-worktrees, the path template-tkt.md names.
-# A tmp worktree root made mkbrief drop the worktree line's suffix, so this
-# fill measured 73 B under the launch fill and template PRs passed here but
-# broke launches.
+# worktree root is HOME/work/fiber-worktrees, the path the templates name.
+# A tmp worktree root made mkbrief drop the worktree line's suffix, so the tkt
+# fill measured 73 B under the launch fill (and pi 108 B, #1857) and template
+# PRs passed here but broke launches.
 TKT_ROOT="$(mktemp -d /tmp/brief-tkt.XXXXXX)" || fail "create temporary directory"
 trap 'rm -rf "$TMP_ROOT" "$TKT_ROOT"' EXIT
-mkdir -p "$TMP_ROOT/tmp" "$TMP_ROOT/worktrees" "$TMP_ROOT/run-pi" "$TKT_ROOT/runt" || fail "create test directories"
+mkdir -p "$TMP_ROOT/tmp" "$TKT_ROOT/runt" "$TKT_ROOT/runp" || fail "create test directories"
 TMPDIR="$TMP_ROOT/tmp"
 export TMPDIR
 # An 18-char HOME, matching the launch host; it need not exist.
@@ -78,16 +78,16 @@ printf 'Notes line one.\nResolves #%s\n' "$ISSUE" >"$TMP_ROOT/notes.md"
 build_brief() {
   kind="$1"
   template="$ROOT/bin/lib/template-$kind.md"
-  # debt: pi keeps its pre-#1852 inputs (caller's HOME, tmp worktree root), so
-  # its fill still drops the worktree suffix; upgrade with #1857.
+  # Both fills take the launch inputs. mkbrief names both briefs alike, so pi
+  # gets its own run dir, the same length as runt.
   if [ "$kind" = pi ]; then
-    pi=1 run_dir="$TMP_ROOT/run-pi" home="$HOME" worktrees="$TMP_ROOT/worktrees"
+    pi=1 run_dir="$TKT_ROOT/runp"
   else
-    pi=0 run_dir="$TKT_ROOT/runt" home="$LAUNCH_HOME" worktrees="$LAUNCH_HOME/work/fiber-worktrees"
+    pi=0 run_dir="$TKT_ROOT/runt"
   fi
   mkdir -p "$run_dir" || fail "create $kind run directory"
-  HOME="$home" FW_PARENT='flywheel [test00]' FW_RUN= FW_REPO="$ROOT" \
-    FW_WORKTREE_ROOT="$worktrees" FW_LIB= POOL_FILE="$ROOT/bin/lib/pool.md" \
+  HOME="$LAUNCH_HOME" FW_PARENT='flywheel [test00]' FW_RUN= FW_REPO="$ROOT" \
+    FW_WORKTREE_ROOT="$LAUNCH_HOME/work/fiber-worktrees" FW_LIB= POOL_FILE="$ROOT/bin/lib/pool.md" \
     TPL_DIR="$ROOT/bin" RUN_DIR="$run_dir" TAG="$ISSUE" SKIP_PATHS=1 \
     TKT=1 PI="$pi" bash "$MKBRIEF" "$ISSUE" "$BRANCH" "$TMP_ROOT/notes.md" \
       >/dev/null 2>"$TMP_ROOT/$kind.err" || fail "mkbrief fills template-$kind.md: $(cat "$TMP_ROOT/$kind.err")"
@@ -115,8 +115,11 @@ pi_raw_bytes="$(wc -c <"$pi_template" | tr -d '[:space:]')"
 
 brief_tkt="$(build_brief tkt)"
 brief_pi="$(build_brief pi)"
-grep -qF -e "- Worktree \`$LAUNCH_HOME/work/fiber-worktrees/$BRANCH\` on branch \`$BRANCH\`, cut from origin/main. If it exists" "$brief_tkt" ||
-  fail "tkt fill carries the worktree line's suffix, as the launch fill does"
+for kind in tkt pi; do
+  eval "brief=\$brief_$kind"
+  grep -qF -e "- Worktree \`$LAUNCH_HOME/work/fiber-worktrees/$BRANCH\` on branch \`$BRANCH\`, cut from origin/main. If it exists" "$brief" ||
+    fail "$kind fill carries the worktree line's suffix, as the launch fill does"
+done
 check_filled_budget tkt "$brief_tkt"
 check_filled_budget pi "$brief_pi"
 if ! within_budget "$pi_raw_bytes" "$PI_MAX_BYTES"; then
