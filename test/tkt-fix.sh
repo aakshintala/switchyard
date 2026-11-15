@@ -116,16 +116,15 @@ commit_as_job() {
 }
 if [ "\$(cat "$T/jobmode")" = wrapper-death ]; then
   before="\$("$TKT_STATE" "\$state" get head)"
-  touch "$T/wrapper-waiting"
   kill -KILL "\$PPID"
-  sleep 0.2
+  IFS= read -r -t 30 wrapper_release < "$T/wrapper-release" || exit 2
   commit_as_job fix.txt "finished-after-wrapper-death"
   after="\$(git -C "\$wt" rev-parse HEAD)"
   mkdir -p "\$TMPDIR/delegate-jobs"
   jq -n --arg before "\$before" --arg after "\$after" --arg cwd "\$wt" \\
     '{status:"DONE",result:{status:"DONE",text:"Final report: gate PASS",changeSet:{headBefore:\$before,headAfter:\$after,newCommits:[\$after],uncommittedFiles:[],filesChanged:["fix.txt"],diffstat:"1 file changed",dirtyAfter:false},concerns:null},supervisorPid:1,startedAtMs:1700000000000,endedAtMs:1700000001000,caller:"test",callerPid:1,callerCommand:"test",callerCwd:\$cwd,resume:{model:"fix-model",backend:"test",cwd:\$cwd,sessionId:"test-session",gate:"true",toolIdleMs:7200000,idleMs:null,wallMs:null,addDirs:[]}}' \\
     >"\$TMPDIR/delegate-jobs/\$jobid.json"
-  touch "$T/wrapper-finished"
+  printf 'finished\n' >"$T/wrapper-finished"
   exit 0
 fi
 case "\$(cat "$T/jobmode")" in
@@ -412,6 +411,25 @@ EOF
 
 expect_slot() {
   grep -q "job|.*--slot $1" "$T/calls.log" || fail "expected tkt-job slot $1 (log: $(cat "$T/calls.log"))"
+}
+
+run_wrapper_death() {
+  local output_name="$1" wrapper_rc=0 wrapper_finished=""
+  shift
+  rm -f "$T/wrapper-release" "$T/wrapper-finished"
+  mkfifo "$T/wrapper-release" "$T/wrapper-finished" || fail "create wrapper-death FIFOs"
+  exec 8<>"$T/wrapper-finished"
+  exec 9<>"$T/wrapper-release"
+  printf 'wrapper-death' >"$T/jobmode"
+  bash "$TKT" "$S" --verify "$@" >"$T/$output_name.out" 2>"$T/$output_name.err" &
+  wrapper_pid=$!
+  wait "$wrapper_pid" || wrapper_rc=$?
+  [ "$wrapper_rc" -ne 0 ] || fail "$output_name tkt-fix did not die"
+  printf 'continue\n' >&9
+  IFS= read -r -t 10 wrapper_finished <&8 || fail "$output_name fix job did not finish after its wrapper died"
+  [ "$wrapper_finished" = finished ] || fail "$output_name fix job sent an unexpected completion marker: $wrapper_finished"
+  exec 9>&-
+  exec 8>&-
 }
 
 drop_state_key() {
@@ -2049,13 +2067,7 @@ grep -q 'job|' "$T/calls.log" && fail "wrong collect-fix id called tkt-job"
 # A wrapper dies during the fix-job wait. The job then commits and leaves a
 # completed delegate record; collecting it records and verifies the round.
 setup_case collect-fix-wrapper-death
-printf 'wrapper-death' >"$T/jobmode"
-bash "$TKT" "$S" --verify >"$T/wrapper.out" 2>"$T/wrapper.err" &
-wrapper_pid=$!
-wrapper_rc=0; wait "$wrapper_pid" || wrapper_rc=$?
-[ "$wrapper_rc" -ne 0 ] || fail "wrapper-death tkt-fix did not die"
-for tries in $(seq 1 100); do [ -f "$T/wrapper-finished" ] && break; sleep 0.1; done
-[ -f "$T/wrapper-finished" ] || fail "fix job did not finish after its wrapper died"
+run_wrapper_death wrapper
 [ "$(bash "$TKT_STATE" "$S" get job.fix1)" = j1 ] || fail "wrapper death did not preserve job.fix1"
 [ "$(bash "$TKT_STATE" "$S" get fixopen)" = 1 ] || fail "wrapper death did not preserve open fix slot"
 [ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] || fail "wrapper death changed round"
@@ -2065,6 +2077,8 @@ for tries in $(seq 1 100); do [ -f "$T/wrapper-finished" ] && break; sleep 0.1; 
 collected_record="$(bash "$REAL_BIN/job-record" j1)"
 [ -r "$collected_record" ] || fail "job-record did not locate the completed collected job"
 jq -e '.result.status == "DONE" and (.result.text | contains("gate PASS")) and .result.gateResult == null and (.result.changeSet.newCommits | length) == 1' "$collected_record" >/dev/null || fail "wrapper-death fixture does not copy the completed job record shape"
+printf 'P1 state-only decoy\n' >"$CDIR/decoy-findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/decoy-findings.md" >/dev/null
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify --collect-fix j1 2>"$T/stderr")" || fail "collect-fix exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
 head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK reviewed=' || fail "collect-fix did not apply the normal verify path: $out"
@@ -2076,20 +2090,45 @@ collected_head="$(git -C "$WT" rev-parse HEAD)"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.verify_head)" = "$collected_head" ] || fail "collect-fix did not record verify_head"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.verify_slot)" = fix1 ] || fail "collect-fix did not record verify_slot"
 grep -Fq "job|$S --slot fix1 --expect-commits" "$T/calls.log" || fail "collect-fix did not use the watch-only tkt-job call: $(cat "$T/calls.log")"
+grep -Fq 'P1 heading from review' "$T/verify-input-1.md" || fail "collect-fix verify omitted the dispatch's recorded findings"
+! grep -Fq 'P1 state-only decoy' "$T/verify-input-1.md" || fail "collect-fix used state findings instead of the dispatch's recorded findings"
 ! grep -q 'tkt-fix gate PASS ' "${S%.state}.journal" || fail "collect-fix credited a report-only gate PASS without a passing record gateResult"
+
+# Collect refuses missing or unreadable findings recorded for the dispatched slot.
+setup_case collect-fix-missing-findings
+run_wrapper_death missing-findings
+drop_state_key 'fix_round.1.findings'
+: >"$T/calls.log"
+run_rc=0; bash "$TKT" "$S" --verify --collect-fix j1 >"$T/missing-findings.out" 2>"$T/stderr" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "collect with missing recorded findings exited $run_rc, want 2"
+grep -Fq 'tkt-fix: missing recorded round findings: fix_round.1.findings' "$T/stderr" || fail "missing recorded findings did not explain the refusal: $(cat "$T/stderr")"
+! grep -q '^job|' "$T/calls.log" || fail "collect with missing recorded findings called tkt-job"
+
+setup_case collect-fix-unreadable-findings
+run_wrapper_death unreadable-findings
+bash "$TKT_STATE" "$S" set fix_round.1.findings "$CDIR/missing-findings.md" >/dev/null
+: >"$T/calls.log"
+run_rc=0; bash "$TKT" "$S" --verify --collect-fix j1 >"$T/unreadable-findings.out" 2>"$T/stderr" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "collect with unreadable recorded findings exited $run_rc, want 2"
+grep -Fq 'tkt-fix: cannot read recorded round findings: fix_round.1.findings=' "$T/stderr" || fail "unreadable recorded findings did not explain the refusal: $(cat "$T/stderr")"
+! grep -q '^job|' "$T/calls.log" || fail "collect with unreadable recorded findings called tkt-job"
+
+# A failed job-end gate result never receives gate credit, even when its report says PASS.
+setup_case collect-fix-failed-gate
+run_wrapper_death failed-gate
+collected_record="$(bash "$REAL_BIN/job-record" j1)"
+jq '.result.gateResult = {command:"bash gate.sh",exitCode:1,passed:false,outputTail:"failed"}' "$collected_record" >"$collected_record.tmp" \
+  && mv "$collected_record.tmp" "$collected_record" || fail "set failing wrapper-death gate result"
+jq -e '.result.text | contains("gate PASS")' "$collected_record" >/dev/null || fail "failed-gate fixture report does not claim PASS"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --collect-fix j1 2>"$T/stderr")" || fail "failed-gate collect exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+! grep -q 'tkt-fix gate PASS ' "${S%.state}.journal" || fail "collect credited a failed gateResult as PASS"
 
 # A round-2 grant is consumed by the dispatch, not by collecting its job.
 setup_case collect-fix-roundgrant
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
 write_ruling_comment 920 'grants: round 3'
-printf 'wrapper-death' >"$T/jobmode"
-wrapper_pid=""
-bash "$TKT" "$S" --verify --ruling 920 >"$T/grant-wrapper.out" 2>"$T/grant-wrapper.err" &
-wrapper_pid=$!
-wrapper_rc=0; wait "$wrapper_pid" || wrapper_rc=$?
-[ "$wrapper_rc" -ne 0 ] || fail "round-2 grant wrapper did not die"
-for tries in $(seq 1 100); do [ -f "$T/wrapper-finished" ] && break; sleep 0.1; done
-[ -f "$T/wrapper-finished" ] || fail "granted fix job did not finish after its wrapper died"
+run_wrapper_death grant-wrapper --ruling 920
 [ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "grant dispatch advanced round before collection"
 [ "$(bash "$TKT_STATE" "$S" get grant.3)" = '920 https://github.com/switchyard/switchyard/issues/529#issuecomment-920' ] || fail "grant dispatch did not record grant.3"
 [ "$(bash "$TKT_STATE" "$S" get job.fix3)" = j1 ] || fail "grant dispatch did not store job.fix3"
@@ -2112,12 +2151,13 @@ grep -Fq "job|$S --slot fix3 --expect-commits" "$T/calls.log" || fail "round-2 g
 
 # --collect-fix refuses dispatch modifiers and conflicting collection modes.
 setup_case collect-fix-usage
-for usage_case in resume prompt fix-model collect-verify duplicate; do
+for usage_case in resume prompt fix-model findings collect-verify duplicate; do
   args=(--verify --collect-fix j1)
   case "$usage_case" in
     resume) args+=(--resume j1 --prompt "$CDIR/prompt.md");;
     prompt) args+=(--prompt "$CDIR/prompt.md");;
     fix-model) args+=(--fix-model alternate);;
+    findings) args+=(--findings "$CDIR/findings.md");;
     collect-verify) args+=(--collect-verify verify-j1);;
     duplicate) args+=(--collect-fix j2);;
   esac

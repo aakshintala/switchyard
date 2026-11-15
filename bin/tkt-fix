@@ -45,7 +45,7 @@ if [ -n "$collect_verify_job" ]; then
     && [ -z "$resume" ] && [ -z "$prompt" ] && [ -z "$fixmodel" ] \
     && [ -z "$verifymodel" ] || usage
 elif [ -n "$collect_fix_job" ]; then
-  [ -z "$resume" ] && [ -z "$prompt" ] && [ -z "$fixmodel" ] || usage
+  [ -z "$resume" ] && [ -z "$prompt" ] && [ -z "$fixmodel" ] && [ -z "$findings" ] || usage
   [ "$verify" -ne "$noverify" ] || usage
   [ -z "$since" ] || [ "$verify" -eq 1 ] || usage
 else
@@ -691,6 +691,11 @@ recover_unpushed="${recover_unpushed:-0}"
 if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && [ -z "$collect_fix_job" ] && job="$(t get "job.$slot" 2>/dev/null || true)" && [ -n "$job" ]; then
   recovery_cmd="tkt-fix $(printf '%q' "$state") --verify --collect-fix $(printf '%q' "$job")"
   emit "RECOVER" 3 "job=$job" "slot=$slot" "recovery: $recovery_cmd"
+fi
+if [ -n "$collect_fix_job" ]; then
+  findings="$(t get "fix_round.$knum.findings" 2>/dev/null || true)"
+  [ -n "$findings" ] || { echo "tkt-fix: missing recorded round findings: fix_round.$knum.findings" >&2; exit 2; }
+  [ -r "$findings" ] || { echo "tkt-fix: cannot read recorded round findings: fix_round.$knum.findings=$findings" >&2; exit 2; }
 fi
 [ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
 [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
