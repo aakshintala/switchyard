@@ -681,6 +681,11 @@ mkdir -p "$T/pending/inbox/read"
 cp "$stop_report" "$T/pending/inbox/read/"
 pending_out="$(FW_RUN="$T/pending" bash "$REAL_BIN/pending.sh" "$T/pending/inbox" 2>&1)" || fail "pending.sh runs on the stop report: $pending_out"
 grep -Eq '^[ !]502 ' <<<"$pending_out" || fail "pending.sh pairs the stop report with ticket 502: $pending_out"
+# box-inbox-pull.sh lands a box stop report on the Mac as box-<name> (#1853).
+mkdir -p "$T/pending-box/inbox/read"
+cp "$stop_report" "$T/pending-box/inbox/read/box-$(basename "$stop_report")"
+pending_out="$(FW_RUN="$T/pending-box" bash "$REAL_BIN/pending.sh" "$T/pending-box/inbox" 2>&1)" || fail "pending.sh runs on the box stop report: $pending_out"
+grep -Eq '^[ !]502 ' <<<"$pending_out" || fail "pending.sh pairs the box stop report with ticket 502: $pending_out"
 # tkt-build journals the same job's stop words after tkt-job; that sends no second report.
 (tkt_state="$TKT_STATE" script_dir="$REAL_BIN"; . "$REAL_BIN/lib/stop-report.sh"; stop_report_notify "$S" 502 tkt-build stub-1 ASK <<<"tkt-build ASK id=stub-1")
 stop_reports="$(find "$T/inbox" -type f -name 'stop-report-*.md' | wc -l | tr -d ' ')"
