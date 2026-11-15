@@ -55,6 +55,10 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+verify_section_lib="$script_dir/lib/verify-section.sh"
+if [ ! -r "$verify_section_lib" ]; then echo "tkt-fix: cannot read shared lib: $verify_section_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$verify_section_lib"
 job_walk_lib="$script_dir/lib/job-walk.sh"
 if [ ! -r "$job_walk_lib" ]; then echo "tkt-fix: cannot read shared lib: $job_walk_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -104,10 +108,13 @@ ruling_match_begin() {
 
 ruling_match_file() {
   local prefix="$1" path="$2" kind="$3" row base status prior duplicate
+  # A ruling may copy the row's markup; compare both sides without it.
+  prefix="$(normalize_finding_line "$prefix")"
   [ -n "$path" ] && [ -r "$path" ] || return 0
   while IFS= read -r row; do
-    case "$row" in P1\ *|P2\ *|P3\ *) ;; *) continue;; esac
     base="$(findings_row_base "$row")"
+    base="$(normalize_finding_line "$base")"
+    case "$base" in P1\ *|P2\ *|P3\ *) ;; *) continue;; esac
     duplicate=0
     for prior in ${ruling_match_seen[@]+"${ruling_match_seen[@]}"}; do
       if [ "$prior" = "$base" ]; then duplicate=1; break; fi
@@ -432,7 +439,7 @@ ruling_refuse() {
 
 if [ "${#ruling_requested[@]}" -gt 0 ]; then
   ruling_history_source="$(t get findings_history 2>/dev/null || true)"
-  ruling_refutes_pattern='^P[123] [^ ]+:[0-9]+$'
+  ruling_refutes_pattern='^P[123] ([^[:space:]]|[^[:space:]].*[^[:space:]])$'
   ruling_alt_pr="$(t get pr 2>/dev/null || true)"
   for ruling_id in ${ruling_requested[@]+"${ruling_requested[@]}"}; do
     case "$ruling_id" in
@@ -487,7 +494,7 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
         'refutes: '*) ruling_prefix="${ruling_line#refutes: }" ;;
         *) ruling_prefix="${ruling_line#refutes:}" ;;
       esac
-      if [[ ! "$ruling_prefix" =~ $ruling_refutes_pattern ]]; then
+      if [[ ! "$(normalize_finding_line "$ruling_prefix")" =~ $ruling_refutes_pattern ]]; then
         ruling_refuse bad-refutes "${ruling_ids[$ruling_index]}"
       fi
       ruling_match_begin
@@ -1289,8 +1296,9 @@ if [ "${#ruling_refute_ids[@]}" -gt 0 ]; then
   {
     while IFS= read -r row; do
       printf '%s\n' "$row"
-      case "$row" in P1\ *|P2\ *|P3\ *) ;; *) continue;; esac
       row_base="$(findings_row_base "$row")"
+      row_base="$(normalize_finding_line "$row_base")"
+      case "$row_base" in P1\ *|P2\ *|P3\ *) ;; *) continue;; esac
       row_status="$(findings_row_status "$row")"
       [ -n "$row_status" ] || row_status=open
       [ "$row_status" = open ] || continue

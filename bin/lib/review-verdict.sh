@@ -116,7 +116,7 @@ parse_p3_verify_findings() {
     while IFS= read -r line || [ -n "$line" ]; do
       # A finding is a line that starts with a priority token once markup and any
       # list marker are gone; prose that mentions a fixed P1 or P2 is not one.
-      line="$(printf '%s' "$line" | tr -d '*`' | sed -E -e 's/^[[:space:]]*//' -e 's/^([-+]|[0-9]+[.)])[[:space:]]+//' -e 's/[[:space:]]*$//')"
+      line="$(normalize_finding_line "$line")"
       if [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then
         if [[ "$line" =~ ^P3[[:space:]]+[^[:space:]] ]]; then
           printf '%s\n' "$line" >>"$output"
