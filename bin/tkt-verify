@@ -286,15 +286,15 @@ fi
 
 case "$fixline" in
   FIX-INCOMPLETE*)
-    open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
+    open="$(grep '^P[0123] ' "$tmp/verify.out" | head -n 30 || true)"
     [ -n "$open" ] || emit "VERIFY-FAIL reason=no-finding-rows" 1 \
-      "FIX-INCOMPLETE verify output contains no bare P1/P2/P3 finding rows; rerun verification with finding rows"
-    if ! grep -q '^P[12] ' "$tmp/verify.out"; then t set reviewed "$head"; fi
+      "FIX-INCOMPLETE verify output contains no bare P0/P1/P2/P3 finding rows; rerun verification with finding rows"
     short_head="$(git -C "$worktree" rev-parse --short=12 "$head")"
     verify_output="$run/$namebase-tkt-verify-$short_head.md"
     cp "$tmp/verify.out" "$verify_output"
     write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
     t set findings "$verify_output"
+    if ! grep -q '^P[012] ' "$tmp/verify.out"; then t set reviewed "$head"; fi
     advance_round
     stamp_verdict_at t
     t journal "tkt-verify FIX-INCOMPLETE"

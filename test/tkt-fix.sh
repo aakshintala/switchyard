@@ -241,6 +241,8 @@ case "\$(cat "$T/vermode")" in
     printf 'FIX-INCOMPLETE round=1\nP1 fix.txt:1 — a\n';;
   p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 fix.txt:3 — non-blocking finding\n';;
   p2-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 fix.txt:3 — non-blocking finding\nP2 fix.txt:2 — blocking finding\n';;
+  p0-p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 fix.txt:0 — critical finding\nP3 fix.txt:3 — non-blocking finding\n';;
+  p0-only-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 fix.txt:0 — critical finding\n';;
   bullet-incomplete) printf 'FIX-INCOMPLETE round=1\n- **P3 fix.txt:3 — non-blocking finding.**\n';;
   incomplete)
     printf 'FIX-INCOMPLETE round=2\nP1 open finding in fix.txt\nP2 second finding\n';;
@@ -1402,6 +1404,32 @@ out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = 1 ] || fail "P2 FIX-INCOMPLETE exited $run_rc, want 1: $out"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "P2 verdict changed: $out"
 [ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$OLD" ] || fail "P2 FIX-INCOMPLETE changed reviewed"
+
+# P0 plus P3 remains incomplete and leaves reviewed unchanged; both rows persist.
+setup_case incomplete-p0-p3
+printf 'p0-p3-incomplete' >"$T/vermode"
+run_rc=0
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "P0+P3 FIX-INCOMPLETE exited $run_rc, want 1: $out"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "P0+P3 verdict changed: $out"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$OLD" ] || fail "P0+P3 FIX-INCOMPLETE changed reviewed"
+grep -Fq 'P0 fix.txt:0 — critical finding' <<<"$out" || fail "P0 digest row missing: $out"
+fr="$CDIR/run/switchyard-529-findings-r1.md"
+grep -Fq 'P0 fix.txt:0 — critical finding' "$fr" || fail "P0+P3 findings file lost the P0 row"
+
+# P0-only FIX-INCOMPLETE is a recorded incomplete result, not a missing-row failure.
+setup_case incomplete-p0-only
+printf 'p0-only-incomplete' >"$T/vermode"
+run_rc=0
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "P0-only FIX-INCOMPLETE exited $run_rc, want 1: $out"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "P0-only result was not FIX-INCOMPLETE: $out"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$OLD" ] || fail "P0-only FIX-INCOMPLETE changed reviewed"
+[ "$(bash "$TKT_STATE" "$S" get findings)" = "$CDIR/run/switchyard-529-findings-r1.md" ] \
+  || fail "P0-only FIX-INCOMPLETE did not record findings"
+grep -Fq 'P0 fix.txt:0 — critical finding' "$CDIR/run/switchyard-529-findings-r1.md" \
+  || fail "P0-only findings file lost the P0 row"
+grep -Fq 'P0 fix.txt:0 — critical finding' <<<"$out" || fail "P0-only digest row missing: $out"
 
 # 3. Ready, not pushed: CI wait runs, the push lands, failed jobs reach the digest.
 setup_case unpushed

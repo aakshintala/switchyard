@@ -70,6 +70,8 @@ case "$(cat "$T/vermode")" in
   bullet-incomplete) printf 'FIX-INCOMPLETE round=1\n- **P3 `src/main.sh:3` — non-blocking finding.**\n';;
   p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 src/main.sh:3 — non-blocking finding\n';;
   p2-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 src/main.sh:3 — non-blocking finding\nP2 src/main.sh:2 — blocking finding\n';;
+  p0-p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 src/main.sh:0 — critical finding\nP3 src/main.sh:3 — non-blocking finding\n';;
+  p0-only-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 src/main.sh:0 — critical finding\n';;
   fail) printf 'review-pr failed\n' >&2; exit 7;;
   behind)
     refusal_head="$(cat "$REFUSAL_HEAD")"
@@ -414,6 +416,29 @@ run_verify
 [ "$RC" = 1 ] || fail "P2 FIX-INCOMPLETE exited $RC, want 1: $OUT"
 assert_first_verdict FIX-INCOMPLETE 'P2 FIX-INCOMPLETE'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "P2 FIX-INCOMPLETE changed reviewed"
+
+# P0 plus P3 remains incomplete and leaves reviewed unchanged; both rows persist.
+setup_case p0-p3-incomplete
+printf 'p0-p3-incomplete\n' >"$T/vermode"
+run_verify
+[ "$RC" = 1 ] || fail "P0+P3 FIX-INCOMPLETE exited $RC, want 1: $OUT"
+assert_first_verdict FIX-INCOMPLETE 'P0+P3 FIX-INCOMPLETE'
+[ "$(read_state reviewed)" = "$OLD" ] || fail "P0+P3 FIX-INCOMPLETE changed reviewed"
+grep -Fq 'P0 src/main.sh:0 — critical finding' <<<"$OUT" || fail "P0 digest row missing: $OUT"
+p0_p3_file="$RUN/switchyard-1756-tkt-verify-${HEAD:0:12}.md"
+grep -Fq 'P0 src/main.sh:0 — critical finding' "$p0_p3_file" || fail "P0+P3 findings file lost the P0 row"
+
+# P0-only FIX-INCOMPLETE is recorded, not rejected as missing bare finding rows.
+setup_case p0-only-incomplete
+printf 'p0-only-incomplete\n' >"$T/vermode"
+run_verify
+[ "$RC" = 1 ] || fail "P0-only FIX-INCOMPLETE exited $RC, want 1: $OUT"
+assert_first_verdict FIX-INCOMPLETE 'P0-only FIX-INCOMPLETE'
+[ "$(read_state reviewed)" = "$OLD" ] || fail "P0-only FIX-INCOMPLETE changed reviewed"
+p0_only_file="$RUN/switchyard-1756-tkt-verify-${HEAD:0:12}.md"
+[ "$(read_state findings)" = "$p0_only_file" ] || fail "P0-only FIX-INCOMPLETE did not store findings"
+grep -Fq 'P0 src/main.sh:0 — critical finding' "$p0_only_file" || fail "P0-only findings file lost the P0 row"
+grep -Fq 'P0 src/main.sh:0 — critical finding' <<<"$OUT" || fail "P0-only digest row missing: $OUT"
 
 # VERIFY-FAIL paths never count a round, even with P-line input.
 setup_case verify-fail
