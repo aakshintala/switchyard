@@ -19,6 +19,7 @@ ruling_match_file() {
   while IFS= read -r row; do
     base="$(findings_row_base "$row")"
     base="$(normalize_finding_line "$base")"
+    # This follows findings_row_base/normalisation; keep its internal class separate from raw input rows.
     case "$base" in P1\ *|P2\ *|P3\ *) ;; *) continue;; esac
     status=open
     if [ "$kind" = history ]; then
@@ -131,6 +132,7 @@ ruling_refutes_mark_rows() {
       printf '%s\n' "$row"
       row_base="$(findings_row_base "$row")"
       row_base="$(normalize_finding_line "$row_base")"
+      # This follows findings_row_base/normalisation; it is a history class, not raw input validation.
       case "$row_base" in P1\ *|P2\ *|P3\ *) ;; *) continue;; esac
       row_status="$(findings_row_status "$row")"
       [ -n "$row_status" ] || row_status=open

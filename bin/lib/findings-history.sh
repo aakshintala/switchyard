@@ -33,6 +33,7 @@ write_findings_history() {
   local -a history_base=() history_raised=() history_status=() history_unverified=() verify_open=()
   history_add_row() {
     local mode="$1" default_raised="$2" row="$3" base meta parsed_raised parsed_status parsed_unverified raised status unverified i
+    # History entries can carry metadata; classify them with this history-specific grammar, not raw input-file grammar.
     case "$row" in P1\ *|P2\ *|P3\ *) ;; *) return 0;; esac
     base="$(findings_row_base "$row")"
     meta=""
@@ -77,6 +78,7 @@ write_findings_history() {
   fi
   if [ -n "$verify_output" ] && [ -r "$verify_output" ]; then
     while IFS= read -r row; do
+      # This history comparison class is separate from raw input-file validation.
       case "$row" in P1\ *|P2\ *|P3\ *) verify_open+=("$row");; esac
     done <"$verify_output"
   fi

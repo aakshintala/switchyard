@@ -696,8 +696,10 @@ write_findings() {
     echo "tkt-fix: refusing to overwrite $fr: $namebase$part_suffix-findings-r$round.md names are reserved for this ticket's own findings output; write hand-kept notes to $namebase$part_suffix-dispositions-r$round.md instead" >&2
     exit 2
   fi
-  if finding_rows verify-output "$1" >/dev/null 2>/dev/null; then
-    finding_rows verify-output "$1" >"$fr"
+  local rows
+  rows="$(finding_rows verify-output "$1" 2>/dev/null || true)"
+  if [ -n "$rows" ]; then
+    printf '%s\n' "$rows" >"$fr"
   else
     printf 'no open findings\n' >"$fr"
   fi

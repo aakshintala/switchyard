@@ -285,6 +285,8 @@ case "\$(cat "$T/vermode")" in
   p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 fix.txt:3 — non-blocking finding\n';;
   p2-incomplete) printf 'FIX-INCOMPLETE round=1\nP3 fix.txt:3 — non-blocking finding\nP2 fix.txt:2 — blocking finding\n';;
   p2-fixed-p3-incomplete) printf 'FIX-INCOMPLETE round=1\n## Fixed\nP2 fix.txt:2: fixed.\n## Open\nP2 fix.txt:4: fixed.\nP3 fix.txt:3 — non-blocking finding\n';;
+  p2-fixed-trailing-p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP2 x.sh:1 — thing: fixed.   \nP3 fix.txt:3 — non-blocking finding\n';;
+  p2-open-trailing-incomplete) printf 'FIX-INCOMPLETE round=1\nP2 x.sh:1 — thing   \n';;
   p1-not-judged-incomplete) printf 'FIX-INCOMPLETE round=1\n## Fixed\nP2 fix.txt:2: fixed.\n## Not judged\nP1 fix.txt:1 — not judged\nP3 fix.txt:3 — non-blocking finding\n';;
   p0-p3-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 fix.txt:0 — critical finding\nP3 fix.txt:3 — non-blocking finding\n';;
   p0-only-incomplete) printf 'FIX-INCOMPLETE round=1\nP0 fix.txt:0 — critical finding\n';;
@@ -1582,6 +1584,27 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "fixe
 fr="$CDIR/run/switchyard-529-findings-r1.md"
 grep -Fq 'P2 fix.txt:2: fixed.' "$fr" || fail "fixed P2 row was not preserved"
 grep -Fq 'P3 fix.txt:3 — non-blocking finding' "$fr" || fail "open P3 row was not preserved"
+
+if want review-incomplete-trailing-whitespace; then
+  # Trailing whitespace does not stop a fixed P2 from advancing reviewed.
+  setup_case incomplete-p2-fixed-trailing
+  printf 'p2-fixed-trailing-p3-incomplete' >"$T/vermode"
+  run_rc=0
+  out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 1 ] || fail "fixed-P2-trailing FIX-INCOMPLETE exited $run_rc, want 1: $out"
+  verify_head="$(git -C "$WT" rev-parse HEAD)"
+  [ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$verify_head" ] \
+    || fail "trailing whitespace on fixed P2 prevented reviewed from advancing"
+
+  # Trailing whitespace does not hide an open P2 from the reviewed gate.
+  setup_case incomplete-p2-open-trailing
+  printf 'p2-open-trailing-incomplete' >"$T/vermode"
+  run_rc=0
+  out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 1 ] || fail "open-P2-trailing FIX-INCOMPLETE exited $run_rc, want 1: $out"
+  [ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$OLD" ] \
+    || fail "trailing whitespace on open P2 advanced reviewed"
+fi
 
 # A P1 under a Not judged heading has no `: fixed.` suffix, so it holds reviewed.
 setup_case incomplete-p1-not-judged

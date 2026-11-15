@@ -40,6 +40,13 @@ if [ ! -r "$stop_report_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$stop_report_lib"
+verify_section_lib="$script_dir/lib/verify-section.sh"
+if [ ! -r "$verify_section_lib" ]; then
+  echo "tkt-drive: cannot read shared lib: $verify_section_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$verify_section_lib"
 t() { "$tkt_state" "$state" "$@"; }
 get() { t get "$1" 2>/dev/null || true; }
 
@@ -134,7 +141,7 @@ plan_posted() {
 
 has_open_findings() {
   local file="$1"
-  [ -n "$file" ] && [ -r "$file" ] && grep -qE '^P[123][[:space:]]' "$file"
+  [ -n "$file" ] && [ -r "$file" ] && finding_rows input "$file" >/dev/null
 }
 
 add_overlap_context() {
