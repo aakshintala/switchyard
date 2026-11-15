@@ -430,9 +430,9 @@ printf 'LANE-ERROR id=drive-job-1472\n' >"$TEST_BUILD_VERDICT"
 run_drive
 [ "$RC" -eq 1 ] || fail "LANE-ERROR tool stop preserves exit 1 (rc=$RC; out=$(cat "$OUT"))"
 grep -q 'tkt-drive STOP tool=tkt-build verdict=LANE-ERROR trigger=' "${STATE%.state}.journal" || fail 'LANE-ERROR keeps the original tkt-drive STOP journal line'
-drive_reports="$(find "$T/inbox" -type f -name 'tkt-drive-*.md' | wc -l | tr -d ' ')"
+drive_reports="$(find "$T/inbox" -type f -name 'stop-report-*-tkt-drive-*.md' | wc -l | tr -d ' ')"
 [ "$drive_reports" -eq 1 ] || fail "LANE-ERROR sends one tkt-drive report (count=$drive_reports)"
-drive_report="$(find "$T/inbox" -type f -name 'tkt-drive-*.md' -print -quit)"
+drive_report="$(find "$T/inbox" -type f -name 'stop-report-*-tkt-drive-*.md' -print -quit)"
 grep -Fq 'Ticket: #1472' "$drive_report" || fail 'LANE-ERROR report names the ticket'
 grep -Fq 'Job ID: drive-job-1472' "$drive_report" || fail 'LANE-ERROR report names the job'
 grep -Fq 'Status: STOP' "$drive_report" || fail 'LANE-ERROR report names the STOP status'
