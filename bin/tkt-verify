@@ -115,6 +115,9 @@ if [ -n "$ruling_id" ]; then
   grant_comment_count=1
   ruling_json="$tmp/ruling-comment.json"
   if ! check_round_grant "$ruling_json" "$ruling_id" "$round" t; then
+    if [ -n "$ruling_comment_hint" ]; then
+      emit "RULING-REFUSED reason=$ruling_comment_failure comment=$ruling_id" 2 "$ruling_comment_hint"
+    fi
     emit "RULING-REFUSED reason=$ruling_comment_failure comment=$ruling_id" 2
   fi
   grant_accepted=1

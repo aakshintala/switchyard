@@ -3339,6 +3339,32 @@ head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "roundgrant-retry did
 [ "$(grep -c ' grants round 3$' "$CDIR/tkt.journal")" = 1 ] || fail "roundgrant-retry repeated grant journal entry"
 fi
 
+# A new grant for a round still open under its recorded grant is round-open, not reused;
+# a comment id already in grant.1..round stays reused.
+if want roundgrant-round-open; then
+setup_case roundgrant-round-open
+bash "$TKT_STATE" "$S" set round 3 >/dev/null
+bash "$TKT_STATE" "$S" set grant.4 '935 https://github.com/switchyard/switchyard/issues/529#issuecomment-935' >/dev/null
+write_ruling_comment 936 'grants: round 4'
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 936 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "roundgrant-round-open exited $run_rc, want 2: $out $(cat "$T/stderr")"
+grep -Fq 'TKT tkt-fix RULING-REFUSED reason=round-open comment=936' <<<"$out" || fail "roundgrant-round-open was not refused as round-open: $out"
+grep -Fq 'round 4 is still open under grant.4 (935); resume the blocked job with --resume, or rerun with --ruling 935' <<<"$out" || fail "roundgrant-round-open hint is missing: $out"
+! grep -q '^job|' "$T/calls.log" || fail "roundgrant-round-open dispatched a fix job"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "roundgrant-round-open changed round"
+[ "$(bash "$TKT_STATE" "$S" get grant.4)" = '935 https://github.com/switchyard/switchyard/issues/529#issuecomment-935' ] || fail "roundgrant-round-open changed grant.4"
+
+setup_case roundgrant-reused
+bash "$TKT_STATE" "$S" set round 3 >/dev/null
+bash "$TKT_STATE" "$S" set grant.3 '937 https://github.com/switchyard/switchyard/issues/529#issuecomment-937' >/dev/null
+write_ruling_comment 937 'grants: round 4'
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 937 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "roundgrant-reused exited $run_rc, want 2: $out $(cat "$T/stderr")"
+grep -Fq 'TKT tkt-fix RULING-REFUSED reason=reused comment=937' <<<"$out" || fail "roundgrant-reused was not refused as reused: $out"
+! grep -Fq 'still open' <<<"$out" || fail "roundgrant-reused printed the round-open hint: $out"
+! grep -q '^job|' "$T/calls.log" || fail "roundgrant-reused dispatched a fix job"
+fi
+
 # Grant refusals preserve the round and do not dispatch a job.
 if want roundgrant-refusals; then
 setup_case roundgrant-stale

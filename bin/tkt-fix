@@ -471,6 +471,9 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
   for grant_id in ${ruling_grant_ids[@]+"${ruling_grant_ids[@]}"}; do
     grant_json="$tmp/ruling-$grant_id.json"
     if ! check_round_grant "$grant_json" "$grant_id" "$round" t; then
+      if [ -n "$ruling_comment_hint" ]; then
+        emit "RULING-REFUSED reason=$ruling_comment_failure comment=$grant_id" 2 "$ruling_comment_hint"
+      fi
       ruling_refuse "$ruling_comment_failure" "$grant_id"
     fi
     grant_accepted=1

@@ -44,6 +44,7 @@ check_round_grant() {
   grant_round=""
   grant_url=""
   ruling_comment_failure=""
+  ruling_comment_hint=""
   case "$comment_id" in
     ''|*[!0-9]*) ruling_comment_failure=bad-id; return 1 ;;
   esac
@@ -65,7 +66,10 @@ check_round_grant() {
   done
   grant_value="$("$state_fn" get "grant.$next_round" 2>/dev/null || true)"
   if [ -n "$grant_value" ] && [ "${grant_value%% *}" != "$comment_id" ]; then
-    ruling_comment_failure=reused
+    # The round grant.<next_round> covers is still open: no verify has advanced
+    # round since that grant was recorded (every fix attempt ended BLOCKED).
+    ruling_comment_failure=round-open
+    ruling_comment_hint="round $next_round is still open under grant.$next_round (${grant_value%% *}); resume the blocked job with --resume, or rerun with --ruling ${grant_value%% *}"
     return 1
   fi
 
