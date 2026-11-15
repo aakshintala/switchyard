@@ -647,6 +647,19 @@ write_ruling_comment 99 'refutes: P2 missing.sh:1'
 expect_ruling_refused ruling-no-match no-match 99
 fi
 
+# A reason on the refutes line makes it longer than the exact row prefix, so it is refused before dispatch.
+if want ruling-trailing-prose; then
+setup_case ruling-trailing-prose
+printf 'P1 fix.txt:1 — a\n' >"$CDIR/findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+write_ruling_comment 99 'refutes: P1 fix.txt:1 — a because the concern is unfounded'
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "ruling-trailing-prose exited $run_rc, want refusal: $out $(cat "$T/stderr")"
+grep -Fq 'TKT tkt-fix RULING-REFUSED reason=no-match comment=99' <<<"$out" || fail "ruling-trailing-prose had wrong refusal: $out"
+grep -Fq 'Use a column-0 `refutes: <exact leading text of the row>` line; put any reason on the next line.' <<<"$out" || fail "ruling-trailing-prose form hint is missing: $out"
+! grep -q '^job|' "$T/calls.log" || fail "ruling-trailing-prose dispatched a fix job: $(cat "$T/calls.log")"
+fi
+
 if want ruling-ambiguous; then
 setup_case ruling-ambiguous
 printf 'P2 a.sh:1 — x\nP2 a.sh:1 — y\n' >"$CDIR/findings.md"
@@ -3768,6 +3781,7 @@ write_ruling_comment 937 'grants: round 4'
 run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 937 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = 2 ] || fail "roundgrant-reused exited $run_rc, want 2: $out $(cat "$T/stderr")"
 grep -Fq 'TKT tkt-fix RULING-REFUSED reason=reused comment=937' <<<"$out" || fail "roundgrant-reused was not refused as reused: $out"
+grep -Fq 'grant comment 937 has already been consumed; post a new ruling comment' <<<"$out" || fail "roundgrant-reused did not explain that a new ruling comment is needed: $out"
 ! grep -Fq 'still open' <<<"$out" || fail "roundgrant-reused printed the round-open hint: $out"
 ! grep -q '^job|' "$T/calls.log" || fail "roundgrant-reused dispatched a fix job"
 fi
@@ -3778,6 +3792,7 @@ setup_case roundgrant-stale
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
 write_ruling_comment 930 'grants: round 3' 529 OWNER '2026-11-12T00:00:00Z'
 expect_fix_grant_refused stale stale 930
+grep -Fq 'post a new ruling comment with `grants: round 3`' <<<"$refused_out" || fail "roundgrant-stale did not say a new ruling comment is needed: $refused_out"
 ! grep -Fq 'state round=' <<<"$refused_out" || fail "roundgrant-stale printed the bad-grant hint: $refused_out"
 
 setup_case roundgrant-author
@@ -3820,7 +3835,7 @@ write_ruling_comment 937 'grants: round 3'
 run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 936 --ruling 937 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = 2 ] || fail "roundgrant-multiple-comments exited $run_rc, want 2: $out"
 grep -Fq 'RULING-REFUSED reason=bad-grant comment=936' <<<"$out" || fail "roundgrant-multiple-comments did not refuse bad-grant: $out"
-grep -Fq 'state round=2; pass one --ruling grant comment, with the single line `grants: round 3`' <<<"$out" || fail "roundgrant-multiple-comments hint is missing: $out"
+grep -Fq 'only one grants-bearing ruling per run' <<<"$out" || fail "roundgrant-multiple-comments hint is missing: $out"
 ! grep -q '^job|' "$T/calls.log" || fail "roundgrant-multiple-comments dispatched a fix job"
 ! grep -q '^grant[.]' "$S" || fail "roundgrant-multiple-comments wrote a grant"
 [ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "roundgrant-multiple-comments changed round"

@@ -61,6 +61,7 @@ check_round_grant() {
     grant_id="${grant_value%% *}"
     if [ -n "$grant_value" ] && [ "$grant_id" = "$comment_id" ]; then
       ruling_comment_failure=reused
+      ruling_comment_hint="grant comment $comment_id has already been consumed; post a new ruling comment with \`grants: round $next_round\` and retry with --ruling <comment id>"
       return 1
     fi
     key_round=$((key_round + 1))
@@ -97,10 +98,12 @@ check_round_grant() {
   if [[ ! "$created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
     || [[ ! "$verdict_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
     ruling_comment_failure=stale
+    ruling_comment_hint="grant comment is stale for the current round; post a new ruling comment with \`grants: round $next_round\` and pass its id with --ruling"
     return 1
   fi
   if ! (LC_ALL=C; [[ "$created_at" > "$verdict_at" ]]); then
     ruling_comment_failure=stale
+    ruling_comment_hint="grant comment is stale for the current round; post a new ruling comment with \`grants: round $next_round\` and pass its id with --ruling"
     return 1
   fi
 
@@ -123,7 +126,7 @@ check_round_grant() {
     || [ "${grant_comment_count:-1}" -gt 1 ]; then
     ruling_comment_failure=bad-grant
     if [ "${grant_comment_count:-1}" -gt 1 ]; then
-      ruling_comment_hint="state round=$round; pass one --ruling grant comment, with the single line \`grants: round $next_round\`"
+      ruling_comment_hint="state round=$round; only one grants-bearing ruling per run; use one --ruling comment with \`grants: round $next_round\` (other --ruling comments may carry refutes:)"
     else
       ruling_comment_hint="state round=$round; this grant must read \`grants: round $next_round\` on a single line"
     fi
