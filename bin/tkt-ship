@@ -259,32 +259,55 @@ gate_diff_comparison() {
   return 0
 }
 
-# The journal is the source of truth for full-gate coverage. A stale journal
-# PASS refuses even if the body line is absent; a current PASS replaces a
-# missing or stale body line. A stale body line refuses only when no full PASS
-# exists in the journal. Current-PASS body writes remain best effort.
-last_pass="$(grep -o 'tkt-gate PASS head=[0-9a-fA-F]\{40\}$' "${state%.state}.journal" 2>/dev/null | tail -n 1 || true)"
-last_pass_head="${last_pass#tkt-gate PASS head=}"
-local_gate_cmd=""
+# The journal is the source of truth for full-gate coverage. The latest
+# full-gate PASS by journal order becomes the comparison base; a current PASS
+# replaces a missing or stale body line. A stale body line refuses only when
+# no full PASS exists in the journal. Current-PASS body writes remain best effort.
 journal_path="${state%.state}.journal"
-if [ -n "$last_pass" ] || grep -q 'tkt-fix gate PASS' "$journal_path" 2>/dev/null; then
+last_pass=""
+last_pass_head=""
+local_gate_cmd=""
+if grep -Eq 'tkt-gate PASS head=[0-9a-fA-F]{40}$' "$journal_path" 2>/dev/null \
+  || grep -q 'tkt-fix gate PASS' "$journal_path" 2>/dev/null; then
   if [ "$takeover" -eq 1 ]; then
     local_gate_cmd="$takeover_gate"
   elif plan_gate_args tkt && plan_path="$(tkt get plan 2>/dev/null)" && [ -n "$plan_path" ]; then
     local_gate_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan_path" 2>/dev/null || true)"
   fi
 fi
-# A fix-job gate counts only when its exact command hash and head match the
-# gate tkt-ship would require now. A malformed, stale or scoped credit leaves
-# the existing tkt-gate path untouched.
-if [ "$last_pass_head" != "$pr_head" ] && [ -n "$local_gate_cmd" ]; then
+# A fix-job gate counts only when its exact command hash matches the gate
+# tkt-ship would require now; malformed, stale or scoped credits are ignored.
+credit_hash=""
+credit_at_head=0
+if [ -n "$local_gate_cmd" ]; then
   credit_env="$(tkt get env 2>/dev/null || true)"
-  if credit_hash="$(gate_credit_hash "$credit_env" "$local_gate_cmd" 2>/dev/null)" && [ -n "$credit_hash" ]; then
-    if grep -E '(^| )tkt-fix gate PASS head=[0-9a-fA-F]{40} cmd=[0-9a-fA-F]{64}$' "$journal_path" 2>/dev/null | grep -Fq "tkt-fix gate PASS head=$pr_head cmd=$credit_hash"; then
-      last_pass="tkt-gate PASS head=$pr_head"
-      last_pass_head="$pr_head"
+  if ! credit_hash="$(gate_credit_hash "$credit_env" "$local_gate_cmd" 2>/dev/null)"; then
+    credit_hash=""
+  fi
+fi
+# Scan both evidence types together so the newest valid entry wins by journal
+# order. A wrong-hash fix credit cannot replace or hide earlier valid evidence.
+gate_pass_re='tkt-gate PASS head=([0-9a-fA-F]{40})$'
+fix_pass_re='(^| )tkt-fix gate PASS head=([0-9a-fA-F]{40}) cmd=([0-9a-fA-F]{64})$'
+while IFS=: read -r _ journal_line; do
+  if [[ "$journal_line" =~ $gate_pass_re ]]; then
+    last_pass_head="${BASH_REMATCH[1]}"
+    last_pass="tkt-gate PASS head=$last_pass_head"
+  elif [[ "$journal_line" =~ $fix_pass_re ]]; then
+    fix_head="${BASH_REMATCH[2]}"
+    fix_hash="${BASH_REMATCH[3]}"
+    if [ -n "$credit_hash" ] && [ "$fix_hash" = "$credit_hash" ]; then
+      last_pass_head="$fix_head"
+      last_pass="tkt-gate PASS head=$last_pass_head"
+      if [ "$fix_head" = "$pr_head" ]; then credit_at_head=1; fi
     fi
   fi
+done < <(grep -nE 'tkt-gate PASS head=[0-9a-fA-F]{40}$|(^| )tkt-fix gate PASS head=[0-9a-fA-F]{40} cmd=[0-9a-fA-F]{64}$' "$journal_path" 2>/dev/null || true)
+# A valid credit at the exact PR head is a full gate at that head, whatever
+# came after it in the journal.
+if [ "$credit_at_head" -eq 1 ]; then
+  last_pass_head="$pr_head"
+  last_pass="tkt-gate PASS head=$pr_head"
 fi
 if [ -n "$last_pass" ] && [ "$last_pass_head" != "$pr_head" ]; then
   if ! gate_diff_comparison "$last_pass_head" "$pr_head"; then
