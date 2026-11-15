@@ -3,6 +3,7 @@
 # Call after findings-history.sh and verify-section.sh; callers map
 # ruling_refutes_failure* and ruling_refutes_drift_* to their own refusal
 # format, and initialize the arrays ruling_refute_{ids,urls,prefixes,bases}.
+# Keep refusal/emit mapping in each caller: their emit contracts and source nouns differ.
 
 ruling_match_begin() {
   ruling_match_seen=()
