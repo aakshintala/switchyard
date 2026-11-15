@@ -55,8 +55,10 @@ Status: $status
 Last report lines (up to 20):
 $report"
 
+  # The sender becomes the filename prefix: stop-report-<ticket>-<tool>-... is
+  # what bin/pending.sh (and flywheel's settle-watch) pair with the ticket.
   # Clear INBOX_HOST so an inherited value can't send this off-host.
-  printf '%s\n' "$message" | INBOX_HOST= bash "$script_dir/inbox-send" "$inbox" "$tool" >/dev/null 2>&1 || rc=$?
+  printf '%s\n' "$message" | INBOX_HOST= bash "$script_dir/inbox-send" "$inbox" "stop-report-$ticket-$tool" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
     "$tkt_state" "$state" journal "stop-report sent key=$key tool=$tool job=$job status=$status" >/dev/null 2>&1 || true
   else

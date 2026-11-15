@@ -662,11 +662,11 @@ run_job --slot lane --template "$T/tmpl-basic.md"
 expect_verdict "TKT tkt-job ASK id=stub-1 reused=stub-1 stale-head=bbbb now=* log=*" "ASK rerun"
 grep -q -- "--resume stub-1" <<<"$OUT" || fail "reused ASK digest names --resume"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "ASK rerun dispatches nothing new"
-[ "$(find "$T/inbox" -type f -name 'tkt-job-*.md' | wc -l | tr -d ' ')" -eq 1 ] || fail "ASK rerun does not send a second report"
+[ "$(find "$T/inbox" -type f -name 'stop-report-*-tkt-job-*.md' | wc -l | tr -d ' ')" -eq 1 ] || fail "ASK rerun does not send a second report"
 cmp "$CDIR/report.md" <(jq -j -r '.result.text' "$T/tmp/delegate-jobs/stub-1.json") || fail "--out-file writes result.text in full"
-stop_reports="$(find "$T/inbox" -type f -name 'tkt-job-*.md' | wc -l | tr -d ' ')"
+stop_reports="$(find "$T/inbox" -type f -name 'stop-report-*-tkt-job-*.md' | wc -l | tr -d ' ')"
 [ "$stop_reports" -eq 1 ] || fail "ASK sends exactly one stop report (count=$stop_reports)"
-stop_report="$(find "$T/inbox" -type f -name 'tkt-job-*.md' -print -quit)"
+stop_report="$(find "$T/inbox" -type f -name 'stop-report-*-tkt-job-*.md' -print -quit)"
 grep -Fq 'Ticket: #502' "$stop_report" || fail "ASK stop report names the ticket"
 grep -Fq 'Job ID: stub-1' "$stop_report" || fail "ASK stop report names the job"
 grep -Fq 'Status: ASK' "$stop_report" || fail "ASK stop report names the status"
@@ -675,9 +675,15 @@ grep -Fq 'result line 30' "$stop_report" || fail "ASK stop report includes the f
 grep -Fq 'result line 10' "$stop_report" && fail "ASK stop report omits lines older than the last 20"
 stop_report_lines="$(sed -n '/^Last report lines/,$p' "$stop_report" | tail -n +2 | wc -l | tr -d ' ')"
 [ "$stop_report_lines" -le 20 ] || fail "ASK stop report has at most 20 report lines (got $stop_report_lines)"
+# The filename carries the ticket so bin/pending.sh pairs the report with it (#1834).
+case "$(basename "$stop_report")" in stop-report-502-tkt-job-*) ;; *) fail "ASK stop report name carries the ticket [$(basename "$stop_report")]" ;; esac
+mkdir -p "$T/pending/inbox/read"
+cp "$stop_report" "$T/pending/inbox/read/"
+pending_out="$(FW_RUN="$T/pending" bash "$REAL_BIN/pending.sh" "$T/pending/inbox" 2>&1)" || fail "pending.sh runs on the stop report: $pending_out"
+grep -Eq '^[ !]502 ' <<<"$pending_out" || fail "pending.sh pairs the stop report with ticket 502: $pending_out"
 # tkt-build journals the same job's stop words after tkt-job; that sends no second report.
 (tkt_state="$TKT_STATE" script_dir="$REAL_BIN"; . "$REAL_BIN/lib/stop-report.sh"; stop_report_notify "$S" 502 tkt-build stub-1 ASK <<<"tkt-build ASK id=stub-1")
-stop_reports="$(find "$T/inbox" -type f -name 'tkt-*.md' | wc -l | tr -d ' ')"
+stop_reports="$(find "$T/inbox" -type f -name 'stop-report-*.md' | wc -l | tr -d ' ')"
 [ "$stop_reports" -eq 1 ] || fail "tkt-build relaying tkt-job's ASK sends no second report (count=$stop_reports)"
 
 # --- a non-stop job status sends no report ---
@@ -715,7 +721,7 @@ grep -Eq 'stop-report WARN inbox-send exit [1-9][0-9]* key=' "${S%.state}.journa
 grep -q 'stop-report sent' "${S%.state}.journal" && fail "failed inbox-send journals no sent line"
 # A later write of the same stop retries the failed send, once.
 (tkt_state="$TKT_STATE" script_dir="$REAL_BIN"; . "$REAL_BIN/lib/stop-report.sh"; stop_report_notify "$S" 502 tkt-build stub-1 BLOCKED <<<"retry"; stop_report_notify "$S" 502 tkt-build stub-1 BLOCKED <<<"retry")
-[ "$(find "$T/inbox" -type f -name 'tkt-*.md' | wc -l | tr -d ' ')" -eq 1 ] || fail "a failed send is retried by the next write, exactly once"
+[ "$(find "$T/inbox" -type f -name 'stop-report-*.md' | wc -l | tr -d ' ')" -eq 1 ] || fail "a failed send is retried by the next write, exactly once"
 
 # --- with no TKT_STOP_INBOX, the report goes to the inbox beside the state ---
 setup_case report-default-inbox
@@ -723,7 +729,7 @@ reset_stub
 make_record stub-1 BLOCKED none 0 2 0
 (unset TKT_STOP_INBOX; run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model; exit "$RC")
 [ "$?" -eq 1 ] || fail "default inbox keeps BLOCKED exit 1"
-[ "$(find "$(dirname "$S")/inbox" -type f -name 'tkt-job-*.md' 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ] || fail "default inbox is the state dir's inbox"
+[ "$(find "$(dirname "$S")/inbox" -type f -name 'stop-report-*-tkt-job-*.md' 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ] || fail "default inbox is the state dir's inbox"
 
 # --- BLOCKED ---
 setup_case blocked
