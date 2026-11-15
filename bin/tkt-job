@@ -18,7 +18,7 @@
 # a backend switch); without it, the resumed job keeps its stored model.
 # Usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] |
 #   --brief <file> | --resume <job id> --prompt <file>) [--model <id>]
-#   [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]
+#   [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>] [--absorb-stray-run]
 # Tools: TKT_BIN holds fill-brief and plan-gate (default ~/.agents/bin) and delegate
 # when set; without TKT_BIN, delegate comes from PATH. tkt-state still sits next to
 # the script. No --timeout ever reaches delegate watch: the driver's wait owns
@@ -26,7 +26,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] | --brief <file> | --resume <job id> --prompt <file>) [--model <id>] [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]" >&2
+  echo "usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] | --brief <file> | --resume <job id> --prompt <file>) [--model <id>] [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>] [--absorb-stray-run]" >&2
   echo "If a slot has a prompt hash, a different supplied prompt replaces it only when the stored job has finished; otherwise it refuses." >&2
   echo "With --resume, --model is passed to delegate resume; without it the resumed job keeps its stored model." >&2
   exit 2
@@ -50,6 +50,7 @@ inherited_gate=0
 gate_from_plan=0
 expect_commits=0
 out_file=""
+absorb_stray_run=0
 fills=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -63,6 +64,7 @@ while [ $# -gt 0 ]; do
     --gate-from-plan) gate_from_plan=1; shift ;;
     --expect-commits) expect_commits=1; shift ;;
     --out-file) [ $# -ge 2 ] || usage; out_file="$2"; shift 2 ;;
+    --absorb-stray-run) absorb_stray_run=1; shift ;;
     --help|-h) usage ;;
     -* ) usage ;;
     *=*) fills+=("$1"); shift ;;
@@ -240,6 +242,20 @@ build_gate_from_plan() {
     exit 2
   }
   inner_gate_cmd="$gate_cmd"
+  if [ "$absorb_stray_run" -eq 1 ]; then
+    case "$state" in
+      /*) state_for_gate="$state" ;;
+      *) state_for_gate="$PWD/$state" ;;
+    esac
+    case "$run" in
+      /*) run_for_gate="$run" ;;
+      *) run_for_gate="$PWD/$run" ;;
+    esac
+    printf -v stray_run_command 'bash %q %q %q' \
+      "$script_dir/lib/tkt-stray-run.sh" "$state_for_gate" "$run_for_gate"
+    inner_gate_cmd="$stray_run_command && $inner_gate_cmd"
+    gate_cmd="$inner_gate_cmd"
+  fi
   validate_gate_journal_command
   # The gate script keeps the whole chain inside the redirected block and is
   # judged by its exit code, never the log line (see bin/lib/gate-script.sh).
