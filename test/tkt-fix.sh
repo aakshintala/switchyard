@@ -662,6 +662,36 @@ write_ruling_comment 100 'refutes: P2 legacy.txt:1'
 expect_ruling_refused ruling-history-only no-match 100
 fi
 
+# A normalized row closed in round 1 can be raised with different markdown in
+# round 2; the closed copy must not shadow the open --findings row.
+if want ruling-refutes-reopened; then
+setup_case ruling-refutes-reopened
+ROUND1_FINDINGS="$CDIR/round1-findings.md"
+ROUND2_FINDINGS="$CDIR/round2-findings.md"
+printf 'P1 **fix.txt:1** — a\n' >"$ROUND1_FINDINGS"
+printf 'P1 fix.txt:1 — a\n' >"$ROUND2_FINDINGS"
+bash "$TKT_STATE" "$S" set findings "$ROUND1_FINDINGS" >/dev/null
+fixture_commit fix.txt 'round one fix' 'fix: round one'
+ROUND1_HEAD="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" push -q origin tkt-529 || fail 'ruling-refutes-reopened could not push round one'
+bash "$TKT_STATE" "$S" set head "$ROUND1_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+record_test_round 1 "$ROUND1_HEAD"
+history_file="$CDIR/findings-history-r1.md"
+printf '# Findings history\nP1 **fix.txt:1** — a [tkt-history: raised=raised in review round 0; status=closed in fix round 1; unverified=none]\n' >"$history_file"
+bash "$TKT_STATE" "$S" set findings_history "$history_file" >/dev/null
+write_ruling_comment 99 'refutes: P1 fix.txt:1'
+printf 'ruling' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --findings "$ROUND2_FINDINGS" --ruling 99 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "ruling-refutes-reopened exited $run_rc, want 1: $out $(cat "$T/stderr")"
+! grep -Fq 'RULING-REFUSED' <<<"$out" || fail "ruling-refutes-reopened refused the open re-raised row: $out"
+grep -Fq 'FIX-INCOMPLETE round=2 STOP-AT-TWO' <<<"$out" || fail "ruling-refutes-reopened did not reach verification: $out"
+awk '/^P1 fix.txt:1 — a \[tkt-history: .*status=open/ { if (getline <= 0 || $0 !~ /^refuted: recorded ruling /) exit 1; found=1 } END { exit !found }' \
+  "$T/verify-input-1.md" || fail "ruling-refutes-reopened did not apply the ruling to the open row: $(cat "$T/verify-input-1.md")"
+grep -Fq 'P1 **fix.txt:1** — a [tkt-history:' "$T/verify-input-1.md" || fail 'ruling-refutes-reopened lost the closed round-one row'
+fi
+
 # A reason on the refutes line makes it longer than the exact row prefix, so it is refused before dispatch.
 if want ruling-trailing-prose; then
 setup_case ruling-trailing-prose
