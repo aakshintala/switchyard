@@ -848,6 +848,30 @@ want "CURRENT " 0 prmatch
 [ "$(grep -cF -- '--json state' "$T/calls.log")" -eq 0 ] || fail "prmatch: merged-state lookup must not run without drift"
 printf '1' >"$T/gh-fail"; run_start
 want "PRECONDITION pr=unreadable" 2 prunreadable
+# A stored plan bypasses currency checks when its files changed after filing.
+setup planned-stale TWO FILING
+S="$RUN/widget-42.state"
+planned_path="$CDIR/stored plan.md"
+printf 'plan=%s\npost_run=old-run\n' "$planned_path" >"$S"
+run_start
+want "PLANNED plan=$planned_path" 0 planned-stale
+case "$OUT" in *"filing=none"*"log none..origin/main: not run"*) ;; *) fail "planned-stale: diagnostics claim a currency check ran: $OUT" ;; esac
+[ "$(grep -c '^job\.preflight' "$S" || true)" -eq 0 ] || fail "planned-stale: wrote a preflight state key"
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "planned-stale: tkt-job must not run"
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "planned-stale: plan-sweep must not run"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$S" get post_run)" = "" ] \
+  || fail "planned-stale: successful start did not clear post_run"
+grep -qF "tkt-start check PLANNED plan=$planned_path" "$RUN/widget-42.journal" \
+  || fail "planned-stale: journal misses PLANNED verdict"
+# --no-preflight remains SKIPPED for a state that also has a stored plan.
+setup planned-noflight TWO FILING
+printf 'plan=%s\n' "$CDIR/plan.md" >"$RUN/widget-42.state"
+run_start --no-preflight
+want "SKIPPED filing=" 0 planned-noflight
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "planned-noflight: tkt-job must not run"
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "planned-noflight: plan-sweep must not run"
+[ "$(grep -c '^job\.preflight' "$RUN/widget-42.state" || true)" -eq 0 ] \
+  || fail "planned-noflight: wrote a preflight state key"
 # --no-preflight on a stale ticket: check only, SKIPPED with exit 0, no job.
 setup noflightstale TWO FILING
 run_start --no-preflight
@@ -996,6 +1020,17 @@ case "$OUT" in *CURRENT*) fail "mergedstop: must never print CURRENT" ;; esac
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "mergedstop: tkt-job must not run" # docs/agents/issue-tracker.md:31
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "mergedstop: plan-sweep must not run" # docs/agents/issue-tracker.md:31
 grep -qF -- '--state merged' "$T/calls.log" || fail "mergedstop: search misses --state merged"
+# A stored plan must not bypass MERGED-STOP or clear state on a refused start.
+setup planned-mergedstop ONE AGAINST
+S="$RUN/widget-42.state"
+printf 'plan=%s\npost_run=old-run\n' "$CDIR/plan.md" >"$S"
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[]}]' >"$T/prlist"
+run_start
+want "MERGED-STOP pr=7" 1 planned-mergedstop
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$S" get post_run)" = old-run ] \
+  || fail "planned-mergedstop: refusal must preserve post_run"
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "planned-mergedstop: tkt-job must not run"
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "planned-mergedstop: plan-sweep must not run"
 # a MERGED-STOP rerun after a successful start leaves post_run alone (#1517).
 setup mergedpostrun ONE AGAINST
 run_start --no-preflight
@@ -1510,7 +1545,7 @@ printf 'plan=takeover #123\n' >"$RUN/widget-42.state"
 run_start
 ! grep -qF 'tkt-start: missing required role: model.planner' "$CDIR/stderr" \
   || fail "planner-takeover-resume: refused a stored takeover plan without a planner"
-want "CURRENT " 0 planner-takeover-resume
+want "PLANNED plan=takeover #123" 0 planner-takeover-resume
 
 # Resuming any stored plan, as a state made before model.planner was required (#1818), needs no planner.
 setup planner-plan-resume ONE AGAINST
@@ -1519,7 +1554,7 @@ printf 'plan=%s\n' "$CDIR/plan.md" >"$RUN/widget-42.state"
 run_start
 ! grep -qF 'tkt-start: missing required role: model.planner' "$CDIR/stderr" \
   || fail "planner-plan-resume: refused a stored plan without a planner"
-want "CURRENT " 0 planner-plan-resume
+want "PLANNED plan=$CDIR/plan.md" 0 planner-plan-resume
 
 # A part may use a closing keyword, but tkt-start must warn rather than refuse it.
 setup part-closing-warning ONE AGAINST
