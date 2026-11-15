@@ -112,30 +112,33 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-verify.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 round_grant_limited=0
 if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ]; then round_grant_limited=1; fi
-ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_jsons=(); ruling_grant_ids=()
+ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_grant_ids=()
 ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
 grant_comment_count=0
 grant_accepted=0
 grant_id=""
 grant_url=""
+ruling_refuse() {
+  local reason="$1" comment="$2" hint="${3:-}"
+  if [ -n "$hint" ]; then emit "RULING-REFUSED reason=$reason comment=$comment" 2 "$hint"; fi
+  emit "RULING-REFUSED reason=$reason comment=$comment" 2
+}
+
 ruling_history_source="$(t get findings_history 2>/dev/null || true)"
 for ruling_id in "${ruling_requested[@]+${ruling_requested[@]}}"; do
   case "$ruling_id" in
-    ''|*[!0-9]*) emit "RULING-REFUSED reason=bad-id comment=$ruling_id" 2 ;;
+    ''|*[!0-9]*) ruling_refuse bad-id "$ruling_id" ;;
   esac
   ruling_json="$tmp/ruling-$ruling_id.json"
   ruling_error="$tmp/ruling-$ruling_id.err"
   ruling_comment_hint=""
   if ! fetch_issue_comment "$ruling_id" "$ruling_json" "$ruling_error" "$pr"; then
-    if [ -n "$ruling_comment_hint" ]; then
-      emit "RULING-REFUSED reason=$ruling_comment_failure comment=$ruling_id" 2 "$ruling_comment_hint"
-    fi
-    emit "RULING-REFUSED reason=$ruling_comment_failure comment=$ruling_id" 2
+    ruling_refuse "$ruling_comment_failure" "$ruling_id" "$ruling_comment_hint"
   fi
   ruling_body="$tmp/ruling-$ruling_id.md"
-  jq -r '.body' "$ruling_json" >"$ruling_body" || emit "RULING-REFUSED reason=fetch comment=$ruling_id" 2
+  jq -r '.body' "$ruling_json" >"$ruling_body" || ruling_refuse fetch "$ruling_id"
   ruling_url="$(jq -r '.html_url // ""' "$ruling_json")"
-  ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body"); ruling_jsons+=("$ruling_json")
+  ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body")
   ruling_refutes_file="$tmp/ruling-$ruling_id.refutes"
   ruling_grants_file="$tmp/ruling-$ruling_id.grants"
   grep '^refutes:' "$ruling_body" >"$ruling_refutes_file" || true
@@ -144,14 +147,14 @@ for ruling_id in "${ruling_requested[@]+${ruling_requested[@]}}"; do
     if ! jq -e --arg repo "$repo" --arg issue "$issue" '
       (.issue_url | endswith("/repos/" + $repo + "/issues/" + $issue))
     ' "$ruling_json" >/dev/null 2>&1; then
-      emit "RULING-REFUSED reason=issue comment=$ruling_id" 2
+      ruling_refuse issue "$ruling_id"
     fi
   fi
   if [ -s "$ruling_grants_file" ]; then
     ruling_grant_ids+=("$ruling_id")
     grant_comment_count=$((grant_comment_count + 1))
   elif [ ! -s "$ruling_refutes_file" ]; then
-    emit "RULING-REFUSED reason=no-refutes comment=$ruling_id" 2
+    ruling_refuse no-refutes "$ruling_id"
   fi
 done
 for ruling_index in "${!ruling_ids[@]}"; do
@@ -166,16 +169,13 @@ for ruling_index in "${!ruling_ids[@]}"; do
         "refutes=$ruling_refutes_failure_prefix" \
         "$ruling_refutes_hint"
     fi
-    emit "RULING-REFUSED reason=$ruling_refutes_failure comment=$ruling_refutes_failure_id" 2
+    ruling_refuse "$ruling_refutes_failure" "$ruling_refutes_failure_id" "$ruling_refutes_hint"
   fi
 done
 for grant_id in "${ruling_grant_ids[@]+${ruling_grant_ids[@]}}"; do
   ruling_json="$tmp/ruling-$grant_id.json"
   if ! check_round_grant "$ruling_json" "$grant_id" "$round" t; then
-    if [ -n "$ruling_comment_hint" ]; then
-      emit "RULING-REFUSED reason=$ruling_comment_failure comment=$grant_id" 2 "$ruling_comment_hint"
-    fi
-    emit "RULING-REFUSED reason=$ruling_comment_failure comment=$grant_id" 2
+    ruling_refuse "$ruling_comment_failure" "$grant_id" "$ruling_comment_hint"
   fi
   grant_accepted=1
 done
@@ -188,14 +188,16 @@ fi
 verify_findings="$findings"
 if [ "${#ruling_refute_ids[@]}" -gt 0 ]; then
   verify_findings="$tmp/findings.md"
-  cp "$findings" "$verify_findings" || emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot copy findings for recorded rulings"
-  verify_findings_with_rulings="$tmp/findings-with-rulings.md"
-  if ! ruling_refutes_mark_rows "$verify_findings" "$verify_findings_with_rulings"; then
-    emit "VERIFY-FAIL reason=ruling-drift" 1 \
-      "comment=$ruling_refutes_drift_id" \
-      "refutes=$ruling_refutes_drift_prefix"
+  if ! ruling_refutes_prepare "$findings" "$verify_findings" "$tmp/findings-with-rulings.md"; then
+    case "$ruling_refutes_prepare_failure" in
+      drift)
+        emit "VERIFY-FAIL reason=ruling-drift" 1 \
+          "comment=$ruling_refutes_drift_id" \
+          "refutes=$ruling_refutes_drift_prefix" ;;
+      copy) emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot copy findings for recorded rulings" ;;
+      prepare) emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot prepare findings for recorded rulings" ;;
+    esac
   fi
-  mv "$verify_findings_with_rulings" "$verify_findings" || emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot prepare findings for recorded rulings"
   for ruling_index in "${!ruling_refute_ids[@]}"; do
     t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
   done

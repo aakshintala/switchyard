@@ -1291,14 +1291,16 @@ write_findings_history prepare "" "$tmp/verify-rounds"
 verify_history="$history_file"
 if [ "${#ruling_refute_ids[@]}" -gt 0 ]; then
   verify_history="$tmp/verify-history.md"
-  cp "$history_file" "$verify_history" || emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot copy findings history for recorded rulings"
-  verify_history_with_rulings="$tmp/verify-history-with-rulings.md"
-  if ! ruling_refutes_mark_rows "$verify_history" "$verify_history_with_rulings"; then
-    emit "VERIFY-FAIL reason=ruling-drift" 1 \
-      "comment=$ruling_refutes_drift_id" \
-      "refutes=$ruling_refutes_drift_prefix"
+  if ! ruling_refutes_prepare "$history_file" "$verify_history" "$tmp/verify-history-with-rulings.md"; then
+    case "$ruling_refutes_prepare_failure" in
+      drift)
+        emit "VERIFY-FAIL reason=ruling-drift" 1 \
+          "comment=$ruling_refutes_drift_id" \
+          "refutes=$ruling_refutes_drift_prefix" ;;
+      copy) emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot copy findings history for recorded rulings" ;;
+      prepare) emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot prepare findings history for recorded rulings" ;;
+    esac
   fi
-  mv "$verify_history_with_rulings" "$verify_history" || emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot prepare findings history for recorded rulings"
 fi
 vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$verify_history" --since "$verify_since")
 verify_ruling="$(t get ruling.verify 2>/dev/null || true)"
