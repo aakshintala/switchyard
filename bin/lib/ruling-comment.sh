@@ -69,7 +69,7 @@ check_round_grant() {
     # The round grant.<next_round> covers is still open: no verify has advanced
     # round since that grant was recorded (every fix attempt ended BLOCKED).
     ruling_comment_failure=round-open
-    ruling_comment_hint="round $next_round is still open under grant.$next_round (${grant_value%% *}); resume the blocked job with --resume, or rerun with --ruling ${grant_value%% *}"
+    ruling_comment_hint="round $next_round is still open under grant.$next_round (${grant_value%% *}); resume the blocked fix job with tkt-fix <state> --verify --resume <job id> --prompt <file>, or rerun with --ruling ${grant_value%% *}"
     return 1
   fi
 

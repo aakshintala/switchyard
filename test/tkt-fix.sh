@@ -3349,7 +3349,7 @@ write_ruling_comment 936 'grants: round 4'
 run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 936 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = 2 ] || fail "roundgrant-round-open exited $run_rc, want 2: $out $(cat "$T/stderr")"
 grep -Fq 'TKT tkt-fix RULING-REFUSED reason=round-open comment=936' <<<"$out" || fail "roundgrant-round-open was not refused as round-open: $out"
-grep -Fq 'round 4 is still open under grant.4 (935); resume the blocked job with --resume, or rerun with --ruling 935' <<<"$out" || fail "roundgrant-round-open hint is missing: $out"
+grep -Fq 'round 4 is still open under grant.4 (935); resume the blocked fix job with tkt-fix <state> --verify --resume <job id> --prompt <file>, or rerun with --ruling 935' <<<"$out" || fail "roundgrant-round-open hint is missing: $out"
 ! grep -q '^job|' "$T/calls.log" || fail "roundgrant-round-open dispatched a fix job"
 [ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "roundgrant-round-open changed round"
 [ "$(bash "$TKT_STATE" "$S" get grant.4)" = '935 https://github.com/switchyard/switchyard/issues/529#issuecomment-935' ] || fail "roundgrant-round-open changed grant.4"
