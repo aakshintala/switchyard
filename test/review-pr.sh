@@ -1783,6 +1783,51 @@ out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "bare FIX-OK coll
 grep -q "^FIX-OK$" <<<"$out" || fail "bare FIX-OK counts"
 grep -q BAD-VERDICT <<<"$out" && fail "bare FIX-OK is not bad"
 
+# --- case: a prefixed FIX-OK line is accepted and collected in canonical form
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises the optional verify prefix\n' >"$T/findings.txt"
+write_record verify DONE "VERDICT: FIX-OK
+VERDICT:FIX-OK
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "prefixed verify start exits 0"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "prefixed FIX-OK collect exits 0"
+[ "$(grep -c '^FIX-OK$' <<<"$out")" = 2 ] || fail "prefixed FIX-OK lines are printed bare"
+grep -q 'VERDICT: FIX-OK' <<<"$out" && fail "collect strips the optional verify prefix"
+grep -Fxq 'FIX-OK' "$T/state/comment.md" || fail "posted verify comment uses the canonical FIX-OK form"
+grep -q 'VERDICT: FIX-OK' "$T/state/comment.md" && fail "posted verify comment strips the optional prefix"
+
+# --- case: a prefixed FIX-INCOMPLETE line keeps bare P3 rows and posts canonically
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises prefixed incomplete parsing\n' >"$T/findings.txt"
+write_record verify DONE "VERDICT: FIX-INCOMPLETE: open P3s at file.txt:3
+P3 file.txt:3 — non-blocking issue — fix it
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "prefixed incomplete verify start exits 0"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "prefixed FIX-INCOMPLETE collect exits 0"
+grep -Fxq 'FIX-INCOMPLETE: open P3s at file.txt:3' <<<"$out" || fail "collect prints prefixed FIX-INCOMPLETE in canonical form"
+grep -Fxq 'P3 file.txt:3 — non-blocking issue — fix it' <<<"$out" || fail "collect keeps the bare P3 row"
+grep -q 'VERDICT: FIX-INCOMPLETE' <<<"$out" && fail "collect strips the incomplete verify prefix"
+grep -Fxq 'FIX-INCOMPLETE: open P3s at file.txt:3' "$T/state/comment.md" || fail "posted verify comment uses canonical FIX-INCOMPLETE"
+grep -q 'VERDICT: FIX-INCOMPLETE' "$T/state/comment.md" && fail "posted verify comment strips the incomplete prefix"
+
+# --- case: the verify prefix remains invalid for another review role
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT: FIX-OK
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "prefix role-scope review starts"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" && fail "verify prefix is rejected outside verify role"
+grep -Fxq 'BAD-VERDICT standards VERDICT: FIX-OK' <<<"$out" || fail "other role reports BAD-VERDICT for verify prefix"
+
 # --- case: prose or a finding that merely mentions VERDICT is no verdict attempt
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
@@ -3362,6 +3407,29 @@ grep -Fq -- "pass --since $VERIFY_C_SHA instead" <<<"$err" || \
   fail "stale verify refusal names the FIX-OK head: [$err]"
 [ ! -e "$T/state/runs.txt" ] || fail "stale verify refusal starts no job"
 [ ! -e "$TMPDIR/review-pr/job-verify" ] || fail "stale verify refusal saves no job state"
+
+# --- case #1905: a posted FIX-OK with the optional VERDICT: prefix also refuses an older --since
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf '%s\n' "$VERIFY_C_SHA" >"$T/state/heads.txt"
+printf 'P1 finding X: earlier reviewed behavior\n' >"$T/findings.txt"
+plant_comment "2026-10-09T12:00:00Z" 222 "review-pr: patch-id $EXPECTED_NEW_PID, head $VERIFY_C_SHA, since $OLD_SHA
+
+## verify (M)
+
+VERDICT: FIX-OK all findings repaired
+STATUS: DONE"
+plant_comment "2026-10-09T10:00:00Z" 221 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+P1 finding X: earlier reviewed behavior
+VERDICT standards: CHANGES"
+err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$OLD_SHA" --head "$VERIFY_C_SHA" 2>&1 >/dev/null)"; st=$?
+[ "$st" -eq 2 ] || fail "verify behind a prefixed FIX-OK exits 2 (got $st)"
+grep -Fq -- "pass --since $VERIFY_C_SHA instead" <<<"$err" || \
+  fail "stale verify refusal names the prefixed FIX-OK head: [$err]"
 
 # --- case: a legacy FIX-OK without since is retained as context but does not refuse
 reset_state
