@@ -2,6 +2,7 @@
 # Tests for tkt-drive using fake tkt-* and fence-grant commands.
 # Usage: bash test/tkt-drive.sh
 set -uo pipefail
+unset DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -196,6 +197,34 @@ run_drive() {
 assert_no_merge() {
   [ ! -s "$TEST_MERGE_CALLS" ] || fail "merge command ran: $(cat "$TEST_MERGE_CALLS")"
 }
+
+# An empty job ID is not delegate context; normal driver behavior continues.
+reset_case empty-delegate-job-id
+export DELEGATE_JOB_ID=""
+run_drive
+[ "$RC" -eq 1 ] || fail "empty DELEGATE_JOB_ID should not refuse (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+printf 'TKT tkt-build BLOCKED payload=unchanged\nbuild detail stays here\nTKT tkt-drive STOP tool=tkt-build verdict=BLOCKED\n' >"$CASE_DIR/expected.out"
+cmp -s "$CASE_DIR/expected.out" "$OUT" || fail "empty DELEGATE_JOB_ID changed normal output: $(cat "$OUT")"
+[ -s "$TEST_CALLS" ] || fail 'empty DELEGATE_JOB_ID did not continue normal tool execution'
+unset DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
+
+# A delegate job must be refused before state, journal, tools or stop reports.
+reset_case delegate-job-refusal
+printf 'journal sentinel\n' >"${STATE%.state}.journal"
+cp "$STATE" "$CASE_DIR/state.before"
+cp "${STATE%.state}.journal" "$CASE_DIR/journal.before"
+export DELEGATE_JOB_ID=test-job-1893
+run_drive
+[ "$RC" -eq 2 ] || fail "delegate job should be refused with rc 2 (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+[ ! -s "$OUT" ] || fail "delegate refusal wrote stdout: $(cat "$OUT")"
+printf '%s\n' "tkt-drive: refusing to run inside delegate job test-job-1893: a lane never runs the orchestrator's tkt-* tools; report to your orchestrator instead; if this is a top-level session, DELEGATE_JOB_ID leaked from its launcher (#1748): report that to switchyard" >"$CASE_DIR/expected.err"
+cmp -s "$CASE_DIR/expected.err" "$ERR" || fail "delegate refusal message mismatch: $(cat "$ERR")"
+[ ! -s "$TEST_CALLS" ] || fail "delegate refusal called fake tkt-* tools: $(cat "$TEST_CALLS")"
+[ ! -s "$TEST_FENCE_CALLS" ] || fail "delegate refusal called fence-grant: $(cat "$TEST_FENCE_CALLS")"
+[ "$(find "$T/inbox" -type f | wc -l | tr -d ' ')" -eq 0 ] || fail 'delegate refusal wrote a stop report'
+cmp -s "$CASE_DIR/state.before" "$STATE" || fail 'delegate refusal changed state'
+cmp -s "$CASE_DIR/journal.before" "${STATE%.state}.journal" || fail 'delegate refusal changed journal'
+unset DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
 
 # A missing plan is the normal pre-planning state, not a blocked lane.
 reset_case missing-plan
