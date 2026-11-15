@@ -1014,7 +1014,7 @@ for priority in P1 P2; do
   setup
   REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
   jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" --arg priority "$priority" '[
-    {created_at:"2026-11-04T11:00:00Z",id:110,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE mixed findings\n**Open**\nP3 non-blocking finding\n" + $priority + " blocking finding")}
+    {created_at:"2026-11-04T11:00:00Z",id:110,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE mixed findings\nP3 non-blocking finding\n" + $priority + " blocking finding")}
   ]' >"$ST/review-comments"
   ship; expect 5 "FIX-INCOMPLETE with $priority still refuses"; expect_refused REVIEW; no_merge "FIX-INCOMPLETE with $priority"
   ! grep -q '^gh issue \(list\|create\)' "$ST/gh.log" || fail "$priority refusal files no issue"
