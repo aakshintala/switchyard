@@ -42,9 +42,9 @@ Git:
 - SHAs come from `git rev-parse`; `review-pr --head` takes all 40 characters.
 
 Models and reviews:
-- Implementation: lanes and rebases use the pool's model via `tkt-job --slot <name> --gate-from-plan --model M`. Fix rounds use `tkt-fix <state> (--verify|--no-verify) --findings <file>`. Escalate an unresolved finding to flywheel as a ruling, not a bigger model. The plan carries the hard part: files, interfaces, tests, guards.
+- Implementation: lanes and rebases use the pool's model via `tkt-job --slot <name> --gate-from-plan --model M`. Fix rounds use `tkt-fix`, never `tkt-job`. Escalate an unresolved finding to flywheel as a ruling, not a bigger model. The plan carries the hard part: files, interfaces, tests, guards.
 - Command forms in briefs you write: the forms docs/workflow.md "Rules by path" names (`cargo fmt --check -p <crate>`). Bug tickets (not `test-only`, which has no red commit): the red commit (failing test) lands first, then the fix commit, then run `scripts/bug-red`; it refuses a single-commit branch.
-- Mechanical jobs outside fix rounds (rebase conflicts and compile-fixes, fmt, clippy, mutant-killing tests, renames, moves, repeated edits): `tkt-job --slot <name> --gate '<cmd>' --model M`, with M from the pool, gated by you.
+- Mechanical jobs (rebase conflicts and compile-fixes, fmt, clippy, mutant-killing tests, renames, moves, repeated edits): `tkt-job --slot <name> --gate '<cmd>' --model M`, with M from the pool, gated by you.
 - Every job in this brief dispatches through `tkt-job --model M`, never a bare `delegate run` (a line below naming `delegate run --model M` means that model, through `tkt-job`). `tkt-job` sets an extended idle window so quiet gated jobs are not killed mid-run, and records the job against the lane for `tkt-build`.
 - Preflight uses `delegate run --model M` with a pool model. Use the pool's Verifier routing on every ticket and round; every round of one ticket uses the same Verifier. Name the model in your report.
 - Planner: planning steps 1-2 use `delegate run --model M` with a pool model. Rate the rung using the rule in __HOME__/.agents/skills/planning/SKILL.md: `frontier` is cross-cutting design, such as a change to an interface several crates share. Name the planner model in your report.
