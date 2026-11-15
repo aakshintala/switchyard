@@ -79,7 +79,7 @@ build_brief() {
   kind="$1"
   template="$ROOT/bin/lib/template-$kind.md"
   # debt: pi keeps its pre-#1852 inputs (caller's HOME, tmp worktree root), so
-  # its fill still drops the worktree suffix; upgrade with the pi follow-up issue.
+  # its fill still drops the worktree suffix; upgrade with #1857.
   if [ "$kind" = pi ]; then
     pi=1 run_dir="$TMP_ROOT/run-pi" home="$HOME" worktrees="$TMP_ROOT/worktrees"
   else
