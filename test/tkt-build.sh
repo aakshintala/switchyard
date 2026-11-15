@@ -2442,7 +2442,7 @@ grep -Fq 'ruled drift commit' <<<"$OUT" || fail "gate-ruled-stale prints the dri
 grep -Fq '+main drift line' <<<"$OUT" || fail "gate-ruled-stale prints the Files hunk: $OUT"
 grep -Fq 'The plan verdict came from ruling RULING-1890 by surveyor; tkt-build did not re-verify.' <<<"$OUT" || fail "gate-ruled-stale explains the ruling provenance: $OUT"
 grep -Fq "tkt-plan $S set $CDIR/plan.md" <<<"$OUT" || fail "gate-ruled-stale routes through tkt-plan set: $OUT"
-grep -Fq "tkt-plan $S rule-ok --by surveyor --ruling <RULING-id> --comment <id>" <<<"$OUT" || fail "gate-ruled-stale routes through rule-ok: $OUT"
+grep -Fq "tkt-plan $S rule-ok --by <ruling role> --ruling <RULING-id> --comment <id>" <<<"$OUT" || fail "gate-ruled-stale routes through rule-ok: $OUT"
 grep -Fq "tkt-plan $S verify to re-verify instead" <<<"$OUT" || fail "gate-ruled-stale offers re-verification: $OUT"
 [ "$(git -C "$WT" rev-parse HEAD)" = "$H" ] || fail "gate-ruled-stale does not merge origin/main"
 [ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-528)" = "$H" ] || fail "gate-ruled-stale does not push the branch"

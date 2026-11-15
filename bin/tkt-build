@@ -144,9 +144,9 @@ stale_ruled_recovery() {
   printf -v worktree_arg '%q' "$worktree"
   printf -v plan_arg '%q' "$plan"
   printf -v branch_arg '%q' "$branch"
-  printf 'The plan verdict came from ruling %s by %s; tkt-build did not re-verify.\nTo refresh:\n1. git -C %s merge origin/main\n2. git -C %s push origin %s\n3. set the Base: line in %s to Base: <origin/main sha>\n4. tkt-plan %s set %s\n5. tkt-plan %s rule-ok --by %s --ruling <RULING-id> --comment <id> with a ruling that covers the drift\nAlternatively, run tkt-plan %s verify to re-verify instead.' \
+  printf 'The plan verdict came from ruling %s by %s; tkt-build did not re-verify.\nTo refresh:\n1. git -C %s merge origin/main\n2. git -C %s push origin %s\n3. set the Base: line in %s to Base: <origin/main sha>\n4. tkt-plan %s set %s\n5. tkt-plan %s rule-ok --by <ruling role> --ruling <RULING-id> --comment <id> with a ruling that covers the drift\nAlternatively, run tkt-plan %s verify to re-verify instead.' \
     "$ruling" "$ruled_by" "$worktree_arg" "$worktree_arg" "$branch_arg" "$plan_arg" \
-    "$state_arg" "$plan_arg" "$state_arg" "$ruled_by" "$state_arg"
+    "$state_arg" "$plan_arg" "$state_arg" "$state_arg"
 }
 write_plan_base() {
   local path="$1" newbase="$2" tmp_plan
