@@ -80,12 +80,14 @@ mode="\$(cat "$T/delegate-mode")"
 cmd="\${1:-}"; shift || true
 case "\$cmd" in
   run)
-    model=""; prompt=""; model_ruling=""
+    model=""; prompt=""; model_ruling=""; cwd="$PWD"; gate_cmd=""
     while [ \$# -gt 0 ]; do
       case "\$1" in
         --model) model="\$2"; shift 2 ;;
         --model-ruling) model_ruling="\$2"; shift 2 ;;
         --prompt-file) prompt="\$2"; shift 2 ;;
+        --cwd) cwd="\$2"; shift 2 ;;
+        --gate) gate_cmd="\$2"; shift 2 ;;
         *) shift ;;
       esac
     done
@@ -103,12 +105,28 @@ case "\$cmd" in
     status="DONE"
     commits='["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]'
     concerns='null'
+    uncommitted='[]'; dirty_after=false
     if [ "\$slot" = "map" ]; then
       text="\$(cat "$T/map-text")"
       commits='[]'
     else
       text="lane done
 STATUS: DONE"
+    fi
+    if [ "\$mode" = "stray-run" ] && [ "\$slot" = "lane" ]; then
+      mkdir -p "\$cwd/run"
+      printf 'scratch one\\n' >"\$cwd/run/fiber-77-one.log"
+      printf 'scratch two\\n' >"\$cwd/run/fiber-77-two.log"
+      gate_rc=0
+      (cd "\$cwd" && DELEGATE_JOB_ID="\$id" DELEGATE_JOB_CHAIN="\$id" /bin/sh -c "\$gate_cmd") >"$T/gate-test-output" 2>&1 || gate_rc=\$?
+      [ "\$gate_rc" -eq 0 ] || { status="DONE_WITH_CONCERNS"; concerns='["job-end gate failed"]'; }
+      porcelain="\$(git -C "\$cwd" status --porcelain)"
+      if [ -n "\$porcelain" ]; then
+        uncommitted="\$(sed -E 's/^.. //' <<<"\$porcelain" | jq -Rsc 'split("\\n") | map(select(length > 0))')"
+        dirty_after=true
+        status="ERROR"
+        concerns='null'
+      fi
     fi
     if [ "\$mode" = "concerns-lane" ] && [ "\$slot" = "lane" ]; then
       status="DONE_WITH_CONCERNS"
@@ -124,8 +142,8 @@ held: every invariant survived its breaking input"
       commits='[]'
     fi
     mkdir -p "\$jobsdir"
-      jq -n --arg status "\$status" --arg text "\$text" --argjson commits "\$commits" --argjson concerns "\$concerns" --arg cwd "\$PWD" --arg model "\$model" --arg model_ruling "\$model_ruling" \
-        '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log", startedAtMs: 1700000000000, durationMs: 0}, changeSet: {headBefore: "a", headAfter: "b", newCommits: \$commits, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: \$concerns}, supervisorPid: 1, startedAtMs: 1700000000000, endedAtMs: 1700000001000, caller: "test", callerPid: 1, callerCommand: "test", callerCwd: \$cwd, resume: ({model: \$model, backend: "test", cwd: \$cwd, sessionId: "test-session", gate: "", toolIdleMs: 7200000, idleMs: null, wallMs: null, addDirs: []} + (if \$model_ruling == "" then {} else {modelRuling: \$model_ruling} end))}' \
+      jq -n --arg status "\$status" --arg text "\$text" --argjson commits "\$commits" --argjson concerns "\$concerns" --argjson uncommitted "\$uncommitted" --argjson dirty_after "\$dirty_after" --arg cwd "\$PWD" --arg model "\$model" --arg model_ruling "\$model_ruling" \
+        '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log", startedAtMs: 1700000000000, durationMs: 0}, changeSet: {headBefore: "a", headAfter: "b", newCommits: \$commits, uncommittedFiles: \$uncommitted, filesChanged: [], diffstat: "", dirtyAfter: \$dirty_after}, concerns: \$concerns}, supervisorPid: 1, startedAtMs: 1700000000000, endedAtMs: 1700000001000, caller: "test", callerPid: 1, callerCommand: "test", callerCwd: \$cwd, resume: ({model: \$model, backend: "test", cwd: \$cwd, sessionId: "test-session", gate: "", toolIdleMs: 7200000, idleMs: null, wallMs: null, addDirs: []} + (if \$model_ruling == "" then {} else {modelRuling: \$model_ruling} end))}' \
       >"\$jobsdir/\$id.json"
     printf '%s\n' "\$id"
     ;;
@@ -376,6 +394,13 @@ setup_case() {
   rm -rf "$T/inbox" && mkdir -p "$T/inbox"
   cp -R "$CASE_TEMPLATE/." "$CDIR/"
   mkdir -p "$CDIR/run"
+  if [ "$1" = stray-run-tracked ]; then
+    mkdir -p "$CDIR/wt/run"
+    printf 'tracked run content\n' >"$CDIR/wt/run/tracked.txt"
+    git -C "$CDIR/wt" add run/tracked.txt
+    git -C "$CDIR/wt" commit -qm 'track lane run file'
+    git -C "$CDIR/wt" push -q origin tkt-528
+  fi
   WT="$CDIR/wt"
   H="$(git -C "$WT" rev-parse HEAD)"
   printf '%s' "$H" >"$T/prhead"
@@ -508,6 +533,7 @@ grep -q "CLOSING=Resolves #528" "$T/calls.log" || fail "happy: CLOSING reaches t
 grep -q "ATTRIBUTION=Co-authored with Test" "$T/calls.log" || fail "happy: ATTRIBUTION reaches the lane"
 grep -q "^run|id=stub-1|model=codex/test-model|prompt=.*-lane-1.md$" "$T/calls.log" || fail "happy: --lane-model wins"
 grep -q '^quota: provider=codex status=healthy$' <<<"$OUT" || fail "happy: quota pick is reported"
+grep -q '^job|.*--gate-from-plan' "$T/calls.log" || fail "happy: lane tkt-job builds its gate from the plan (stray run handling)"
 brief="$(grep '^run|' "$T/calls.log" | sed 's/.*prompt=//')"
 grep -q "$H" "$brief" || fail "happy: the filled brief holds the base"
 grep -q "Resolves #528" "$brief" || fail "happy: the filled brief holds CLOSING"
@@ -533,6 +559,36 @@ expect_state round 0 happy
 grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is journaled"
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
+
+# --- a lane's untracked root run/ is moved before delegate records its change set ---
+setup_case stray-run-moved
+printf 'keep existing\n' >"$CDIR/run/stray-stub-1-fiber-77-one.log"
+printf 'stray-run' >"$T/delegate-mode"
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
+[ "$RC" -eq 0 ] || fail "stray-run-moved continues after moving scratch logs (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "stray-run-moved"
+[ ! -e "$WT/run/fiber-77-one.log" ] || fail "stray-run-moved: first scratch file is still in the worktree"
+[ ! -e "$WT/run/fiber-77-two.log" ] || fail "stray-run-moved: second scratch file is still in the worktree"
+grep -qx 'keep existing' "$CDIR/run/stray-stub-1-fiber-77-one.log" || fail "stray-run-moved: existing destination was not overwritten"
+grep -qx 'scratch one' "$CDIR/run/stray-stub-1-1-fiber-77-one.log" || fail "stray-run-moved: collision chose a new destination"
+grep -qx 'scratch two' "$CDIR/run/stray-stub-1-fiber-77-two.log" || fail "stray-run-moved: second scratch content is preserved"
+[ "$(grep -c 'tkt-build stray-run moved path=run/fiber-77-' "$CDIR/tkt.journal")" -eq 2 ] || fail "stray-run-moved: journal has one entry for each moved path"
+grep -Fq "destination=$CDIR/run/stray-stub-1-1-fiber-77-one.log" "$CDIR/tkt.journal" || fail "stray-run-moved: journal names the non-colliding destination: $(cat "$CDIR/tkt.journal")"
+jq -e '.result.status == "DONE" and .result.changeSet.uncommittedFiles == [] and .result.changeSet.dirtyAfter == false' "$T/tmp/delegate-jobs/stub-1.json" >/dev/null || fail "stray-run-moved: delegate records the clean tree after the move"
+[ -z "$(git -C "$WT" status --porcelain)" ] || fail "stray-run-moved: worktree is clean before the recorded change set"
+
+# --- a tracked root run/ is left in place and its untracked file still stops ---
+setup_case stray-run-tracked
+printf 'stray-run' >"$T/delegate-mode"
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
+[ "$RC" -eq 1 ] || fail "stray-run-tracked still stops on the dirty worktree (rc=$RC)"
+expect_verdict "TKT tkt-build JOB-ERROR status=ERROR id=stub-1 log=*" "stray-run-tracked"
+[ -f "$WT/run/tracked.txt" ] || fail "stray-run-tracked: tracked file remains in place"
+[ -f "$WT/run/fiber-77-one.log" ] || fail "stray-run-tracked: first untracked file remains in place"
+[ -f "$WT/run/fiber-77-two.log" ] || fail "stray-run-tracked: second untracked file remains in place"
+[ -z "$(find "$CDIR/run" -name 'stray-stub-1-fiber-77-*.log' -print -quit)" ] || fail "stray-run-tracked: no scratch file is moved"
+! grep -q 'tkt-build stray-run moved path=' "$CDIR/tkt.journal" || fail "stray-run-tracked: no move is journaled"
+grep -Fq 'uncommittedFiles: run/' <<<"$OUT" || grep -Fq 'uncommittedFiles: run/fiber-77-' <<<"$OUT" || fail "stray-run-tracked: digest keeps the dirty root run path"
 
 # --- a claim failure at the lane push warns without stopping build/review ---
 setup_case lane-claim-failure

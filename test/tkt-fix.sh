@@ -128,9 +128,15 @@ if [ "\$(cat "$T/jobmode")" = wrapper-death ]; then
   exit 0
 fi
 case "\$(cat "$T/jobmode")" in
-  done)
+  done|stray-run)
     n="\$((\$(cat "$T/jobcount") + 1))"
     printf '%s' "\$n" >"$T/jobcount"
+    if [ "\$(cat "$T/jobmode")" = stray-run ]; then
+      run_dir="\$("$TKT_STATE" "\$state" get run)"
+      mkdir -p "\$wt/run"
+      printf 'fix scratch log\n' >"\$wt/run/fix.log"
+      (cd "\$wt" && DELEGATE_JOB_ID=fix-job-77 bash "$REAL_BIN/lib/tkt-stray-run.sh" "\$state" "\$run_dir") || exit 2
+    fi
     commit_as_job fix.txt "fixed-\$n"
     echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   stalled)
@@ -1726,10 +1732,15 @@ fi
 # Without a Fix gate the fresh job keeps --gate-from-plan and GATE is the full Gate.
 if want fix-gate-fallback; then
 setup_case fix-gate-fallback
+printf 'stray-run' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "fix-gate-fallback exited $?: $(cat "$T/stderr")"
 grep -Fq -- '--gate-from-plan' "$T/calls.log" || fail "fix-gate-fallback did not pass --gate-from-plan: $(cat "$T/calls.log")"
 grep -Fq 'GATE=true' "$T/calls.log" || fail "fix-gate-fallback brief did not retain full gate: $(cat "$T/calls.log")"
 ! grep -Fq 'Fix gate' "$T/stderr" || fail "fix-gate-fallback printed plan-gate's missing-heading note: $(cat "$T/stderr")"
+[ ! -e "$WT/run/fix.log" ] || fail "fix-gate-fallback left the stray log in the worktree"
+grep -qx 'fix scratch log' "$CDIR/run/stray-fix-job-77-fix.log" || fail "fix-gate-fallback did not move the stray log"
+grep -Fq 'tkt-build stray-run moved path=run/fix.log' "$CDIR/tkt.journal" || fail "fix-gate-fallback did not journal the moved log"
+git -C "$WT" show HEAD:fix.txt | grep -qx fixed-1 || fail "fix-gate-fallback did not proceed to commit the fix"
 fi
 
 # --fix-model overrides the stored model for a resume.
