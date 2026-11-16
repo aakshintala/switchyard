@@ -124,6 +124,23 @@ data = {"ok": True, "lines": [
 json.dump(data, open(path, "w"))
 PY
 }
+set_logs_with_user() {
+  local turn="$1" start="$2" end="$3" user_text="$4" assistant_text="$5"
+  python3 - "$T/dlogs" "$turn" "$start" "$end" "$user_text" "$assistant_text" <<'PY'
+import json, sys
+path, turn, start, end, user_text, assistant_text = sys.argv[1:]
+start, end = int(start), int(end)
+lines = [{"kind": "turn.started", "turnId": turn, "at": start}]
+if user_text:
+    lines.append({"kind": "user", "turnId": turn, "text": user_text,
+                  "at": start + (end - start) // 2})
+lines.extend([
+    {"kind": "message", "turnId": turn, "text": assistant_text, "at": end - 1},
+    {"kind": "turn.completed", "turnId": turn, "terminal": "completed", "at": end},
+])
+json.dump({"ok": True, "lines": lines}, open(path, "w"))
+PY
+}
 set_processes() {
   printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n' >"$T/box-procs"
 }
@@ -918,6 +935,98 @@ if [ "$lrc" -eq 0 ] && [ "$(grep -c 'delegate session send' "$T/send-commands" |
   ok unmerged-retire-report-still-wakes
 else
   fail "unmerged-retire-report-still-wakes (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
+fi
+
+# A lanecheck wake is not a new delivery of the ruling it repeats.
+r=$(newrun own-wake-is-not-delivery)
+lane "$r" 7001 fiber-7001-build sid-7001
+mkdir -p "$r/rulings"
+printf 'RULING-7001-1: apply this ruling.\n' >"$r/rulings/ruling-7001-RULING-7001-1.md"
+python3 - "$r/rulings/ruling-7001-RULING-7001-1.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1900, 1900))
+PY
+set_session sid-7001 7001 turn-own-wake completed 2100000
+set_logs_with_user turn-own-wake 2000000 2100000 \
+  "WAKE (lanecheck): ticket #7001, ruling path $r/rulings/ruling-7001-RULING-7001-1.md (missed steer RULING-7001-1)." \
+  'STATUS: DONE'
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 2101); lrc=$?
+if [ "$lrc" -eq 0 ] && [ ! -s "$T/send-commands" ] \
+   && ! printf '%s\n' "$out" | grep -q '^WAKE 7001 .*missed steer'; then
+  ok lanecheck-wake-is-not-ruling-delivery
+else
+  fail "lanecheck-wake-is-not-ruling-delivery (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
+fi
+
+# ACKing a newer archive answers every older ruling for the same ticket.
+r=$(newrun newer-ack-answers-older-ruling)
+lane "$r" 7002 fiber-7002-build sid-7002
+mkdir -p "$r/rulings"
+printf 'RULING-7002-1: older ruling.\n' >"$r/rulings/ruling-7002-RULING-7002-1.md"
+printf 'RULING-7002-2: newer ruling.\n' >"$r/rulings/ruling-7002-RULING-7002-2.md"
+python3 - "$r/rulings/ruling-7002-RULING-7002-1.md" "$r/rulings/ruling-7002-RULING-7002-2.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (2040, 2040))
+os.utime(sys.argv[2], (2050, 2050))
+PY
+set_session sid-7002 7002 turn-newer-ack completed 2100000
+set_logs_with_user turn-newer-ack 2000000 2100000 \
+  'RULING-7002-2: apply the newest ruling.' \
+  $'STATUS: DONE\nACK RULING-7002-2'
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 2101); lrc=$?
+if [ "$lrc" -eq 0 ] && [ ! -s "$T/send-commands" ] \
+   && ! printf '%s\n' "$out" | grep -q '^WAKE 7002 .*missed steer'; then
+  ok newer-ruling-ack-answers-older-archive
+else
+  fail "newer-ruling-ack-answers-older-archive (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
+fi
+
+# A real delivery is sent once, and the answer action survives cap rollover.
+r=$(newrun unacknowledged-answer-once)
+lane "$r" 7003 fiber-7003-build sid-7003
+mkdir -p "$r/rulings"
+printf 'RULING-7003-1: apply this ruling.\n' >"$r/rulings/ruling-7003-RULING-7003-1.md"
+python3 - "$r/rulings/ruling-7003-RULING-7003-1.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1900, 1900))
+PY
+set_session sid-7003 7003 turn-unacknowledged completed 2100000
+set_logs_with_user turn-unacknowledged 2000000 2100000 \
+  'RULING-7003-1: apply this ruling.' 'STATUS: DONE'
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 2101); lrc=$?
+if [ "$lrc" -ne 0 ] || [ "$(grep -c 'delegate session send' "$T/send-commands" || true)" -ne 1 ] \
+   || ! printf '%s\n' "$out" | grep -q '^WAKE 7003 .*missed steer RULING-7003-1'; then
+  fail "unacknowledged-answer-is-sent-once-first-pass (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
+else
+  out=$(run_lanecheck "$r" 5702); lrc=$?
+  if [ "$lrc" -eq 0 ] && [ "$(grep -c 'delegate session send' "$T/send-commands" || true)" -eq 1 ] \
+     && grep -Fq '"answer:ruling-7003-RULING-7003-1.md"' "$r/lanecheck-wake.json"; then
+    ok unacknowledged-answer-remains-once-after-cap-rollover
+  else
+    fail "unacknowledged-answer-remains-once-after-cap-rollover (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
+  fi
+fi
+
+# A fresh final assistant STATUS: HOLD is held like a report's status.
+r=$(newrun assistant-status-hold)
+lane "$r" 7004 fiber-7004-build sid-7004
+set_session sid-7004 7004 turn-assistant-hold completed 1794253010000
+set_logs_with_user turn-assistant-hold 1794253000000 1794253010000 '' \
+  'STATUS: HOLD — waiting for a ruling.'
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 1794253011); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 7004 hold' \
+   && [ ! -s "$T/send-commands" ]; then
+  ok final-assistant-status-hold-waits-without-wake
+else
+  fail "final-assistant-status-hold-waits-without-wake (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
 fi
 
 exit "$rc"

@@ -1880,6 +1880,17 @@ def missed_answers(ticket, start_ms, end_ms, user_messages, assistant_messages, 
     pending_answers = []
     paths = sorted(glob.glob(os.path.join(R, "rulings", f"ruling-{ticket}-*.md")),
                    key=lambda path: os.path.getmtime(path))
+    archives = sorted(ruling_archives.get(ticket, []), key=lambda archive: archive[0])
+    ack_events = []
+    for at, text in assistant_messages:
+        if at is not None:
+            ack_ids = set(re.findall(r"(?im)^\s*ACK\s+(\S+)\s*$", text))
+            if ack_ids:
+                ack_events.append((at / 1000.0, ack_ids))
+    for report_at, text in inbox_reports:
+        ack_ids = set(re.findall(r"(?im)^\s*ACK\s+(\S+)\s*$", text))
+        if ack_ids:
+            ack_events.append((report_at, ack_ids))
     for path in paths:
         try:
             mtime_ms = os.path.getmtime(path) * 1000
@@ -1889,7 +1900,8 @@ def missed_answers(ticket, start_ms, end_ms, user_messages, assistant_messages, 
         ids = archive_ids(content, path)
         for answer_id in sorted(ids):
             delivered = [at for at, text in user_messages
-                         if at is not None and start_ms <= at <= end_ms and answer_id in text]
+                         if at is not None and start_ms <= at <= end_ms
+                         and not text.startswith("WAKE (lanecheck)") and answer_id in text]
             if delivered:
                 delivered_at = min(delivered)
             elif start_ms <= mtime_ms <= end_ms:
@@ -1901,6 +1913,16 @@ def missed_answers(ticket, start_ms, end_ms, user_messages, assistant_messages, 
             acknowledged = acknowledged or any(
                 report_at * 1000 >= delivered_at and answer_id in text
                 for report_at, text in inbox_reports)
+            if not acknowledged:
+                archive_time = mtime_ms / 1000.0
+                for newer_at, newer_path, newer_text in archives:
+                    if newer_at <= archive_time:
+                        continue
+                    newer_ids = archive_ids(newer_text, newer_path)
+                    if any(ack_at >= newer_at and newer_ids.intersection(ack_ids)
+                           for ack_at, ack_ids in ack_events):
+                        acknowledged = True
+                        break
             if not acknowledged:
                 pending_answers.append((delivered_at, answer_id, path, content))
     return sorted(pending_answers, key=lambda answer: (answer[0], answer[1]))
@@ -1914,8 +1936,12 @@ def hold_timestamp(ticket, rep, assistant_messages, lane_started):
     ack_sources = [rep[5]] if fresh_report and len(rep) > 5 else []
     if assistant_messages:
         message_at, message_text = assistant_messages[-1]
-        if (lane_started is None or message_at is None
-                or message_at >= (lane_started - 60) * 1000):
+        fresh_message = (lane_started is None or message_at is None
+                         or message_at >= (lane_started - 60) * 1000)
+        if fresh_message:
+            if re.search(r"(?im)^\s*STATUS\s*:\s*HOLD\b", message_text):
+                held_at.append(message_at / 1000.0 if message_at is not None
+                               else lane_started if lane_started is not None else time.time())
             ack_sources.append(message_text)
     acked = set()
     for source in ack_sources:
@@ -2344,6 +2370,8 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                                                 inbox_reports.get(n, []))
             if answers_to_resend:
                 _, answer_id, answer_path, answer_text = answers_to_resend[0]
+                # This stable basename is persisted in lane_record.handled beyond
+                # the rolling action cap, so a ruling is sent at most once.
                 action_id = "answer:" + os.path.basename(answer_path)
                 reason = f"missed steer {answer_id}"
                 message = (f"WAKE (lanecheck): ticket #{n}, ruling path {answer_path} "
@@ -2364,6 +2392,9 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                 elif result == "unrecorded":
                     print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
                           "could not record the re-send cap, so no message was sent")
+                    wake_done = True
+                elif result == "handled":
+                    print(f"WAITING {n} {host} {sess} — ruling {answer_id} was already sent")
                     wake_done = True
             elif not status_lines:
                 action_id = "silent:" + str(last_turn_id)
