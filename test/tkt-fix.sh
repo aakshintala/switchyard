@@ -491,6 +491,28 @@ write_job_record() {
   fi
 }
 
+run_collect_fix_needs_context() {
+  setup_case collect-fix-needs-context
+  printf ask >"$T/jobmode"
+  run_rc=0; out="$(bash "$TKT" "$S" --no-verify 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 1 ] || fail "NEEDS_CONTEXT fix job exited $run_rc, want 1: $out $(cat "$T/stderr")"
+  grep -q '^TKT tkt-fix ASK id=j1' <<<"$out" || fail "NEEDS_CONTEXT fix job did not return ASK: $out"
+  [ "$(bash "$TKT_STATE" "$S" get job.fix1)" = j1 ] || fail "NEEDS_CONTEXT job was not recorded in fix1"
+  [ "$(bash "$TKT_STATE" "$S" get fixslot)" = 1 ] || fail "NEEDS_CONTEXT did not close fix1"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] || fail "NEEDS_CONTEXT spent a round"
+  write_job_record j1 "$OLD" "$OLD"
+  cp "$S" "$T/state-before-needs-context-collect"
+  cp "${S%.state}.journal" "$T/journal-before-needs-context-collect"
+  : >"$T/calls.log"
+  run_rc=0; bash "$TKT" "$S" --verify --collect-fix j1 >"$T/needs-context.out" 2>"$T/stderr" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "NEEDS_CONTEXT collect exited $run_rc, want 2: $(cat "$T/needs-context.out") $(cat "$T/stderr")"
+  grep -Fq "tkt-fix: --collect-fix j1 is not the job of open slot fix2 (job.fix2=)" "$T/stderr" || fail "NEEDS_CONTEXT collect changed its refusal: $(cat "$T/stderr")"
+  grep -Fq "tkt-fix: job j1 belongs to closed slot fix1 (NEEDS_CONTEXT); resume it with: tkt-fix $S --resume j1 --prompt <answer file>" "$T/stderr" || fail "NEEDS_CONTEXT collect omitted resume hint: $(cat "$T/stderr")"
+  cmp -s "$T/state-before-needs-context-collect" "$S" || fail "NEEDS_CONTEXT collect changed state"
+  cmp -s "$T/journal-before-needs-context-collect" "${S%.state}.journal" || fail "NEEDS_CONTEXT collect changed journal"
+  ! grep -q '^job|' "$T/calls.log" || fail "NEEDS_CONTEXT collect dispatched tkt-job"
+}
+
 prepare_legacy_collect_case() {
   local case_name="$1" job_id="$2" role="$3" review_head="$4" started_at_ms="$5" head_before="${6:-}"
   local head record review_state
@@ -519,6 +541,12 @@ prepare_legacy_collect_case() {
 
 # Selector for the new cases below: empty or unset runs all of them.
 want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
+
+if [ "${CASE:-}" = collect-fix-needs-context ]; then
+  run_collect_fix_needs_context
+  echo "tkt-fix: collect-fix-needs-context passed"
+  exit 0
+fi
 
 write_ruling_comment() {
   local id="$1" body="$2" ruling_issue="${3:-$(bash "$TKT_STATE" "$S" get issue)}" author_association="${4:-OWNER}" created_at="${5:-2026-11-14T00:00:00Z}"
@@ -2277,6 +2305,9 @@ run_rc=0; bash "$TKT" "$S" --verify --collect-fix j2 >"$T/wrong.out" 2>"$T/stder
 grep -Fq 'tkt-fix: --collect-fix j2 is not the job of open slot fix1 (job.fix1=j1)' "$T/stderr" || fail "wrong collect-fix id did not name both ids: $(cat "$T/stderr")"
 cmp -s "$S" "$T/state-before-wrong-collect" || fail "wrong collect-fix id changed state"
 grep -q 'job|' "$T/calls.log" && fail "wrong collect-fix id called tkt-job"
+
+# NEEDS_CONTEXT closes its slot without a round; collect refuses it and names resume.
+if want collect-fix-needs-context; then run_collect_fix_needs_context; fi
 
 # A wrapper dies during the fix-job wait. The job then commits and leaves a
 # completed delegate record; collecting it records and verifies the round.
