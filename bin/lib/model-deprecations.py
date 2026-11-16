@@ -103,8 +103,8 @@ def validate_report(text, today, source):
     for line in skipped_lines:
         if not line.strip():
             continue
-        match = re.fullmatch(r"- ([a-z]+): .+", line)
-        if not match or match.group(1) not in VENDORS | {"all"}:
+        match = re.fullmatch(r"- ([A-Za-z]+): .+", line)
+        if not match or match.group(1).casefold() not in VENDORS | {"all"}:
             fail("invalid skipped entry")
         skip_count += 1
     return row_count, skip_count

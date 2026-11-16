@@ -68,7 +68,7 @@ $source_line
 - gemini: page unavailable (fixture)
 REPORT
         case "${DEPRECATIONS_STUB_MODE:-report}" in
-          capital) sed -i.bak 's/^## anthropic$/## Anthropic/' "$report_path"; rm -f "$report_path.bak" ;;
+          capital) sed -i.bak -e 's/^## anthropic$/## Anthropic/' -e 's/^- gemini: /- Gemini: /' "$report_path"; rm -f "$report_path.bak" ;;
           unknown) sed -i.bak 's/^## anthropic$/## acme/' "$report_path"; rm -f "$report_path.bak" ;;
           duplicate) python3 - "$report_path" <<'PY'
 from pathlib import Path
@@ -132,7 +132,7 @@ grep -q '^| claude-old | deprecated | retirement date | 2026-10-01 (source: http
 grep -q '^| claude-retired | retired | source | https://platform.claude.com/' "$REPORT" || fail "retired row or source missing"
 grep -q '^| claude-new | new | source | https://platform.claude.com/' "$REPORT" || fail "new row or source missing"
 grep -q '^## skipped$' "$REPORT" || fail "skipped section missing"
-grep -q '^- gemini: page unavailable (fixture)$' "$REPORT" || fail "failed page entry missing"
+grep -q '^- Gemini: page unavailable (fixture)$' "$REPORT" || fail "failed page entry missing"
 [ -z "$(find "$INBOX" -maxdepth 1 -name '.model-deprecations-*.tmp' -print -quit)" ] || fail "atomic inbox temporary file was left behind"
 [ -z "$(find "$TMPDIR" -mindepth 1 -print -quit)" ] || fail "delegate scratch directory was left behind"
 [ "$(grep -c '^run ' "$DELEGATE_CALLS")" -eq 1 ] || fail "run did not make exactly one delegate run"

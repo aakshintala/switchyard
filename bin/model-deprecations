@@ -195,6 +195,7 @@ run_deprecations() {
     mkdir -p "$inbox" || return 1
     cp "$scratch" "$inbox/model-deprecations-$today.rejected.md" || return 1
     reason="$(printf '%s\n' "$publish_error" | sed -n 's/^model-deprecations: //p' | tail -n 1)"
+    [ -n "$reason" ] || reason="publish failed"
     python3 -I "$helper" failure "$inbox" "$today" "$source_sha" "" "$reason"
     return 1
   fi
