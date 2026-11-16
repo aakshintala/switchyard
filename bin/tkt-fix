@@ -1150,7 +1150,7 @@ else
     if ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
   fi
   t set fixopen "$knum" # this job's commits may land ahead of head
-  jrc=0; "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
+  jrc=0; TKT_FIX_DISPATCH=1 "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
   if [ "$jrc" -ne 0 ] && [ -n "$resume" ] \
     && grep -Fq -- "unknown job $resume" "$tmp/job.err" \
     && stale_locator_target "$resume"; then
