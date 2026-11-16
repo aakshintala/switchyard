@@ -1472,7 +1472,7 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
         return error_reply("failed", "could not write session state");
     }
     match call(shared, "turn/steer", params) {
-        Ok(result) if msp::ack_disposition(&result) == Disposition::Started => {
+        Ok(result) if steer_ack_started_a_turn(shared.kind, &result) => {
             drop(admission);
             json!({"ok":true,"disposition":"started","commandId":command_id})
         }
@@ -1528,6 +1528,13 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
             error_reply("failed", &message)
         }
     }
+}
+
+/// The Fiber bridge answers a steer that Fiber took as the next turn's
+/// prompt with `started`, once that turn has begun. No other host's steer
+/// ack means that, so theirs wait for the steer to resolve.
+fn steer_ack_started_a_turn(kind: HostKind, result: &Value) -> bool {
+    kind == HostKind::Fiber && msp::ack_disposition(result) == Disposition::Started
 }
 
 fn start_turn(shared: &Arc<Shared>, text: &str) -> Value {
@@ -2145,6 +2152,18 @@ fn error_reply(code: &str, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_fiber_steer_ack_of_started_skips_the_steer_wait() {
+        let started = json!({"disposition":"started"});
+        assert!(steer_ack_started_a_turn(HostKind::Fiber, &started));
+        assert!(!steer_ack_started_a_turn(HostKind::Muse, &started));
+        assert!(!steer_ack_started_a_turn(HostKind::Pi, &started));
+        assert!(!steer_ack_started_a_turn(
+            HostKind::Fiber,
+            &json!({"disposition":"steered"})
+        ));
+    }
 
     #[test]
     fn a_fiber_stop_waits_out_the_bridge_close_and_close_now() {
