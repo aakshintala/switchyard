@@ -10173,6 +10173,42 @@ mod tests {
     }
 
     #[test]
+    fn session_mode_does_not_take_a_forwarded_steer_for_the_prompt() {
+        // Only a `prompt` is the turn's prompt: a steer forwarded after it
+        // keeps its own name, so a late rejection of it is not "prompt".
+        let (path, rx) = spawn_fake(|srv| {
+            fake_session_start(srv);
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            let (steer_id, steer) = recv_id(srv);
+            assert_eq!(steer["command"], "steer");
+            srv.send(&accepted(&steer_id, serde_json::json!({})));
+            srv.send(&rejected(Some(&steer_id), "stale_request", "late"));
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(matches!(
+            link.recv(Duration::from_secs(5)).unwrap(),
+            HubSessionLine::Ready(_)
+        ));
+        link.send(prompt_line("prompt-1")).unwrap();
+        link.send(steer_line("steer-1")).unwrap();
+        let lost = loop {
+            match link.recv(Duration::from_secs(5)).unwrap() {
+                HubSessionLine::Lost(text) => break text,
+                HubSessionLine::Line(_) | HubSessionLine::Ready(_) => {}
+            }
+        };
+        assert!(lost.contains("stale_request"), "{lost}");
+        assert!(!lost.contains("hub rejected prompt"), "{lost}");
+        let received = join_fake(&path, rx);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "steer"]
+        );
+    }
+
+    #[test]
     fn session_reconnect_resends_an_unanswered_steer_with_the_same_id() {
         let (path, rx) = spawn_fake(|srv| {
             fake_session_start(srv);
