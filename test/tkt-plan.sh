@@ -2256,6 +2256,33 @@ expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-h Fi
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-h leaves verifier_round"
 [ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$A" ] || fail "drift-h leaves verified_base"
 
+# A changed plan File also uses the drift slot after two rounds when no confirm ran.
+setup_case drift-files-no-confirm
+mkdir -p "$WT/src"
+wcommit "$WT" src/a.rs "a1"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+A="$(git -C "$WT" rev-parse HEAD)"
+{
+  printf 'Base: %s\n' "$A"
+  printf '\n## Files\n\n- `src/a.rs`\n\n## Tasks\n\n1. Edit `src/a.rs`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "drift-files-no-confirm seed exhausted Verifier count"
+bash "$TKT_STATE" "$S" set verified_base "$A" || fail "drift-files-no-confirm seed verified_base"
+wcommit "$WT" src/a.rs "a2"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+B="$(git -C "$WT" rev-parse HEAD)"
+{
+  printf 'Base: %s\n' "$B"
+  printf '\n## Files\n\n- `src/a.rs`\n\n## Tasks\n\n1. Edit `src/a.rs`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-files-no-confirm exempt verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "drift-files-no-confirm"
+grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "drift-files-no-confirm uses the drift slot"
+[ "$(state_get verifier_round)" = 2 ] || fail "drift-files-no-confirm leaves exhausted Verifier count unchanged"
+[ -z "$(state_get confirmed_for)" ] || fail "drift-files-no-confirm does not invent a confirm"
+
 # --- no resolvable task path: Files paths are the drift fallback ---
 setup_case drift-no-task-path
 mkdir -p "$WT/src"
@@ -2316,6 +2343,32 @@ run_plan verify
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "drift-c2 same-Files edit"
 # Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "drift-c2 starts no job"
+
+# #4767: exhausted rounds and a completed confirm do not block an unchanged
+# plan when its recorded Base moves only for a change outside plan Files.
+setup_case drift-reanchor-no-files
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-reanchor-no-files initial verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+A="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "drift-reanchor-no-files seed exhausted Verifier count"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "drift-reanchor-no-files seed completed confirm"
+mkdir -p "$WT/docs"
+wcommit "$WT" docs/extensions.md "unrelated documentation sentence"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+B="$(git -C "$WT" rev-parse HEAD)"
+set_plan_base "$B"
+[ "$A" != "$B" ] || fail "drift-reanchor-no-files needs a recorded Base change"
+: >"$T/stub.log"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-reanchor-no-files records PLAN OK (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK drift=none log=*" "drift-reanchor-no-files"
+expect_plan_verdict ok "$B" "drift-reanchor-no-files records the unchanged plan at the new Base"
+[ "$(state_get verified_base)" = "$B" ] || fail "drift-reanchor-no-files advances verified_base"
+[ "$(state_get verifier_round)" = 2 ] || fail "drift-reanchor-no-files leaves the exhausted count unchanged"
+[ "$(state_get confirmed_for)" = 2 ] || fail "drift-reanchor-no-files preserves the completed confirm"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" = 0 ] || fail "drift-reanchor-no-files starts no Verifier job"
 
 setup_case drift-e
 rebase_plan
