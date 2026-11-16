@@ -998,6 +998,17 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
 ]' >"$ST/review-comments"
 ship; expect 5 "bare P1 under Not judged refuses despite later open P3"; expect_refused REVIEW; no_merge "bare P1 under Not judged"
 
+# Fixed and Not judged headings remain tolerated by the parser for posted comments.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:129,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed:\n- P3 a.rs:1 (fixed): done\nNot judged:\n- P3 b.rs:2 (not judged): deferred\nOpen:\nP3 c.rs:3 — open finding — fix")}
+]' >"$ST/review-comments"
+ship; expect 0 "Fixed and Not judged headings remain parser-compatible"
+[ "$(jq 'length' "$ST/created-issues")" = 1 ] || fail "only the open P3 is filed when closed headings are tolerated: [$(cat "$ST/created-issues")]"
+! jq -e '[.[].body] | join("\\n") | contains("a.rs:1") or contains("b.rs:2")' "$ST/created-issues" >/dev/null \
+  || fail "closed Fixed and Not judged rows are not filed"
+
 # The P3 issue body and its PR link both redact host paths.
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
