@@ -789,18 +789,36 @@ expect_verdict "TKT tkt-job BLOCKED id=stub-1 reused=stub-1 log=*" "same-head BL
 grep -Fq "tkt-state $S set job.lane ''" <<<"$OUT" || fail "same-head BLOCKED explains slot reset"
 
 # With commits beyond a known plan Base, the reused-job hint resumes only push.
-setup_case same-head-BLOCKED-push-only
+setup_case same-head-NO-COMMITS-push-only
 reset_stub
-make_record stub-1 BLOCKED none 0 2 0
+make_record stub-1 DONE 0 0 2 0
 printf 'Base: %s\n\n## Files\n\n- src/existing.c\n' "$H" >"$CDIR/plan.md"
 bash "$TKT_STATE" "$S" set plan "$CDIR/plan.md" || fail "push-only hint sets plan"
 bash "$TKT_STATE" "$S" set job.lane stub-1 || fail "push-only hint sets job"
 git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m committed-work
-run_job --slot lane
-[ "$RC" -eq 1 ] || fail "push-only reused BLOCKED exits 1"
+run_job --slot lane --expect-commits
+[ "$RC" -eq 1 ] || fail "push-only reused NO-COMMITS exits 1"
 grep -Fq "tkt-job $S --slot lane --resume stub-1 --prompt <file> --gate-from-plan" <<<"$OUT" || fail "push-only reused hint names resume"
 grep -Fq 'prompt asks only for the push step: push the branch and open the PR' <<<"$OUT" || fail "push-only reused hint explains prompt"
 ! grep -Fq "tkt-state $S set job.lane ''" <<<"$OUT" || fail "push-only reused hint avoids state edit"
+
+for kind in GATE-FAIL-with-commits BLOCKED-with-commits; do
+  setup_case "$kind"
+  reset_stub
+  if [ "$kind" = GATE-FAIL-with-commits ]; then
+    make_record stub-1 DONE 1 1 2 0
+  else
+    make_record stub-1 BLOCKED none 0 2 0
+  fi
+  printf 'Base: %s\n\n## Files\n\n- src/existing.c\n' "$H" >"$CDIR/plan.md"
+  bash "$TKT_STATE" "$S" set plan "$CDIR/plan.md" || fail "$kind sets plan"
+  bash "$TKT_STATE" "$S" set job.lane stub-1 || fail "$kind sets job"
+  git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m committed-work
+  run_job --slot lane --expect-commits
+  [ "$RC" -eq 1 ] || fail "$kind exits 1"
+  grep -Fq "tkt-state $S set job.lane ''" <<<"$OUT" || fail "$kind keeps slot-reset hint"
+  ! grep -Fq 'prompt asks only for the push step' <<<"$OUT" || fail "$kind does not give push-only hint"
+done
 
 # --- reused non-zero verdicts name stale heads and explain the next step ---
 for kind in ASK BLOCKED WALL-CAP JOB-ERROR GATE-FAIL CONCERNS NO-COMMITS; do

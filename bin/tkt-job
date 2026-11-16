@@ -736,7 +736,11 @@ $digest" ;;
         else
           hint_base=""
         fi
-        if [ -n "$hint_base" ] && [ "$(git -C "$worktree" rev-list --count "$hint_base..HEAD" 2>/dev/null || printf 0)" -gt 0 ]; then
+        push_only=0
+        case "$verdict" in
+          "NO-COMMITS "*" gate=PASS"*) [ "$slot" = lane ] && push_only=1 ;;
+        esac
+        if [ "$push_only" -eq 1 ] && [ -n "$hint_base" ] && [ "$(git -C "$worktree" rev-list --count "$hint_base..HEAD" 2>/dev/null || printf 0)" -gt 0 ]; then
           digest="hint: this job has finished; a rerun only re-watches it. This verdict is about ${head_after:-unknown}, you are on $twelve; resume the push step with: tkt-job $state --slot $slot --resume $jobid --prompt <file> --gate-from-plan (the prompt asks only for the push step: push the branch and open the PR); journal the reason and continue.
 $digest"
         else

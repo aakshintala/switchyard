@@ -995,18 +995,34 @@ expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "prempty-resumed-la
 grep -Fqx "Repair command: tkt-job $S --slot lane --resume lane-resumable --prompt <file> --gate-from-plan --expect-commits; the resumed lane must finish its push step and open the PR before tkt-build $S --from gate" <<<"$OUT" \
   || fail "prempty-resumed-lane: repair hint keeps expect-commits when branch has no commits beyond Base"
 grep -q "^gate|" "$T/calls.log" && fail "prempty-resumed-lane: the gate never runs"
-# A committed branch uses a push-only resume hint without --expect-commits.
+# A committed branch uses a push-only resume hint only for a DONE lane with a green gate.
 setup_case prempty-resumed-lane-committed
 bash "$TKT_STATE" "$S" set job.lane lane-resumable || fail "prempty-resumed-lane-committed: set lane job"
 printf 'Base: %s\n\n## Files\n\n- src/existing.c\n' "$H" >"$CDIR/plan.md"
 bash "$TKT_STATE" "$S" set plan "$CDIR/plan.md" || fail "prempty-resumed-lane-committed: set plan"
 git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m committed-work
+mkdir -p "$T/lane-records"
+jq -n '{status:"DONE",result:{status:"DONE",gateResult:{passed:true,exitCode:0},changeSet:{newCommits:["deadbeef"]}}}' >"$T/lane-records/lane-resumable.json"
 touch "$T/empty-pr"
-run_build --from gate
+DELEGATE_JOBS_DIR="$T/lane-records" run_build --from gate
 [ "$RC" -eq 2 ] || fail "prempty-resumed-lane-committed exits 2 (rc=$RC)"
 grep -Fq -- "--resume lane-resumable --prompt <file> --gate-from-plan; the prompt asks only for the push step (push the branch and open the PR)" <<<"$OUT" || fail "prempty-resumed-lane-committed: push-only hint"
 ! grep -Fq -- '--expect-commits' <<<"$OUT" || fail "prempty-resumed-lane-committed: omits expect-commits"
 grep -q "^gate|" "$T/calls.log" && fail "prempty-resumed-lane-committed: the gate never runs"
+
+setup_case prempty-resumed-lane-gate-failed
+bash "$TKT_STATE" "$S" set job.lane lane-resumable || fail "prempty-resumed-lane-gate-failed: set lane job"
+printf 'Base: %s\n\n## Files\n\n- src/existing.c\n' "$H" >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan "$CDIR/plan.md" || fail "prempty-resumed-lane-gate-failed: set plan"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m committed-work
+mkdir -p "$T/lane-records"
+jq -n '{status:"DONE",result:{status:"DONE",gateResult:{passed:false,exitCode:1},changeSet:{newCommits:["deadbeef"]}}}' >"$T/lane-records/lane-resumable.json"
+touch "$T/empty-pr"
+DELEGATE_JOBS_DIR="$T/lane-records" run_build --from gate
+[ "$RC" -eq 2 ] || fail "prempty-resumed-lane-gate-failed exits 2 (rc=$RC)"
+grep -Fq -- "--resume lane-resumable --prompt <file> --gate-from-plan --expect-commits; the resumed lane must finish its push step" <<<"$OUT" || fail "prempty-resumed-lane-gate-failed: expect-commits hint"
+! grep -Fq 'prompt asks only for the push step' <<<"$OUT" || fail "prempty-resumed-lane-gate-failed: no push-only hint"
+grep -q "^gate|" "$T/calls.log" && fail "prempty-resumed-lane-gate-failed: the gate never runs"
 
 # --- a failing gate stops the build, which passes its verdict through ---
 setup_case gate-fail
