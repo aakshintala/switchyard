@@ -81,6 +81,8 @@ case "$slot" in
     fi
     ;;
 esac
+fix_dispatch=0
+[ "${TKT_FIX_DISPATCH:-}" != "1" ] || fix_dispatch=1
 unset TKT_FIX_DISPATCH
 # A prompt file only resumes; a resume needs its prompt and takes no fresh
 # brief. A resume may carry a gate; the two gate sources never combine.
@@ -284,6 +286,61 @@ build_gate_from_plan() {
   mv "$stem" "$script"
   write_gate_script "$script" "$stem.log" "$env_prefix" "$gate_cmd" "tkt-job: delegate runs it as the job-end gate"
   gate="bash $script"
+}
+
+# Recheck a failed collected fix gate with tkt-gate when the job head is already
+# pushed. An unpushed head is deferred to tkt-fix, which pushes it before running
+# the same remote-tip gate. The independent job/worktree safety checks remain here.
+retry_failed_fix_gate() {
+  local record_file="$1" head_after current_head dirty commits retry_branch remote_head record_cwd record_worktree worktree_real
+  retry_gate_attempted=0
+  retry_gate_deferred=0
+  retry_gate_reason=""
+  retry_gate_rc=0
+  retry_gate_log=""
+  retry_gate_output=""
+
+  record_cwd="$(jq -r '.resume.cwd // ""' "$record_file" 2>/dev/null || true)"
+  record_worktree="$(cd "$record_cwd" 2>/dev/null && pwd -P)" || {
+    retry_gate_reason="cannot resolve the finished job worktree"; return 1;
+  }
+  worktree_real="$(cd "$worktree" 2>/dev/null && pwd -P)" || {
+    retry_gate_reason="cannot resolve the state worktree"; return 1;
+  }
+  [ "$record_worktree" = "$worktree_real" ] || {
+    retry_gate_reason="finished job worktree does not match the state worktree"; return 1;
+  }
+  head_after="$(jq -r '.result.changeSet.headAfter // ""' "$record_file" 2>/dev/null || true)"
+  current_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  [ -n "$head_after" ] && [ "$head_after" = "$current_head" ] || {
+    retry_gate_reason="worktree HEAD does not match the finished job head"; return 1;
+  }
+  dirty="$(git -C "$worktree" status --porcelain --untracked-files=all 2>/dev/null || printf '?')"
+  [ -z "$dirty" ] || {
+    retry_gate_reason="worktree is not clean at the finished job head"; return 1;
+  }
+  commits="$(jq -r '.result.changeSet.newCommits // [] | length' "$record_file" 2>/dev/null || printf '0')"
+  [ "$commits" -gt 0 ] || {
+    retry_gate_reason="finished job has no recorded commits"; return 1;
+  }
+
+  retry_branch="$(tkt get branch 2>/dev/null || true)"
+  remote_head=""
+  [ -z "$retry_branch" ] || remote_head="$(git -C "$worktree" rev-parse --verify "origin/$retry_branch" 2>/dev/null || true)"
+  if [ "$remote_head" != "$head_after" ]; then
+    retry_gate_deferred=1
+    retry_gate_reason="finished job head is not the fetched origin branch tip"
+    return 0
+  fi
+
+  retry_gate_output="$(mktemp "$run/$namebase-$slot-gate-retry-XXXXXX.out")" || {
+    retry_gate_reason="cannot allocate a tkt-gate retry output"; return 1;
+  }
+  retry_gate_attempted=1
+  "$bin_dir/tkt-gate" "$state" --expect-head "$head_after" >"$retry_gate_output" 2>&1 || retry_gate_rc=$?
+  retry_gate_log="$(sed -n '1s/.* log=//p' "$retry_gate_output")"
+  [ -n "$retry_gate_log" ] || retry_gate_log="$retry_gate_output"
+  return 0
 }
 
 # Prepare the current prompt only when a dispatch needs it (or when comparing a
@@ -576,6 +633,11 @@ fi
 verdict=""
 digest="id=$jobid"
 ec=0
+retry_gate_attempted=0
+retry_gate_deferred=0
+retry_gate_rc=0
+retry_gate_log=""
+retry_gate_output=""
 if [ "$broken" -eq 1 ] || [ ! -f "$record" ]; then
   verdict="UNKNOWN id=$jobid"
   ec=3
@@ -602,6 +664,33 @@ else
     gate_failed=1
     gate_word="FAIL"
   fi
+  retry_gate_attempted=0
+  if [ "$fix_dispatch" -eq 1 ] && [ "$expect_commits" -eq 1 ] && [ "$reused" -eq 1 ] \
+    && [[ "$slot" =~ ^fix[1-9][0-9]*$ ]] && [ "$gate_failed" -eq 1 ] \
+    && [ "$gate_refused" != "true" ]; then
+    case "$status" in
+      DONE|DONE_WITH_CONCERNS)
+        if retry_failed_fix_gate "$record"; then
+          if [ "$retry_gate_deferred" -eq 0 ]; then
+            gate_exit="$retry_gate_rc"
+            gate_path="$retry_gate_log"
+            if [ -r "$retry_gate_output" ]; then
+              gate_tail="$(tail -n 20 "$retry_gate_output")"
+            fi
+            if [ "$retry_gate_rc" -eq 0 ]; then
+              gate_word="PASS"
+              gate_failed=0
+            else
+              gate_word="FAIL"
+              gate_failed=1
+            fi
+          fi
+        else
+          echo "tkt-job: failed fix gate was not rerun: $retry_gate_reason" >&2
+        fi
+        ;;
+    esac
+  fi
   case "$status" in
     NEEDS_CONTEXT) verdict="ASK id=$jobid"; ec=1 ;;
     BLOCKED) verdict="BLOCKED id=$jobid"; ec=1 ;;
@@ -621,8 +710,17 @@ else
       if [ "$status" = "DONE" ] && [ "$slot" = lane ]; then
         tkt set concerns.lane ""
       fi
+      if [ "$retry_gate_deferred" -eq 1 ]; then
+        verdict="GATE-RETRY-PENDING id=$jobid"
+        ec=1
+        if [ "$status" = "DONE_WITH_CONCERNS" ]; then
+          concerns_file="$run/$namebase-concerns-$slot.md"
+          if [ -n "$concerns" ]; then concern_text="$concerns"; else concern_text="$text"; fi
+          printf '%s\n' "$concern_text" >"$concerns_file"
+          tkt set "concerns.$slot" "$concerns_file"
+        fi
       # A refused or failed gate script rules over the status word.
-      if [ "$gate_refused" = "true" ]; then
+      elif [ "$gate_refused" = "true" ]; then
         verdict="GATE-REFUSED rc=$gate_exit gatelog=${gate_path:--}"
         ec=1
       elif [ "$gate_failed" -eq 1 ]; then
@@ -691,6 +789,18 @@ gate=exit=$gate_exit log=${gate_path:- -}"
       digest="$digest
 $(tail -n 10 <<<"$gate_tail")"
     fi
+  fi
+  if [ "$retry_gate_deferred" -eq 1 ]; then
+    digest="$digest
+gateRetry=pending reason=$retry_gate_reason"
+  elif [ "$retry_gate_attempted" -eq 1 ]; then
+    # A STOP-LIST red is not the lane's round; tkt-fix counts only exit=<n>.
+    case "$(head -n 1 "$retry_gate_output" 2>/dev/null)" in
+      "TKT tkt-gate STOP-LIST "*) retry_gate_word=stop-list ;;
+      *) retry_gate_word="exit=$retry_gate_rc" ;;
+    esac
+    digest="$digest
+gateRetry=$retry_gate_word log=$retry_gate_log"
   fi
   if [ -n "$concerns" ]; then
     digest="$digest
