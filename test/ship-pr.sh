@@ -982,6 +982,14 @@ ship; expect 0 "wrapped continuation keeps later fixed bullets closed"
 ! jq -e '.[].body | contains("b.rs:2")' "$ST/created-issues" >/dev/null \
   || fail "later fixed P3 is not filed after a wrapped continuation"
 
+# An indented priority row under a fixed bullet is not a continuation, so the P2 stays open.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:130,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed:\n- P3 a.rs:1 (fixed): done\n  P2 b.rs:2 still broken")}
+]' >"$ST/review-comments"
+ship; expect 5 "indented P2 under a fixed bullet refuses"; expect_refused REVIEW; no_merge "indented P2 under Fixed"
+
 # A colon does not turn extra prose into a Fixed-at-revision heading.
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"

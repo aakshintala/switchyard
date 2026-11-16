@@ -177,7 +177,10 @@ parse_p3_verify_findings() {
       fi
       wrapped_continuation=0
       if [ "$previous_list_item" = 1 ] && [ "$current_list_item" = 0 ] \
-        && [[ "$raw_line" =~ ^[[:space:]]+[^[:space:]] ]]; then
+        && [[ "$raw_line" =~ ^[[:space:]]+[^[:space:]] ]] \
+        && ! [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then
+        # An indented priority row is never a continuation: it ends the
+        # closed section and is read as a finding (fail closed).
         wrapped_continuation=1
       fi
       if section_is_closed "$section" \
