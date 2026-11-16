@@ -1668,7 +1668,6 @@ fn prompt_is_in_turn_started(
         .is_some_and(|items| {
             items.iter().any(|item| {
                 item.get("command_id").and_then(|id| id.as_str()) == Some(prompt.0.as_str())
-                    || item.get("content") == Some(&prompt.1)
             })
         })
 }
@@ -2589,10 +2588,10 @@ impl<'a> Rest<'a> {
         let Some(last) = self.last_seq else {
             return true;
         };
-        match value.get("seq").and_then(|seq| seq.as_u64()) {
-            Some(seq) => seq > last,
-            None => true,
-        }
+        value
+            .get("seq")
+            .and_then(|s| s.as_u64())
+            .is_some_and(|seq| seq > last)
     }
 
     fn fold(&mut self, raw: &[u8]) {
@@ -4296,6 +4295,76 @@ mod tests {
         assert_eq!(
             crate::output::derive_status(&res.text, res.is_error, res.clean_exit),
             crate::types::RunStatus::Done
+        );
+    }
+
+    #[test]
+    fn resumed_fold_drops_seq_less_event_before_turn_started() {
+        let progress_tools = Mutex::new(Vec::new());
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (_, subscribe) = recv_id(srv);
+            assert_eq!(subscribe["command"], "subscribe");
+            assert_eq!(subscribe["session_id"], "s_9");
+            srv.disconnect();
+
+            srv.accept_next();
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (reconnect_id, subscribe) = recv_id(srv);
+            assert_eq!(subscribe["command"], "subscribe");
+            assert_eq!(subscribe["session_id"], "s_9");
+            srv.send(&accepted(&reconnect_id, serde_json::json!({"last_seq": 5})));
+            srv.send(&resumed_session_started_ev(1, Some(true)));
+            srv.send(
+                &serde_json::json!({
+                    "kind": "tool_call_requested",
+                    "session_id": "s_9",
+                    "ts": 1,
+                    "schema_version": 1,
+                    "payload": {"action_id": "a_old", "name": "historical-tool", "arguments": {}},
+                })
+                .to_string(),
+            );
+            srv.send(&ev_for_session(
+                "s_9",
+                "assistant_message_delta",
+                5,
+                serde_json::json!({}),
+            ));
+
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            srv.send(&resumed_turn_started_ev(&prompt_id, 6));
+            srv.send(&resumed_turn_completed_ev(7));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            srv.send(&resumed_exited_ev(8, "DONE"));
+            srv.expect_eof();
+        });
+        let on = |event| {
+            if let Event::Progress(snapshot) = event {
+                progress_tools
+                    .lock()
+                    .expect("progress tools")
+                    .push(snapshot.last_tool);
+            }
+        };
+        let res = run_turn(&resume_request(), &path, &on);
+        let received = join_fake(&path, rx);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(
+            received_commands(&received),
+            ["subscribe", "subscribe", "prompt", "close"]
+        );
+        assert!(
+            !progress_tools
+                .lock()
+                .expect("progress tools")
+                .iter()
+                .any(|tool| tool.as_deref() == Some("historical-tool")),
+            "the seq-less replayed tool must neither be folded nor delivered"
         );
     }
 
@@ -6082,6 +6151,60 @@ mod tests {
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "prompt", "subscribe", "close"]
+        );
+    }
+
+    #[test]
+    fn earlier_identical_prompt_is_not_mistaken_for_ours_on_reconnect() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 0})));
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            srv.disconnect();
+
+            srv.accept_next();
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (reconnect_id, subscribe) = recv_id(srv);
+            assert_eq!(subscribe["command"], "subscribe");
+            assert_eq!(subscribe["args"]["level"], "full");
+            srv.send(&accepted(&reconnect_id, serde_json::json!({"last_seq": 2})));
+            // This earlier turn has the same content as our prompt but a different command id.
+            srv.send(&turn_started_ev("c_earlier_prompt", 2));
+
+            let (resent_id, resent) = recv_id(srv);
+            assert_eq!(resent["command"], "prompt");
+            assert_eq!(resent_id, prompt_id);
+            assert_eq!(resent["args"]["content"], prompt["args"]["content"]);
+            srv.send(&accepted(&resent_id, serde_json::json!({})));
+            srv.send(&turn_started_ev(&resent_id, 3));
+            srv.send(&turn_completed_ev(4, "completed", None));
+
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            srv.send(&exited_ev(5, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        let res = run_turn(&hub_request(), &path, &|_| {});
+        let received = join_fake(&path, rx);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(
+            received_commands(&received),
+            [
+                "start",
+                "subscribe",
+                "prompt",
+                "subscribe",
+                "prompt",
+                "close"
+            ]
         );
     }
 
