@@ -17,7 +17,9 @@
 #     --state supplies the ticket state whose fence is shown to reviewers.
 #     --overbuild-model is required only when overbuild is listed.
 #     --full-rereview is review mode only; it skips the comment check.
-#   review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]
+#   review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--ruling COMMENT_ID]... [--context PATH]... [--workflow-doc PATH] [--head SHA]
+#     --ruling fetches a recorded issue comment, requires refutes: evidence,
+#     and stages the comment under .review-context/ruling-<id>.md.
 #     --since is the reviewed head; verify diffs from its repair base on current base.
 #     Posted review-pr rounds from --since onward are appended; FINDINGS_FILE
 #     carries what was never posted: CI and mutant findings, rulings and refutations.
@@ -28,8 +30,8 @@
 #     with every id spelled out, and returns at once. Wait for the ids with the
 #     delegation tool's wait command (delegate watch), in the wait mode your
 #     harness instructions prescribe.
-#     --verify ignores --issue, --spec and --overbuild-model, one stderr note each
-#     (--axes too, when passed). A non-empty PR body is provided automatically;
+#     --verify ignores --issue, --spec and --overbuild-model for review input;
+#     with --ruling, the first --issue identifies the ticket comment. A non-empty PR body is provided automatically;
 #     --context files are added alongside it.
 #   review-pr collect <job-id>... [--findings-out PATH]
 #     posts the one PR comment with the patch-id, prints the verdict digest,
@@ -79,8 +81,9 @@ set -euo pipefail
 
 usage() {
   echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] [--state PATH] --model M [--overbuild-model M2] [--axes standards[,spec][,overbuild]] [--context PATH]... [--workflow-doc PATH] [--head SHA] [--model-ruling URL] [--full-rereview REASON]" >&2
-  echo "       review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]" >&2
+  echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--ruling COMMENT_ID]... [--context PATH]... [--workflow-doc PATH] [--head SHA]" >&2
   echo "       review-pr run <same args as start>" >&2
+  echo "       review-pr run <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--ruling COMMENT_ID]... [--context PATH]... [--workflow-doc PATH] [--head SHA]" >&2
   echo "       review-pr collect <job-id>... [--findings-out PATH]" >&2
   exit 2
 }
@@ -95,6 +98,9 @@ done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 . "$script_dir/lib/verify-section.sh"
 . "$script_dir/lib/review-verdict.sh"
+. "$script_dir/lib/findings-history.sh"
+. "$script_dir/lib/ruling-comment.sh"
+. "$script_dir/lib/ruling-refutes.sh"
 skills_dir="$(dirname "$script_dir")/skills"
 briefs_dir="$skills_dir/review-loop/briefs"
 fill_brief="$script_dir/fill-brief"
@@ -488,7 +494,7 @@ cmd_start() {
   case "$pr" in -*|"") usage;; esac
 
   repo=""; clone=""; issues=(); issue_count=0; specn=""; model=""; omodel=""; model_ruling=""
-  verify=""; since=""; since_full=""; wdoc=""; head=""; axes=""; axes_given=""; context_files=(); ticket_state=""
+  verify=""; since=""; since_full=""; wdoc=""; head=""; axes=""; axes_given=""; context_files=(); ticket_state=""; ruling_requested=()
   patch_id=""
   full_rereview=""; full_rereview_given=""
   while [ $# -gt 0 ]; do
@@ -530,6 +536,7 @@ cmd_start() {
       --model-ruling) [ $# -ge 2 ] || usage; model_ruling="$2"; shift 2;;
       --axes) [ $# -ge 2 ] || usage; axes="$2"; axes_given="1"; shift 2;;
       --verify) [ $# -ge 2 ] || usage; verify="$2"; shift 2;;
+      --ruling) [ $# -ge 2 ] || usage; ruling_requested[${#ruling_requested[@]}]="$2"; shift 2;;
       --since) [ $# -ge 2 ] || usage; since="$2"; shift 2;;
       --context) [ $# -ge 2 ] || usage; context_files[${#context_files[@]}]="$2"; shift 2;;
       --workflow-doc) [ $# -ge 2 ] || usage; wdoc="$2"; shift 2;;
@@ -539,6 +546,23 @@ cmd_start() {
     esac
   done
 
+  ruling_ids=()
+  if [ "${#ruling_requested[@]}" -gt 0 ]; then
+    if [ -z "$verify" ]; then
+      echo "review-pr: --ruling is valid only with --verify" >&2
+      exit 2
+    fi
+    for ruling_id in "${ruling_requested[@]}"; do
+      case "$ruling_id" in
+        ''|*[!0-9]*) echo "review-pr: invalid --ruling comment id: $ruling_id" >&2; exit 2;;
+      esac
+      duplicate=0
+      for seen_ruling_id in ${ruling_ids[@]+"${ruling_ids[@]}"}; do
+        [ "$seen_ruling_id" != "$ruling_id" ] || duplicate=1
+      done
+      [ "$duplicate" -eq 1 ] || ruling_ids[${#ruling_ids[@]}]="$ruling_id"
+    done
+  fi
   [ -n "$repo" ] || usage
   [ -n "$clone" ] && [ -d "$clone" ] || usage
   [ -n "$model" ] || usage
@@ -613,7 +637,11 @@ cmd_start() {
     fi
     # Start-only flags are ignored in verify mode, one note per flag.
     if [ "$issue_count" -gt 0 ]; then
-      echo "review-pr: --issue is not used with --verify; ignored" >&2
+      if [ "${#ruling_ids[@]}" -gt 0 ]; then
+        echo "review-pr: --issue identifies the ticket issue for --ruling; it does not add ticket context to verify findings" >&2
+      else
+        echo "review-pr: --issue is not used with --verify; ignored" >&2
+      fi
     fi
     if [ -n "$specn" ]; then
       echo "review-pr: --spec is not used with --verify; ignored" >&2
@@ -688,15 +716,6 @@ cmd_start() {
       overbuild) printf '%s' "$omodel";;
     esac
   }
-  # Refuse before creating any role worktree or starting any job.
-  for role in $roles; do
-    if [ -n "$model_ruling" ]; then
-      delegate model-check "$(model_for "$role")" --model-ruling "$model_ruling"
-    else
-      delegate model-check "$(model_for "$role")"
-    fi || exit $?
-  done
-
   if [ -n "$head" ]; then
     if [ "${#head}" -lt 40 ]; then
       resolved="$(git -C "$clone" rev-parse --verify --quiet "$head^{commit}" 2>/dev/null)" || true
@@ -923,6 +942,54 @@ cmd_start() {
     else
       printf 'No posted review-pr rounds were found.\n' >>"$verify_round_file"
     fi
+    ruling_refute_ids=()
+    ruling_refute_urls=()
+    ruling_refute_prefixes=()
+    ruling_refute_bases=()
+    verify_for_job="$verify"
+    if [ "${#ruling_ids[@]}" -gt 0 ]; then
+      issue="$pr"
+      ruling_alt_issue=""
+      if [ "$issue_count" -gt 0 ]; then
+        issue="${issues[0]}"
+        ruling_alt_issue="$pr"
+      fi
+      for ruling_id in "${ruling_ids[@]}"; do
+        ruling_json="$run_dir/ruling-$ruling_id.json"
+        ruling_error="$run_dir/ruling-$ruling_id.err"
+        if ! fetch_issue_comment "$ruling_id" "$ruling_json" "$ruling_error" "$ruling_alt_issue"; then
+          detail="$ruling_comment_failure"
+          [ -z "${ruling_comment_error:-}" ] || detail="$detail: $ruling_comment_error"
+          echo "review-pr: refusing --ruling $ruling_id: issue comment $detail" >&2
+          exit 2
+        fi
+        ruling_body="$review_context/ruling-$ruling_id.md"
+        if ! jq -r '.body' "$ruling_json" >"$ruling_body"; then
+          echo "review-pr: refusing --ruling $ruling_id: could not read the issue comment body" >&2
+          exit 2
+        fi
+        ruling_url="$(jq -r '.html_url // ""' "$ruling_json")"
+        ruling_refutes_file="$run_dir/ruling-$ruling_id.refutes"
+        grep '^refutes:' "$ruling_body" >"$ruling_refutes_file" || true
+        if [ ! -s "$ruling_refutes_file" ]; then
+          echo "review-pr: refusing --ruling $ruling_id: issue comment has no column-0 refutes: line" >&2
+          exit 2
+        fi
+        if ! ruling_refutes_validate_file \
+          "$ruling_id" "$ruling_url" "$ruling_refutes_file" \
+          history "$verify_round_file" current "$verify"; then
+          echo "review-pr: refusing --ruling $ruling_id: $ruling_refutes_failure${ruling_refutes_failure_prefix:+: $ruling_refutes_failure_prefix}" >&2
+          [ -z "$ruling_refutes_hint" ] || echo "review-pr: $ruling_refutes_hint" >&2
+          exit 2
+        fi
+      done
+      if ! ruling_refutes_prepare "$verify" "$run_dir/findings-with-rulings.md" \
+        "$run_dir/findings-with-rulings-marked.md"; then
+        echo "review-pr: refusing --ruling: could not prepare findings for ${ruling_refutes_drift_id:-the recorded ruling} (${ruling_refutes_prepare_failure:-unknown})" >&2
+        exit 2
+      fi
+      verify_for_job="$run_dir/findings-with-rulings.md"
+    fi
     if ! old_mb="$(git -C "$clone" merge-base "$since_full" "$base_tip")"; then
       echo "review-pr: cannot find the old merge-base for --since $since_full and $base_tip" >&2
       exit 1
@@ -972,12 +1039,22 @@ cmd_start() {
           if (in_finding && !refuted) unrefuted = 1
           exit unrefuted ? 0 : 1
         }
-      ' "$verify"; then
-        echo "review-pr: verify has an empty repair diff and an unrefuted finding; push the repair, add a refuted: <evidence> line to each finding refuted by evidence, or for a recorded issue-comment ruling run tkt-fix <state> --verify --ruling <comment id>, or for a recorded ruling with no code change run ship-pr --unverified-fixes <findings file>" >&2
+      ' "$verify_for_job"; then
+        echo "review-pr: verify has an empty repair diff and an unrefuted finding; push the repair, add a refuted: <evidence> line to each finding refuted by evidence, for a recorded issue-comment ruling run review-pr run $pr --repo $repo --cwd $clone --model $model --verify <findings file> --since $since_full [--issue <ticket>] --ruling <comment id>, or run tkt-fix <state> --verify --ruling <comment id>; for a recorded ruling with no code change run ship-pr --unverified-fixes <findings file>" >&2
         exit 1
       fi
     fi
   fi
+
+  # Delegate policy checks stay before any job is started, after ruling input
+  # has been fetched and validated so a malformed ruling invokes no delegate.
+  for role in $roles; do
+    if [ -n "$model_ruling" ]; then
+      delegate model-check "$(model_for "$role")" --model-ruling "$model_ruling"
+    else
+      delegate model-check "$(model_for "$role")"
+    fi || exit $?
+  done
 
   jids=""
   started_ids=()
@@ -1006,7 +1083,7 @@ cmd_start() {
         ;;
       verify)
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" "SKILLS=$skills_dir" \
-          "CHECKOUT=$wt" "SINCE=$since" "FINDINGS=@$verify" "POSTED_ROUNDS=@$verify_round_file" >"$brief"
+          "CHECKOUT=$wt" "SINCE=$since" "FINDINGS=@$verify_for_job" "POSTED_ROUNDS=@$verify_round_file" >"$brief"
         ;;
     esac
     if [ "$mode" = "review" ] && [ -f "$review_context/pr-body.md" ]; then
@@ -1037,8 +1114,11 @@ cmd_start() {
       if [ -f "$review_context/pr-body.md" ]; then
         cp "$review_context/pr-body.md" "$wt/.review-context/pr-body.md"
       fi
+      for ruling_id in "${ruling_ids[@]+${ruling_ids[@]}}"; do
+        cp "$review_context/ruling-$ruling_id.md" "$wt/.review-context/ruling-$ruling_id.md"
+      done
     fi
-    if [ "${#context_files[@]}" -gt 0 ] || { [ "$mode" = "verify" ] && [ -f "$review_context/pr-body.md" ]; }; then
+    if [ "${#context_files[@]}" -gt 0 ] || [ "${#ruling_ids[@]}" -gt 0 ] || { [ "$mode" = "verify" ] && [ -f "$review_context/pr-body.md" ]; }; then
       mkdir -p "$wt/.review-context"
       {
         if [ "$mode" = "verify" ]; then
@@ -1046,6 +1126,9 @@ cmd_start() {
           if [ -f "$review_context/pr-body.md" ]; then
             printf '.review-context/pr-body.md\n'
           fi
+          for ruling_id in "${ruling_ids[@]+${ruling_ids[@]}}"; do
+            printf '.review-context/ruling-%s.md\n' "$ruling_id"
+          done
         else
           printf '\nContext files outside the checkout, copied into your working directory (read them as needed):\n'
         fi
