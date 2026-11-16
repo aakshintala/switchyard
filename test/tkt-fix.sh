@@ -1849,12 +1849,6 @@ setup_case fix-gate-fallback-gate-script
 mkdir -p "$T/tmp/delegate-jobs" "$T/no-system-jobs"
 printf 'Grant 1\n\nTicket: 529\nPart: 1\nPaths:\n- fix.txt\nRanges: none\n' >"$CDIR/run/fiber-529-fence-grant-test.md"
 printf 'test brief\n' >"$T/gate-test-brief.md"
-cat >"$T/bin/tkt-job" <<EOF
-#!/usr/bin/env bash
-printf 'real-job|%s\\n' "\$*" >>"$T/calls.log"
-exec "$REAL_BIN/tkt-job" "\$@"
-EOF
-chmod +x "$T/bin/tkt-job"
 cat >"$T/bin/delegate" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail

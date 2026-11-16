@@ -156,6 +156,15 @@ grep -q '^# Model deprecations 2026-05-04$' "$CONCERNS_REPORT" || fail "DONE_WIT
 grep -q '^## concerns$' "$CONCERNS_REPORT" || fail "DONE_WITH_CONCERNS report has no concerns section"
 grep -Fq 'Synthetic concern: one source needs follow-up.' "$CONCERNS_REPORT" || fail "delegate result text was not appended"
 
+# A DONE_WITH_CONCERNS job with empty result text publishes the report without a concerns heading.
+EMPTY_CONCERNS_INBOX="$T/empty-concerns-inbox"
+DEPRECATIONS_STATUS=DONE_WITH_CONCERNS DEPRECATIONS_RESULT_TEXT='' \
+  MODEL_CATALOG_INBOX="$EMPTY_CONCERNS_INBOX" bash "$BIN" run >"$T/empty-concerns.out" 2>"$T/empty-concerns.err" \
+  || fail "DONE_WITH_CONCERNS empty-text report failed: $(cat "$T/empty-concerns.err")"
+EMPTY_CONCERNS_REPORT="$EMPTY_CONCERNS_INBOX/model-deprecations-2026-05-04.md"
+[ -f "$EMPTY_CONCERNS_REPORT" ] || fail "DONE_WITH_CONCERNS empty-text report was not published"
+! grep -q '^## concerns$' "$EMPTY_CONCERNS_REPORT" || fail "empty result text left an empty concerns heading"
+
 # A non-empty no-change report is still published for DONE_WITH_CONCERNS.
 NO_CHANGE_CONCERNS_INBOX="$T/no-change-concerns-inbox"
 DEPRECATIONS_STUB_MODE=empty DEPRECATIONS_STATUS=DONE_WITH_CONCERNS DEPRECATIONS_RESULT_TEXT='Synthetic concern for no-change report.' \

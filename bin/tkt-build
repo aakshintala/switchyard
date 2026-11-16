@@ -112,7 +112,7 @@ repair_hint() {
         lane_status="$(jq -r '.status // .result.status // empty' "$lane_record" 2>/dev/null || true)"
         lane_gate_passed="$(jq -r '.result.gateResult.passed == true and .result.gateResult.refused != true' "$lane_record" 2>/dev/null || true)"
         if [ "$lane_status" = DONE ] && [ "$lane_gate_passed" = true ] && plan_has_commits_beyond_base "$worktree" "${base:-}"; then
-          printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan; the prompt asks for one push-only action: push the branch and open the PR, then run tkt-build %s --from gate\n' "$state" "$lane_job" "$state"
+          printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan; %s, then run tkt-build %s --from gate\n' "$state" "$lane_job" "$(plan_push_only_hint)" "$state"
         else
           printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan --expect-commits; the resumed lane must finish its push step and open the PR before tkt-build %s --from gate\n' "$state" "$lane_job" "$state"
         fi
