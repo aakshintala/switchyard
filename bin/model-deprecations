@@ -114,7 +114,7 @@ install_weekly() {
 }
 
 run_deprecations() {
-  local model today source_sha scratch delegate_output job_id rc inbox status_output delegate_status concerns_file record
+  local model today source_sha scratch delegate_output job_id rc inbox status_output delegate_status concerns_file record publish_args publish_error reason
   RUN_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/model-deprecations.XXXXXX")"
   trap cleanup_run EXIT
   scratch="$RUN_TMP_DIR/report.md"
