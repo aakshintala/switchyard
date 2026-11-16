@@ -32,6 +32,18 @@ unset DELEGATE_JOBS_DIR TKT_FIX_DISPATCH
 ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
+cat >"$T/bin/tkt-gate" <<EOF
+#!/usr/bin/env bash
+printf 'tkt-gate|%s\\n' "\$*" >>"$T/gate-recheck-calls.log"
+head="\$(cat "$T/gate-recheck-head")"
+log="$T/gate-retry.log"
+case "\$(cat "$T/gate-recheck-mode")" in
+  pass) printf 'gate passed\\n' >"\$log"; printf 'TKT tkt-gate PASS head=%s log=%s\\n' "\$head" "\$log"; exit 0 ;;
+  fail) printf 'gate still fails\\n' >"\$log"; printf 'TKT tkt-gate FAIL rc=9 log=%s\\n' "\$log"; exit 1 ;;
+esac
+exit 2
+EOF
+chmod +x "$T/bin/tkt-gate"
 ln -s "$REAL_BIN/fence-grant" "$T/home/.agents/bin/fence-grant" || fail "symlink default fence-grant"
 cat >"$T/bin/gh-self-grant" <<'GH'
 #!/usr/bin/env bash
@@ -626,23 +638,23 @@ grep -q "reviewer is uneasy" <<<"$OUT" || fail "GATE-FAIL digest carries concern
 if bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "GATE-FAIL does not save concerns.lane"; fi
 
 prepare_failed_fix_gate_recheck() {
-  local case_name="$1" mode="$2" gate_script original_log gate_command
+  local case_name="$1" mode="$2" original_log
   setup_case "$case_name"
   reset_stub
   make_record stub-1 DONE_WITH_CONCERNS 3 1 3 4
-  gate_script="$CDIR/run/switchyard-502-fix1-gate-original.sh"
   original_log="$CDIR/original-gate-failure.log"
   printf 'original failed gate output\n' >"$original_log"
   printf '%s' "$mode" >"$T/gate-recheck-mode"
-  gate_command="if [ \"\$(cat '$T/gate-recheck-mode')\" = pass ]; then printf 'gate passed\\n'; else printf 'gate still fails\\n'; exit 9; fi"
-  write_gate_script "$gate_script" "$original_log" "" "$gate_command" \
-    "tkt-job: delegate runs it as the job-end gate"
-  jq --arg head "$H" --arg cwd "$WT" --arg gate "bash $gate_script" --arg output "$original_log" \
+  printf '%s' "$H" >"$T/gate-recheck-head"
+  git init -q --bare "$CDIR/origin.git"
+  git -C "$WT" remote add origin "$CDIR/origin.git"
+  git -C "$WT" push -q origin HEAD:refs/heads/tkt-job
+  git -C "$WT" fetch -q origin refs/heads/tkt-job:refs/remotes/origin/tkt-job
+  jq --arg head "$H" --arg cwd "$WT" --arg output "$original_log" \
     '.result.changeSet.headBefore = $head
      | .result.changeSet.headAfter = $head
      | .result.gateResult.outputPath = $output
-     | .resume.cwd = $cwd
-     | .resume.gate = $gate' "$T/records/stub-1.json" \
+     | .resume.cwd = $cwd' "$T/records/stub-1.json" \
     >"$T/records/stub-1.json.tmp" \
     && mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json" \
     || fail "$case_name: prepare recorded failed-gate job"
@@ -660,21 +672,20 @@ unset TKT_FIX_DISPATCH
 expect_verdict "TKT tkt-job CONCERNS id=stub-1 reused=stub-1 log=*" "fix failed-gate retry"
 grep -Fq 'gateRetry=exit=0 log=' <<<"$OUT" || fail "fix failed-gate retry did not report its passing gate"
 retry_log="$(sed -n 's/^gateRetry=exit=0 log=//p' <<<"$OUT")"
-[ -r "$retry_log" ] && grep -Fq 'gate passed' "$retry_log" || fail "fix failed-gate retry did not execute the gate"
+[ -r "$retry_log" ] && grep -Fq 'gate passed' "$retry_log" || fail "fix failed-gate retry did not run tkt-gate (path=$retry_log output=$OUT)"
 cmp -s <(printf 'original failed gate output\n') "$original_log" || fail "fix failed-gate retry overwrote the original failure log"
 [ "$(jq -r '.result.gateResult.exitCode' "$T/records/stub-1.json")" = 3 ] || fail "fix failed-gate retry rewrote the immutable job record"
 grep -q '^watch|stub-1$' "$T/stub.log" || fail "fix failed-gate retry did not watch the stored job"
 ! grep -q '^run|' "$T/stub.log" || fail "fix failed-gate retry dispatched another job"
-grep -q 'tkt-job gate retry slot=fix1 job=stub-1 exit=0' "${S%.state}.journal" || fail "fix failed-gate retry did not journal its result"
+grep -Fq "tkt-gate|$S --expect-head $H" "$T/gate-recheck-calls.log" || fail "fix failed-gate retry did not call tkt-gate at the finished head"
 
 prepare_failed_fix_gate_recheck fix-failed-gate-recheck-fails fail
 export TKT_FIX_DISPATCH=1
 run_job --slot fix1 --expect-commits
 unset TKT_FIX_DISPATCH
 [ "$RC" = 1 ] || fail "still-failing fix gate exits 1"
-expect_verdict "TKT tkt-job GATE-FAIL rc=9 gatelog=*" "still-failing fix gate retry"
-grep -Fq 'gateRetry=exit=9 log=' <<<"$OUT" || fail "still-failing fix gate retry did not report its failure"
-grep -q 'tkt-job gate retry slot=fix1 job=stub-1 exit=9' "${S%.state}.journal" || fail "still-failing fix gate retry did not journal its result"
+expect_verdict "TKT tkt-job GATE-FAIL rc=1 gatelog=$T/gate-retry.log*reused=stub-1 log=*" "still-failing fix gate retry"
+grep -Fq "gateRetry=exit=1 log=$T/gate-retry.log" <<<"$OUT" || fail "still-failing fix gate retry did not report its failure"
 
 # --- DONE with a failed gate is a GATE-FAIL too: the script exit rules ---
 setup_case done-badgate

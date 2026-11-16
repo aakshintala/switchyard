@@ -288,103 +288,58 @@ build_gate_from_plan() {
   gate="bash $script"
 }
 
-# Recheck a failed gate from a finished tkt-fix job without dispatching the job
-# again. Only rerun the generated job-end script for the exact recorded head in
-# a clean worktree; the retry gets its own log so the first failure is retained.
+# Recheck a failed collected fix gate with tkt-gate when the job head is already
+# pushed. An unpushed head is deferred to tkt-fix, which pushes it before running
+# the same remote-tip gate. The independent job/worktree safety checks remain here.
 retry_failed_fix_gate() {
-  local record_file="$1" record_gate record_cwd record_worktree worktree_real run_real
-  local source_script source_dir source_name source_log_line retry_stem retry_script retry_log retry_output
-  local head_after current_head dirty_after dirty retry_log_line
+  local record_file="$1" head_after current_head dirty commits retry_branch remote_head record_cwd record_worktree worktree_real
   retry_gate_attempted=0
+  retry_gate_deferred=0
   retry_gate_reason=""
   retry_gate_rc=0
   retry_gate_log=""
-
-  record_gate="$(jq -r '.resume.gate // ""' "$record_file" 2>/dev/null || true)"
-  case "$record_gate" in
-    "bash "*) source_script="${record_gate#bash }" ;;
-    *) retry_gate_reason="stored job has no tkt-job gate script"; return 1 ;;
-  esac
-  case "$source_script" in *[[:space:]]*|*';'*|*'|'*|*'&'*)
-    retry_gate_reason="stored gate is not a single tkt-job script path"; return 1 ;;
-  esac
-  [ -f "$source_script" ] && [ -r "$source_script" ] || {
-    retry_gate_reason="stored tkt-job gate script is missing or unreadable"; return 1;
-  }
-  [ ! -L "$source_script" ] || {
-    retry_gate_reason="stored tkt-job gate script is a symlink"; return 1;
-  }
-  source_dir="$(cd "$(dirname "$source_script")" 2>/dev/null && pwd -P)" || {
-    retry_gate_reason="cannot resolve stored tkt-job gate script directory"; return 1;
-  }
-  source_name="$(basename "$source_script")"
-  run_real="$(cd "$run" 2>/dev/null && pwd -P)" || {
-    retry_gate_reason="cannot resolve the ticket run directory"; return 1;
-  }
-  [ "$source_dir" = "$run_real" ] || {
-    retry_gate_reason="stored tkt-job gate script is outside the ticket run directory"; return 1;
-  }
-  case "$source_name" in
-    "$namebase-$slot-gate-"*.sh) ;;
-    *) retry_gate_reason="stored gate script does not belong to $slot"; return 1 ;;
-  esac
-  [ "$(sed -n '2p' "$source_script")" = '# Written by tkt-job: delegate runs it as the job-end gate.' ] || {
-    retry_gate_reason="stored gate script has an unexpected header"; return 1;
-  }
-  source_log_line="$(sed -n '3p' "$source_script")"
-  case "$source_log_line" in log=*) ;; *) retry_gate_reason="stored gate script has no log assignment"; return 1 ;; esac
+  retry_gate_output=""
 
   record_cwd="$(jq -r '.resume.cwd // ""' "$record_file" 2>/dev/null || true)"
   record_worktree="$(cd "$record_cwd" 2>/dev/null && pwd -P)" || {
-    retry_gate_reason="cannot resolve the stored job worktree"; return 1;
+    retry_gate_reason="cannot resolve the finished job worktree"; return 1;
   }
   worktree_real="$(cd "$worktree" 2>/dev/null && pwd -P)" || {
     retry_gate_reason="cannot resolve the state worktree"; return 1;
   }
   [ "$record_worktree" = "$worktree_real" ] || {
-    retry_gate_reason="stored job worktree does not match the state worktree"; return 1;
+    retry_gate_reason="finished job worktree does not match the state worktree"; return 1;
   }
   head_after="$(jq -r '.result.changeSet.headAfter // ""' "$record_file" 2>/dev/null || true)"
   current_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
   [ -n "$head_after" ] && [ "$head_after" = "$current_head" ] || {
     retry_gate_reason="worktree HEAD does not match the finished job head"; return 1;
   }
-  dirty_after="$(jq -r '.result.changeSet.dirtyAfter == false' "$record_file" 2>/dev/null || true)"
-  [ "$dirty_after" = true ] || {
-    retry_gate_reason="finished job record does not prove a clean worktree"; return 1;
-  }
   dirty="$(git -C "$worktree" status --porcelain --untracked-files=all 2>/dev/null || printf '?')"
   [ -z "$dirty" ] || {
     retry_gate_reason="worktree is not clean at the finished job head"; return 1;
   }
-  [ "$(jq -r '.result.changeSet.newCommits // [] | length' "$record_file" 2>/dev/null || printf '0')" -gt 0 ] || {
+  commits="$(jq -r '.result.changeSet.newCommits // [] | length' "$record_file" 2>/dev/null || printf '0')"
+  [ "$commits" -gt 0 ] || {
     retry_gate_reason="finished job has no recorded commits"; return 1;
   }
 
-  retry_stem="$(mktemp "$run_real/$namebase-$slot-gate-retry-XXXXXX")" || {
-    retry_gate_reason="cannot allocate a gate retry log"; return 1;
-  }
-  rm -f "$retry_stem" || {
-    retry_gate_reason="cannot prepare a gate retry log"; return 1;
-  }
-  retry_script="$retry_stem.sh"
-  retry_log="$retry_stem.log"
-  retry_output="$retry_stem.out"
-  printf -v retry_log_line 'log=%q' "$retry_log"
-  {
-    sed -n '1,2p' "$source_script" \
-      && printf '%s\n' "$retry_log_line" \
-      && sed -n '4,$p' "$source_script"
-  } >"$retry_script" || {
-    rm -f "$retry_script" "$retry_log" "$retry_output"
-    retry_gate_reason="cannot prepare a fresh gate retry script"; return 1;
+  retry_branch="$(tkt get branch 2>/dev/null || true)"
+  remote_head=""
+  [ -z "$retry_branch" ] || remote_head="$(git -C "$worktree" rev-parse --verify "origin/$retry_branch" 2>/dev/null || true)"
+  if [ "$remote_head" != "$head_after" ]; then
+    retry_gate_deferred=1
+    retry_gate_reason="finished job head is not the fetched origin branch tip"
+    return 0
+  fi
+
+  retry_gate_output="$(mktemp "$run/$namebase-$slot-gate-retry-XXXXXX.out")" || {
+    retry_gate_reason="cannot allocate a tkt-gate retry output"; return 1;
   }
   retry_gate_attempted=1
-  echo "tkt-job: rerunning failed gate for stored fix job $jobid at $head_after" >&2
-  retry_gate_rc=0
-  (cd "$worktree" && bash "$retry_script") >"$retry_output" 2>&1 || retry_gate_rc=$?
-  retry_gate_log="$retry_log"
-  tkt journal "tkt-job gate retry slot=$slot job=$jobid exit=$retry_gate_rc log=$retry_gate_log"
+  "$bin_dir/tkt-gate" "$state" --expect-head "$head_after" >"$retry_gate_output" 2>&1 || retry_gate_rc=$?
+  retry_gate_log="$(sed -n '1s/.* log=//p' "$retry_gate_output")"
+  [ -n "$retry_gate_log" ] || retry_gate_log="$retry_gate_output"
   return 0
 }
 
@@ -679,8 +634,10 @@ verdict=""
 digest="id=$jobid"
 ec=0
 retry_gate_attempted=0
+retry_gate_deferred=0
 retry_gate_rc=0
 retry_gate_log=""
+retry_gate_output=""
 if [ "$broken" -eq 1 ] || [ ! -f "$record" ]; then
   verdict="UNKNOWN id=$jobid"
   ec=3
@@ -714,17 +671,19 @@ else
     case "$status" in
       DONE|DONE_WITH_CONCERNS)
         if retry_failed_fix_gate "$record"; then
-          gate_exit="$retry_gate_rc"
-          gate_path="$retry_gate_log"
-          if [ -r "$retry_gate_log" ]; then
-            gate_tail="$(tail -n 20 "$retry_gate_log")"
-          fi
-          if [ "$retry_gate_rc" -eq 0 ]; then
-            gate_word="PASS"
-            gate_failed=0
-          else
-            gate_word="FAIL"
-            gate_failed=1
+          if [ "$retry_gate_deferred" -eq 0 ]; then
+            gate_exit="$retry_gate_rc"
+            gate_path="$retry_gate_log"
+            if [ -r "$retry_gate_output" ]; then
+              gate_tail="$(tail -n 20 "$retry_gate_output")"
+            fi
+            if [ "$retry_gate_rc" -eq 0 ]; then
+              gate_word="PASS"
+              gate_failed=0
+            else
+              gate_word="FAIL"
+              gate_failed=1
+            fi
           fi
         else
           echo "tkt-job: failed fix gate was not rerun: $retry_gate_reason" >&2
@@ -751,8 +710,17 @@ else
       if [ "$status" = "DONE" ] && [ "$slot" = lane ]; then
         tkt set concerns.lane ""
       fi
+      if [ "$retry_gate_deferred" -eq 1 ]; then
+        verdict="GATE-RETRY-PENDING id=$jobid"
+        ec=1
+        if [ "$status" = "DONE_WITH_CONCERNS" ]; then
+          concerns_file="$run/$namebase-concerns-$slot.md"
+          if [ -n "$concerns" ]; then concern_text="$concerns"; else concern_text="$text"; fi
+          printf '%s\n' "$concern_text" >"$concerns_file"
+          tkt set "concerns.$slot" "$concerns_file"
+        fi
       # A refused or failed gate script rules over the status word.
-      if [ "$gate_refused" = "true" ]; then
+      elif [ "$gate_refused" = "true" ]; then
         verdict="GATE-REFUSED rc=$gate_exit gatelog=${gate_path:--}"
         ec=1
       elif [ "$gate_failed" -eq 1 ]; then
@@ -822,7 +790,10 @@ gate=exit=$gate_exit log=${gate_path:- -}"
 $(tail -n 10 <<<"$gate_tail")"
     fi
   fi
-  if [ "$retry_gate_attempted" -eq 1 ]; then
+  if [ "$retry_gate_deferred" -eq 1 ]; then
+    digest="$digest
+gateRetry=pending reason=$retry_gate_reason"
+  elif [ "$retry_gate_attempted" -eq 1 ]; then
     digest="$digest
 gateRetry=exit=$retry_gate_rc log=$retry_gate_log"
   fi

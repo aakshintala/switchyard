@@ -1048,6 +1048,9 @@ fi
 brief_gate_cmd="$gate_cmd"
 concerns_file=""
 no_commits=0
+retry_collect_gate=0
+gate_retry_credited=0
+gate_retry_note=""
 round_start="$(git -C "$worktree" rev-parse HEAD)"
 if [ "$recover_unpushed" -eq 1 ]; then
   round_start="$recover_old_head"
@@ -1186,6 +1189,8 @@ else
   fi
   t set fixopen "$knum" # this job's commits may land ahead of head
   jrc=0; TKT_FIX_DISPATCH=1 "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
+  gate_retry_note="$(sed -n '/^gateRetry=/p' "$tmp/job.out" | head -n 1)"
+  if [[ "$gate_retry_note" == gateRetry=exit=0\ * ]]; then gate_retry_credited=1; fi
   if [ "$jrc" -ne 0 ] && [ -n "$resume" ] \
     && grep -Fq -- "unknown job $resume" "$tmp/job.err" \
     && stale_locator_target "$resume"; then
@@ -1215,6 +1220,9 @@ else
       "TKT tkt-job NO-COMMITS "*)
         no_commits=1
         t journal "tkt-fix round=$((round + 1)) no commits" ;;
+      "TKT tkt-job GATE-RETRY-PENDING "*)
+        retry_collect_gate=1
+        concerns_file="$(t get "concerns.$slot" 2>/dev/null || true)" ;;
       *) pass tkt-job "$tmp/job.out" "$jrc" "$tmp/job.err" ;;
     esac
   fi
@@ -1236,13 +1244,26 @@ if [ "$remote_head" != "$new_head" ] && { [ -z "$remote_head" ] || git -C "$work
 fi
 
 grc=0
-"$tktgate" "$state" --checks-only --expect-head "$new_head" >"$tmp/gate.out" 2>"$tmp/gate.err" || grc=$?
+if [ "$retry_collect_gate" -eq 1 ]; then
+  "$tktgate" "$state" --expect-head "$new_head" >"$tmp/gate.out" 2>"$tmp/gate.err" || grc=$?
+  retry_gate_log="$(sed -n '1s/.* log=//p' "$tmp/gate.out")"
+  [ -n "$retry_gate_log" ] || retry_gate_log="$tmp/gate.out"
+  gate_retry_note="gateRetry=exit=$grc log=$retry_gate_log"
+  printf '%s\n' "$gate_retry_note" >>"$tmp/gate.out"
+  if [ "$grc" -eq 0 ]; then gate_retry_credited=1; fi
+else
+  "$tktgate" "$state" --checks-only --expect-head "$new_head" >"$tmp/gate.out" 2>"$tmp/gate.err" || grc=$?
+fi
 if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
 if [ "$grc" -eq 1 ]; then
-  case "$(head -n 1 "$tmp/gate.out")" in
-    "TKT tkt-gate STOP-LIST "*) close_slot "$knum" ;;
-    *) round=$((round + 1)); t set round "$round"; stamp_verdict_at t; close_slot "$knum" ;;
-  esac
+  if [ "$retry_collect_gate" -eq 1 ]; then
+    close_slot "$knum"
+  else
+    case "$(head -n 1 "$tmp/gate.out")" in
+      "TKT tkt-gate STOP-LIST "*) close_slot "$knum" ;;
+      *) round=$((round + 1)); t set round "$round"; stamp_verdict_at t; close_slot "$knum" ;;
+    esac
+  fi
 fi
 if [ "$grc" -ne 0 ]; then
   if [ "$no_commits" -eq 1 ]; then printf 'no commits\n' >>"$tmp/gate.out"; fi
@@ -1251,7 +1272,7 @@ fi
 
 # A checks-only PASS proves only the local checks. Credit a job-end full gate
 # separately, and only when its record covers this exact pushed PR head.
-if [ "$recover_unpushed" -ne 1 ]; then
+if [ "$recover_unpushed" -ne 1 ] && [ "$gate_retry_credited" -ne 1 ]; then
   credit_reason=""
   credit_job="$(t get "job.$slot" 2>/dev/null || true)"
   if [ -z "$gate_cmd" ]; then
@@ -1312,6 +1333,7 @@ round=$((round + 1)); t set round "$round"; stamp_verdict_at t; close_slot "$knu
 # Digest lines after the verdict: the CI notes, and the concerns file the
 # orchestrator reads before it accepts the verdict.
 notes=()
+if [ -n "$gate_retry_note" ]; then notes+=("$gate_retry_note"); fi
 if [ -n "$ci_note" ]; then notes+=("$ci_note"); fi
 if [ -n "$concerns_file" ]; then notes+=("concerns=$concerns_file"); fi
 if [ "$no_commits" -eq 1 ]; then notes+=("no commits"); fi
