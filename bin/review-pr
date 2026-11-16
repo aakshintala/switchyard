@@ -81,7 +81,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] [--state PATH] --model M [--overbuild-model M2] [--axes standards[,spec][,overbuild]] [--context PATH]... [--workflow-doc PATH] [--head SHA] [--model-ruling URL] [--full-rereview REASON]" >&2
-  echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--ruling COMMENT_ID]... [--context PATH]... [--workflow-doc PATH] [--head SHA]" >&2
+  echo "       review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--ruling COMMENT_ID]... [--context PATH]... [--workflow-doc PATH] [--head SHA]" >&2
   echo "       review-pr run <same args as start>" >&2
   echo "       review-pr run <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--ruling COMMENT_ID]... [--context PATH]... [--workflow-doc PATH] [--head SHA]" >&2
   echo "       review-pr collect <job-id>... [--findings-out PATH]" >&2
