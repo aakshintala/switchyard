@@ -3,7 +3,8 @@
 # Call after findings-history.sh and verify-section.sh; callers map
 # ruling_refutes_failure* and ruling_refutes_drift_* to their own refusal
 # format, and initialize the arrays ruling_refute_{ids,urls,prefixes,bases}.
-# Keep refusal/emit mapping in each caller: their emit contracts and source nouns differ.
+# Keep refusal/emit mapping in each caller, since their emit contracts differ;
+# only the candidate-row printer is shared.
 
 ruling_match_begin() {
   ruling_match_seen=()
@@ -65,16 +66,31 @@ ruling_match_file() {
 
 # After a no-match or ambiguous ruling_refutes_validate_file failure, print the
 # open rows it saw (no-match) or the rows the prefix matched (ambiguous) to
-# stderr: at most 20, each cut to 100 characters, labelled by source.
+# stderr: at most 20, each cut to 100 characters, labelled by source. A row
+# found in both sources prints once, with both labels.
 ruling_refutes_print_candidates() {
-  local failure="$1" label="${2:-review-pr}" entry row source total limit index
-  local -a entries=()
+  local failure="$1" label="${2:-review-pr}" entry row source total limit index found
+  local -a entries=() rows=() sources=()
   case "$failure" in
     ambiguous) entries=(${ruling_match_matched[@]+"${ruling_match_matched[@]}"}) ;;
     no-match) entries=(${ruling_match_candidates[@]+"${ruling_match_candidates[@]}"}) ;;
     *) return 0 ;;
   esac
-  total="${#entries[@]}"
+  for entry in ${entries[@]+"${entries[@]}"}; do
+    source="${entry%%$'\t'*}"
+    row="${entry#*$'\t'}"
+    found=""
+    for index in ${rows[@]+"${!rows[@]}"}; do
+      [ "${rows[$index]}" != "$row" ] || { found="$index"; break; }
+    done
+    if [ -n "$found" ]; then
+      sources[$found]="${sources[$found]}, $source"
+    else
+      rows+=("$row")
+      sources+=("$source")
+    fi
+  done
+  total="${#rows[@]}"
   if [ "$total" -eq 0 ]; then
     echo "$label: no open candidate rows" >&2
     return 0
@@ -82,11 +98,9 @@ ruling_refutes_print_candidates() {
   limit="$total"
   [ "$limit" -le 20 ] || limit=20
   for ((index = 0; index < limit; index++)); do
-    entry="${entries[$index]}"
-    source="${entry%%$'\t'*}"
-    row="${entry#*$'\t'}"
+    row="${rows[$index]}"
     [ "${#row}" -le 100 ] || row="${row:0:100}..."
-    echo "$label: open candidate [$source]: $row" >&2
+    echo "$label: open candidate [${sources[$index]}]: $row" >&2
   done
   [ "$total" -le "$limit" ] || echo "$label: ... $((total - limit)) more candidate rows" >&2
 }

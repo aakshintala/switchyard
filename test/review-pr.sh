@@ -3091,6 +3091,29 @@ grep -Fq 'review-pr: open candidate [findings file]: P2 shared-prefix: from the 
 ! grep -Fq 'P2 unrelated-row' <<<"$err" || fail "ambiguous refusal omits unrelated open candidates"
 [ ! -e "$T/state/runs.txt" ] || fail "ambiguous refusal calls no delegate"
 
+# --- case #1978: a row matched in both sources prints once with both labels
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+plant_comment "2026-10-09T10:00:00Z" 262 "review-pr: patch-id none, head $FAKE_SHA
+
+## standards (M)
+
+P2 twin-prefix: same row
+P2 twin-prefix: posted only
+VERDICT standards: CHANGES"
+printf 'P2 twin-prefix: same row\n' >"$T/findings.txt"
+printf '{"id":86,"body":"refutes: P2 twin-prefix","html_url":"https://example.invalid/o/n/issues/7#issuecomment-86","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-86.json"
+st=0
+err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 86 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "two-source ambiguous ruling exits 2"
+grep -Fq 'review-pr: open candidate [posted round, findings file]: P2 twin-prefix: same row' <<<"$err" || \
+  fail "two-source row prints once with both source labels: $err"
+[ "$(grep -Fc 'P2 twin-prefix: same row' <<<"$err")" -eq 1 ] || \
+  fail "two-source row prints once: $err"
+grep -Fq 'review-pr: open candidate [posted round]: P2 twin-prefix: posted only' <<<"$err" || \
+  fail "two-source refusal keeps its single-source match: $err"
+
 # --- case #1964: bad-refutes explains the required P1/P2/P3 prefix format
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
