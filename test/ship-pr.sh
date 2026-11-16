@@ -955,6 +955,14 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
 ]' >"$ST/review-comments"
 ship; expect 5 "Fixed at HEAD without open findings refuses merge"; expect_refused REVIEW; no_merge "fixed-only verify"
 
+# Prose that starts with "Fixed at" is not a heading, so the bare P2 after it stays open.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:124,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nP3 c.rs:27 — open one — fix\nFixed at HEAD the P2 at d.rs:1 is still open.\nP2 d.rs:1 — open — fix")}
+]' >"$ST/review-comments"
+ship; expect 5 "Fixed at prose is not a heading and keeps a bare P2 open"; expect_refused REVIEW; no_merge "Fixed at prose"
+
 # The P3 issue body and its PR link both redact host paths.
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"

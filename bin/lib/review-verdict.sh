@@ -110,7 +110,13 @@ finding_section_heading() {
   heading="$(printf '%s' "$line" | sed -E -e 's/^#+[[:space:]]*//' -e 's/:[[:space:]]*$//')"
   case "$heading" in
     Fixed|Open|New|"Not judged") printf '%s' "$heading" ;;
-    "Fixed at "*|"Not judged at "*) printf '%s' "${heading%% at *}" ;;
+    # The "at <ref>" form counts only as a heading (a # line or a trailing
+    # colon), so prose such as "Fixed at HEAD the P2 is still open." is not one.
+    "Fixed at "*|"Not judged at "*)
+      case "$line" in
+        \#*|*:) printf '%s' "${heading%% at *}" ;;
+        *) return 1 ;;
+      esac ;;
     *) return 1 ;;
   esac
 }
