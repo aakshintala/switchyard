@@ -9,12 +9,17 @@ ruling_match_begin() {
   ruling_match_seen=()
   ruling_match_count=0
   ruling_match_base=""
+  ruling_match_candidate_bases=()
+  ruling_match_candidate_sources=()
+  ruling_match_matched_bases=()
+  ruling_match_matched_sources=()
 }
 
 ruling_match_file() {
-  local prefix="$1" path="$2" kind="$3" row base status prior duplicate
+  local prefix="$1" path="$2" kind="$3" row base status prior duplicate candidate_index candidate_source boundary_match
   # A ruling may copy the row's markup; compare both sides without it.
   prefix="$(normalize_finding_line "$prefix")"
+  case "$kind" in history) candidate_source='posted round' ;; *) candidate_source='findings file' ;; esac
   [ -n "$path" ] && [ -r "$path" ] || return 0
   while IFS= read -r row; do
     base="$(findings_row_base "$row")"
@@ -27,17 +32,48 @@ ruling_match_file() {
       [ -n "$status" ] || status=open
     fi
     [ "$status" = open ] || continue
+
+    duplicate=0
+    for candidate_index in "${!ruling_match_candidate_bases[@]}"; do
+      if [ "${ruling_match_candidate_bases[$candidate_index]}" = "$base" ] \
+        && [ "${ruling_match_candidate_sources[$candidate_index]}" = "$candidate_source" ]; then
+        duplicate=1
+        break
+      fi
+    done
+    if [ "$duplicate" -eq 0 ]; then
+      ruling_match_candidate_bases+=("$base")
+      ruling_match_candidate_sources+=("$candidate_source")
+    fi
+
+    boundary_match=0
+    case "$base" in
+      # `:` may run into a line number (path:N); `,` `.` `;` end a token only
+      # before a space or at the end, so a path prefix can't match a longer filename.
+      "$prefix"|"$prefix "*|"$prefix":*|"$prefix",|"$prefix",\ *|"$prefix".|"$prefix".\ *|"$prefix"\;|"$prefix"\;\ *) boundary_match=1 ;;
+    esac
+    [ "$boundary_match" -eq 1 ] || continue
+    duplicate=0
+    for candidate_index in "${!ruling_match_matched_bases[@]}"; do
+      if [ "${ruling_match_matched_bases[$candidate_index]}" = "$base" ] \
+        && [ "${ruling_match_matched_sources[$candidate_index]}" = "$candidate_source" ]; then
+        duplicate=1
+        break
+      fi
+    done
+    if [ "$duplicate" -eq 0 ]; then
+      ruling_match_matched_bases+=("$base")
+      ruling_match_matched_sources+=("$candidate_source")
+    fi
+
     duplicate=0
     for prior in ${ruling_match_seen[@]+"${ruling_match_seen[@]}"}; do
       if [ "$prior" = "$base" ]; then duplicate=1; break; fi
     done
     [ "$duplicate" -eq 0 ] || continue
     ruling_match_seen+=("$base")
-    case "$base" in
-      "$prefix"|"$prefix "*)
-        ruling_match_count=$((ruling_match_count + 1))
-        [ "$ruling_match_count" -ne 1 ] || ruling_match_base="$base" ;;
-    esac
+    ruling_match_count=$((ruling_match_count + 1))
+    [ "$ruling_match_count" -ne 1 ] || ruling_match_base="$base"
   done <"$path"
 }
 
@@ -61,6 +97,7 @@ ruling_refutes_validate_file() {
     esac
     if [[ ! "$(normalize_finding_line "$ruling_prefix")" =~ $ruling_refutes_pattern ]]; then
       ruling_refutes_failure=bad-refutes
+      ruling_refutes_hint='line must start with P1, P2 or P3 followed by a space and the row text (for example, `refutes: P2 bin/x:12 ...`).'
       return 1
     fi
     ruling_match_begin
