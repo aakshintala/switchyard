@@ -293,7 +293,7 @@ trap 'rm -rf "$tmp"' EXIT
 limited=0
 if [ "$round" -ge 2 ] && [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ -z "$collect_fix_job" ]; then limited=1; fi
 
-ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_notes=(); ruling_jsons=()
+ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_notes=()
 ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
 ruling_grant_ids=()
 grant_comment_count=0; grant_accepted=0; grant_id=""; grant_url=""; grant_round=""
@@ -446,7 +446,7 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
     ruling_body="$tmp/ruling-$ruling_id.md"
     jq -r '.body' "$ruling_json" >"$ruling_body" || ruling_refuse fetch "$ruling_id"
     ruling_url="$(jq -r '.html_url // ""' "$ruling_json")"
-    ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body"); ruling_jsons+=("$ruling_json")
+    ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body")
     ruling_refutes_file="$tmp/ruling-$ruling_id.refutes"
     ruling_grants_file="$tmp/ruling-$ruling_id.grants"
     grep '^refutes:' "$ruling_body" >"$ruling_refutes_file" || true
@@ -1150,7 +1150,7 @@ else
     if ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
   fi
   t set fixopen "$knum" # this job's commits may land ahead of head
-  jrc=0; "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
+  jrc=0; TKT_FIX_DISPATCH=1 "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
   if [ "$jrc" -ne 0 ] && [ -n "$resume" ] \
     && grep -Fq -- "unknown job $resume" "$tmp/job.err" \
     && stale_locator_target "$resume"; then

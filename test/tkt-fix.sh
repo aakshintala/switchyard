@@ -28,6 +28,7 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" XDG_CACHE_HOME="$T/cache" TKT_BIN="$T/bin"
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+unset TKT_FIX_DISPATCH
 
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 printf '0' >"$T/gatemode"
@@ -60,7 +61,7 @@ printf 'done' >"$T/jobmode"
 printf '0' >"$T/jobcount"
 cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
-printf 'job|%s\n' "\$*" >>"$T/calls.log"
+printf 'job|%s|fix-dispatch=%s\n' "\$*" "\${TKT_FIX_DISPATCH:-unset}" >>"$T/calls.log"
 prompt_file=""; previous=""
 for a in "\$@"; do
   case "\$a" in FINDINGS=@*) cp "\${a#FINDINGS=@}" "$T/job-findings.md" || exit 2;; esac
@@ -660,6 +661,36 @@ printf '# Findings history\nP2 legacy.txt:1 — fixed historical finding [tkt-hi
 bash "$TKT_STATE" "$S" set findings_history "$history_file" >/dev/null
 write_ruling_comment 100 'refutes: P2 legacy.txt:1'
 expect_ruling_refused ruling-history-only no-match 100
+fi
+
+# A normalized row closed in round 1 can be raised with different markdown in
+# round 2; the closed copy must not shadow the open --findings row.
+if want ruling-refutes-reopened; then
+setup_case ruling-refutes-reopened
+ROUND1_FINDINGS="$CDIR/round1-findings.md"
+ROUND2_FINDINGS="$CDIR/round2-findings.md"
+printf 'P1 **fix.txt:1** — a\n' >"$ROUND1_FINDINGS"
+printf 'P1 fix.txt:1 — a\n' >"$ROUND2_FINDINGS"
+bash "$TKT_STATE" "$S" set findings "$ROUND1_FINDINGS" >/dev/null
+fixture_commit fix.txt 'round one fix' 'fix: round one'
+ROUND1_HEAD="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" push -q origin tkt-529 || fail 'ruling-refutes-reopened could not push round one'
+bash "$TKT_STATE" "$S" set head "$ROUND1_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+record_test_round 1 "$ROUND1_HEAD"
+history_file="$CDIR/findings-history-r1.md"
+printf '# Findings history\nP1 **fix.txt:1** — a [tkt-history: raised=raised in review round 0; status=closed in fix round 1; unverified=none]\n' >"$history_file"
+bash "$TKT_STATE" "$S" set findings_history "$history_file" >/dev/null
+write_ruling_comment 99 'refutes: P1 fix.txt:1'
+printf 'ruling' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --findings "$ROUND2_FINDINGS" --ruling 99 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "ruling-refutes-reopened exited $run_rc, want 1: $out $(cat "$T/stderr")"
+! grep -Fq 'RULING-REFUSED' <<<"$out" || fail "ruling-refutes-reopened refused the open re-raised row: $out"
+grep -Fq 'FIX-INCOMPLETE round=2 STOP-AT-TWO' <<<"$out" || fail "ruling-refutes-reopened did not reach verification: $out"
+awk '/^P1 fix.txt:1 — a \[tkt-history: .*status=open/ { if (getline <= 0 || $0 !~ /^refuted: recorded ruling /) exit 1; found=1 } END { exit !found }' \
+  "$T/verify-input-1.md" || fail "ruling-refutes-reopened did not apply the ruling to the open row: $(cat "$T/verify-input-1.md")"
+grep -Fq 'P1 **fix.txt:1** — a [tkt-history:' "$T/verify-input-1.md" || fail 'ruling-refutes-reopened lost the closed round-one row'
 fi
 
 # A reason on the refutes line makes it longer than the exact row prefix, so it is refused before dispatch.
@@ -2274,6 +2305,7 @@ collected_head="$(git -C "$WT" rev-parse HEAD)"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.verify_head)" = "$collected_head" ] || fail "collect-fix did not record verify_head"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.verify_slot)" = fix1 ] || fail "collect-fix did not record verify_slot"
 grep -Fq "job|$S --slot fix1 --expect-commits" "$T/calls.log" || fail "collect-fix did not use the watch-only tkt-job call: $(cat "$T/calls.log")"
+grep -q '^job|.*--slot fix1.*--expect-commits|fix-dispatch=1$' "$T/calls.log" || fail "collect-fix did not pass TKT_FIX_DISPATCH=1 to tkt-job"
 grep -Fq 'P1 heading from review' "$T/verify-input-1.md" || fail "collect-fix verify omitted the dispatch's recorded findings"
 ! grep -Fq 'P1 state-only decoy' "$T/verify-input-1.md" || fail "collect-fix used state findings instead of the dispatch's recorded findings"
 grep -Fq 'refuted: recorded ruling' "$T/verify-input-1.md" || fail "collect-fix did not apply the refutes ruling to the recorded finding"
@@ -2393,6 +2425,7 @@ out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A call 1 exited 0"
 rc=$?; [ "$rc" = "1" ] || fail "A call 1 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=j1" || fail "A bad verdict: $(head -n 1 <<<"$out")"
 grep -q "job|.*--slot fix1" "$T/calls.log" || fail "A call 1 did not dispatch fix1"
+grep -q '^job|.*--slot fix1.*|fix-dispatch=1$' "$T/calls.log" || fail "fresh fix dispatch did not pass TKT_FIX_DISPATCH=1 to tkt-job"
 [ "$(bash "$TKT_STATE" "$S" get round)" = "0" ] || fail "A round moved after ASK"
 : >"$T/calls.log"
 printf 'done' >"$T/jobmode"
@@ -2415,6 +2448,7 @@ printf 'resume brief\n' >"$CDIR/prompt.md"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "A2 resume exited $?"
 grep -q "job|.*--slot fix1.*--resume j1" "$T/calls.log" || fail "A2 resume did not dispatch fix1 (log: $(cat "$T/calls.log"))"
+grep -q '^job|.*--slot fix1.*--resume j1.*|fix-dispatch=1$' "$T/calls.log" || fail "fix resume did not pass TKT_FIX_DISPATCH=1 to tkt-job"
 [ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "A2 round not 1"
 fi
 
@@ -3192,7 +3226,7 @@ setup_ahead_dispatch() {
   export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
   cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
-printf 'job|%s\n' "\$*" >>"$T/calls.log"
+printf 'job|%s|fix-dispatch=%s\n' "\$*" "\${TKT_FIX_DISPATCH:-unset}" >>"$T/calls.log"
 exec "$REAL_BIN/tkt-job" "\$@"
 EOF
   chmod +x "$T/bin/tkt-job"

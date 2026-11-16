@@ -3,6 +3,7 @@
 # Call after findings-history.sh and verify-section.sh; callers map
 # ruling_refutes_failure* and ruling_refutes_drift_* to their own refusal
 # format, and initialize the arrays ruling_refute_{ids,urls,prefixes,bases}.
+# Keep refusal/emit mapping in each caller: their emit contracts and source nouns differ.
 
 ruling_match_begin() {
   ruling_match_seen=()
@@ -19,18 +20,18 @@ ruling_match_file() {
     base="$(findings_row_base "$row")"
     base="$(normalize_finding_line "$base")"
     case "$base" in P1\ *|P2\ *|P3\ *) ;; *) continue;; esac
-    duplicate=0
-    for prior in ${ruling_match_seen[@]+"${ruling_match_seen[@]}"}; do
-      if [ "$prior" = "$base" ]; then duplicate=1; break; fi
-    done
-    [ "$duplicate" -eq 0 ] || continue
-    ruling_match_seen+=("$base")
     status=open
     if [ "$kind" = history ]; then
       status="$(findings_row_status "$row")"
       [ -n "$status" ] || status=open
     fi
     [ "$status" = open ] || continue
+    duplicate=0
+    for prior in ${ruling_match_seen[@]+"${ruling_match_seen[@]}"}; do
+      if [ "$prior" = "$base" ]; then duplicate=1; break; fi
+    done
+    [ "$duplicate" -eq 0 ] || continue
+    ruling_match_seen+=("$base")
     case "$base" in
       "$prefix"|"$prefix "*)
         ruling_match_count=$((ruling_match_count + 1))

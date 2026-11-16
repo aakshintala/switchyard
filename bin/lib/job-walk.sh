@@ -61,6 +61,15 @@ job_gate_journal_match() {
       case "$recorded_env64" in *" "*) continue ;; esac
       recorded_cmd="$(printf '%s' "$recorded_cmd64" | jq -Rrs '@base64d' 2>/dev/null)" || continue
       recorded_env="$(printf '%s' "$recorded_env64" | jq -Rrs '@base64d' 2>/dev/null)" || continue
+      # Rows tkt-job wrote at 903c98a journal 'bash <lib>/tkt-stray-run.sh <state> <run> && <Gate>'.
+      # The step runs before the Gate, and && means the Gate ran too, so the row records the Gate.
+      case "$recorded_cmd" in
+        "bash "*"/lib/tkt-stray-run.sh "*" && "*)
+          case "${recorded_cmd%% && *}" in
+            "bash "*"/lib/tkt-stray-run.sh "*) recorded_cmd="${recorded_cmd#* && }" ;;
+          esac
+          ;;
+      esac
       commands[$index]="$recorded_cmd"
       environments[$index]="$recorded_env"
       break
