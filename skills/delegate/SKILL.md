@@ -202,7 +202,7 @@ Plain `stop` interrupts a running turn, closes host stdin, and ends the session.
 
 ### pi sessions
 
-A `--model` of the form `muse/<id>` selects Muse; any other `--model` must use the `<provider>/<id>[:<level>]` form and selects pi. A first segment that names another harness backend (for example `codex/...` or `fiber/...`) fails fast with a usage error, so `delegate session start` never launches pi for those. The thinking level is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; a colon tail that is not one of these stays in the id. A `muse/<id>` model takes no reasoning-effort suffix on a session: sessions run at Muse's default effort.
+A `--model` of the form `muse/<id>` selects Muse; `fiber/<provider>/<id>[:<level>]` selects the Fiber hub bridge; any other `--model` must use the `<provider>/<id>[:<level>]` form and selects pi. A first segment that names another harness backend (for example `codex/...`) fails fast with a usage error, so `delegate session start` never launches pi for those. The thinking level is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; a colon tail that is not one of these stays in the id. A `muse/<id>` model takes no reasoning-effort suffix on a session: sessions run at Muse's default effort.
 
 The host applies `--model` after start (`set_model`, then `set_thinking_level` when a `:level` suffix was given), so a model the host rejects or missing credentials fail `start` with exit 1 (`failed`). Session start resolves the model through `models.json` and rejects an off-pool row before starting a process; pass a valid `--model-ruling` comment URL for a ruled exception. The session record stores it as `modelRuling`, and `delegate session status <id>` shows it.
 
@@ -219,6 +219,24 @@ The session records only `completed`, `failed` or `cancelled`, so a caller reads
 | `agent_settled` with `aborted:true` | `cancelled` | none of the five (the job registry's CANCELLED) |
 | host exit, closed stdout, timeout | session `dead` | ERROR; `watch` exits 4 |
 | model rejected at start | session `dead` (`startFailed`) | `start` exits 1 |
+
+### Fiber sessions
+
+Fiber sessions run through a local bridge process that speaks the existing MSP session protocol to the supervisor and uses the Fiber hub for session commands. Start them with `--model fiber/<provider>/<model>[:<level>]`. The hub must already be running; the bridge connects to it and does not start it.
+
+Fiber uses `prompt` while idle or after an idle exit, and `steer` while a turn runs. A busy prompt is retried once as a steer. A rejected steer fails the send. The disposition follows the hub event that names the command ID: `turn_started` means `started`; `steering_applied` or `steering_queue` means `steered`. A late steer that starts the next turn reports `started`.
+
+An idle Fiber exit leaves the session idle. The next send resumes it through a prompt. `stop --interrupt` sends `cancel`; plain `stop` cancels a running turn, closes the session, then forces close after the grace period. Stopping an idle-exited session sends no hub command.
+
+| Fiber outcome | `lastTurn.terminal` | status a caller reads |
+| --- | --- | --- |
+| completed turn without questions | `completed` | trailing `STATUS:` line from the last message; DONE when there is none |
+| completed turn with supervised questions | `completed` | NEEDS_CONTEXT |
+| failed turn | `failed` | ERROR |
+| interrupted turn | `cancelled` | CANCELLED |
+| start rejected or hub unavailable | session `dead` (`startFailed`) | `start` exits 1 |
+| hub loss after reconnect attempts or Fiber crash | session `dead` | ERROR; `watch` exits 4 |
+| idle exit | unchanged; session stays idle | next send resumes |
 
 `watch` is level-triggered: it returns immediately when the session is already idle or dead. Call it after `send` to wait for the current turn to finish. It returns exit code 0 for idle and 4 for dead; watching does not wait for a future turn.
 

@@ -27,7 +27,7 @@ You need Rust (`cargo`), and `cursor-agent` on PATH with `cursor-agent login` be
 | `delegate models` | List configured model ids, labels, backends, prices, tiers, and allowed-pool membership. Rows are sorted by backend, then by id; `*` marks the default and `yes` marks an allowed row. |
 | `delegate doctor` | Check configured backend binaries, login state, the Fiber hub socket, model menu drift and whether this binary is stale against `~/.agents`. |
 | `delegate version` | Print the package version, embedded build commit and delegate checkout freshness. |
-| `delegate session start` | Start a detached Muse or pi session from a brief. Pass `--model-ruling URL` for an off-pool model. |
+| `delegate session start` | Start a detached Muse, pi, or Fiber session from a brief. Pass `--model-ruling URL` for an off-pool model. |
 | `delegate session status <id-or-prefix>` | Print one session's state, including any model ruling. |
 | `delegate session send` | Start a turn or steer the active turn. |
 | `delegate session logs` | Read session events, optionally following them. |
