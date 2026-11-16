@@ -114,7 +114,7 @@ install_weekly() {
 }
 
 run_deprecations() {
-  local model today source_sha scratch delegate_output job_id rc inbox status_output delegate_status concerns_file record
+  local model today source_sha scratch delegate_output job_id rc inbox status_output delegate_status concerns_file record publish_args publish_error reason
   RUN_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/model-deprecations.XXXXXX")"
   trap cleanup_run EXIT
   scratch="$RUN_TMP_DIR/report.md"
@@ -182,10 +182,24 @@ run_deprecations() {
       python3 -I "$helper" failure "$inbox" "$today" "$source_sha" "$delegate_status"
       return 1
     fi
-    python3 -I "$helper" publish "$scratch" "$inbox" "$today" "$source_sha" "$concerns_file"
+    publish_args=("$scratch" "$inbox" "$today" "$source_sha" "$concerns_file")
   else
-    python3 -I "$helper" publish "$scratch" "$inbox" "$today" "$source_sha"
+    publish_args=("$scratch" "$inbox" "$today" "$source_sha")
   fi
+  set +e
+  publish_error="$(python3 -I "$helper" publish "${publish_args[@]}" 2>&1)"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    echo "$publish_error" >&2
+    mkdir -p "$inbox" || return 1
+    cp "$scratch" "$inbox/model-deprecations-$today.rejected.md" || return 1
+    reason="$(printf '%s\n' "$publish_error" | sed -n 's/^model-deprecations: //p' | tail -n 1)"
+    [ -n "$reason" ] || reason="publish failed"
+    python3 -I "$helper" failure "$inbox" "$today" "$source_sha" "" "$reason"
+    return 1
+  fi
+  [ -z "$publish_error" ] || printf '%s\n' "$publish_error"
 }
 
 [ "$#" -ge 1 ] || usage

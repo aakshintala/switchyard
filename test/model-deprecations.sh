@@ -42,7 +42,7 @@ case "${1:-}" in
     printf '{"status":"%s","result":{"status":"%s","text":"%s"}}\n' \
       "${DEPRECATIONS_STATUS:-DONE}" "${DEPRECATIONS_STATUS:-DONE}" "${DEPRECATIONS_RESULT_TEXT:-}" \
       >"$DELEGATE_JOBS_DIR/12345678-1234-1234-1234-123456789abc.json"
-    if [ "${DEPRECATIONS_STUB_MODE:-report}" = report ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = blank ]; then
+    if [ "${DEPRECATIONS_STUB_MODE:-report}" = report ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = unknown ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = duplicate ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = capital ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = blank ]; then
       report_date="$(sed -n 's/^Report date: //p' <<<"$prompt")"
       source_line="$(sed -n 's/^Source line: //p' <<<"$prompt")"
       if [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ]; then
@@ -67,6 +67,19 @@ $source_line
 ## skipped
 - gemini: page unavailable (fixture)
 REPORT
+        case "${DEPRECATIONS_STUB_MODE:-report}" in
+          capital) sed -i.bak -e 's/^## anthropic$/## Anthropic/' -e 's/^- gemini: /- Gemini: /' "$report_path"; rm -f "$report_path.bak" ;;
+          unknown) sed -i.bak 's/^## anthropic$/## acme/' "$report_path"; rm -f "$report_path.bak" ;;
+          duplicate) python3 - "$report_path" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text().replace("## anthropic", "## openai", 1)
+s = s.replace("## skipped", "## OpenAI\n\n| model | kind | field | vendor | models.dev |\n|---|---|---|---|---|\n\n## skipped", 1)
+p.write_text(s)
+PY
+          ;;
+        esac
       fi
     fi
     echo "12345678-1234-1234-1234-123456789abc"
@@ -108,7 +121,7 @@ done
 
 # Default run asks for exactly one delegate job and atomically publishes its validated report.
 INBOX="$T/inbox"
-MODEL_CATALOG_INBOX="$INBOX" bash "$BIN" run >"$T/run.out" 2>"$T/run.err" || fail "run failed: $(cat "$T/run.err")"
+MODEL_CATALOG_INBOX="$INBOX" DEPRECATIONS_STUB_MODE=capital bash "$BIN" run >"$T/run.out" 2>"$T/run.err" || fail "run failed: $(cat "$T/run.err")"
 [ ! -s "$T/run.err" ] || fail "successful run wrote stderr: $(cat "$T/run.err")"
 REPORT="$INBOX/model-deprecations-2026-05-04.md"
 [ -f "$REPORT" ] || fail "report was not moved into the inbox"
@@ -119,7 +132,7 @@ grep -q '^| claude-old | deprecated | retirement date | 2026-10-01 (source: http
 grep -q '^| claude-retired | retired | source | https://platform.claude.com/' "$REPORT" || fail "retired row or source missing"
 grep -q '^| claude-new | new | source | https://platform.claude.com/' "$REPORT" || fail "new row or source missing"
 grep -q '^## skipped$' "$REPORT" || fail "skipped section missing"
-grep -q '^- gemini: page unavailable (fixture)$' "$REPORT" || fail "failed page entry missing"
+grep -q '^- Gemini: page unavailable (fixture)$' "$REPORT" || fail "failed page entry missing"
 [ -z "$(find "$INBOX" -maxdepth 1 -name '.model-deprecations-*.tmp' -print -quit)" ] || fail "atomic inbox temporary file was left behind"
 [ -z "$(find "$TMPDIR" -mindepth 1 -print -quit)" ] || fail "delegate scratch directory was left behind"
 [ "$(grep -c '^run ' "$DELEGATE_CALLS")" -eq 1 ] || fail "run did not make exactly one delegate run"
@@ -215,13 +228,21 @@ RUN_FAIL_REPORT="$RUN_FAIL_INBOX/model-deprecations-2026-05-04.md"
 [ -f "$RUN_FAIL_REPORT" ] || fail "failed delegate run did not publish a failure report"
 grep -q '^- all: model produced no report (delegate status: FAILED)$' "$RUN_FAIL_REPORT" || fail "failed run status was not recorded"
 
-# Invalid model output is rejected before it can enter the inbox.
+# Invalid model output publishes a failure report and preserves the rejected report.
 INVALID_INBOX="$T/invalid-inbox"
-if DEPRECATIONS_STUB_MODE=invalid MODEL_CATALOG_INBOX="$INVALID_INBOX" bash "$BIN" run >"$T/invalid.out" 2>"$T/invalid.err"; then
-  fail "invalid report was accepted"
+if DEPRECATIONS_STUB_MODE=unknown MODEL_CATALOG_INBOX="$INVALID_INBOX" bash "$BIN" run >"$T/invalid.out" 2>"$T/invalid.err"; then
+  fail "unknown vendor report was accepted"
 fi
-[ ! -e "$INVALID_INBOX" ] || fail "invalid report reached the inbox"
-grep -q 'invalid report heading' "$T/invalid.err" || fail "invalid report rejection was not clear"
+INVALID_REPORT="$INVALID_INBOX/model-deprecations-2026-05-04.md"
+REJECTED_REPORT="$INVALID_INBOX/model-deprecations-2026-05-04.rejected.md"
+[ -f "$INVALID_REPORT" ] || fail "invalid report did not publish a failure report"
+[ -f "$REJECTED_REPORT" ] || fail "invalid report was not preserved"
+grep -q 'invalid vendor section' "$INVALID_REPORT" || fail "failure report did not name invalid vendor section"
+grep -q '^## acme$' "$REJECTED_REPORT" || fail "rejected report copy missing unknown vendor"
+if DEPRECATIONS_STUB_MODE=duplicate MODEL_CATALOG_INBOX="$T/duplicate-inbox" bash "$BIN" run >"$T/duplicate.out" 2>"$T/duplicate.err"; then
+  fail "duplicate vendor report was accepted"
+fi
+grep -q 'invalid vendor section' "$T/duplicate.err" || fail "duplicate vendor rejection was not clear"
 
 # Invalid commands and timer settings stop before starting a delegate.
 : >"$DELEGATE_CALLS"

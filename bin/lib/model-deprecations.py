@@ -53,9 +53,10 @@ def validate_report(text, today, source):
     for line in lines[2:skipped_at]:
         if line.startswith("## "):
             current_vendor = line[3:].strip()
-            if current_vendor not in VENDORS or current_vendor in seen_vendors:
+            vendor_id = current_vendor.casefold()
+            if vendor_id not in VENDORS or vendor_id in seen_vendors:
                 fail("invalid vendor section")
-            seen_vendors.add(current_vendor)
+            seen_vendors.add(vendor_id)
             header_seen = False
             separator_seen = False
             continue
@@ -89,7 +90,7 @@ def validate_report(text, today, source):
             validate_date(retirement.group(0))
         row_count += 1
     for vendor in seen_vendors:
-        section_at = next(index for index in sections if lines[index] == f"## {vendor}")
+        section_at = next(index for index in sections if lines[index][3:].strip().casefold() == vendor)
         section_end = next((index for index in sections if index > section_at), skipped_at)
         section_lines = lines[section_at + 1 : section_end]
         if "| model | kind | field | vendor | models.dev |" not in section_lines:
@@ -102,8 +103,8 @@ def validate_report(text, today, source):
     for line in skipped_lines:
         if not line.strip():
             continue
-        match = re.fullmatch(r"- ([a-z]+): .+", line)
-        if not match or match.group(1) not in VENDORS | {"all"}:
+        match = re.fullmatch(r"- ([A-Za-z]+): .+", line)
+        if not match or match.group(1).casefold() not in VENDORS | {"all"}:
             fail("invalid skipped entry")
         skip_count += 1
     return row_count, skip_count
@@ -153,8 +154,9 @@ def publish(scratch, inbox, today, source, concerns_path=None):
     return write_report(text, inbox, today)
 
 
-def publish_failure(inbox, today, source, status=""):
-    reason = "model produced no report"
+def publish_failure(inbox, today, source, status="", reason="model produced no report"):
+    if reason != "model produced no report":
+        reason = f"report validation failed: {reason}"
     if status:
         if not re.fullmatch(r"[A-Z][A-Z_]*", status):
             fail("invalid delegate job status")
@@ -174,8 +176,8 @@ def publish_failure(inbox, today, source, status=""):
 def main(argv):
     if len(argv) in (6, 7) and argv[1] == "publish":
         return publish(argv[2], argv[3], argv[4], argv[5], argv[6] if len(argv) == 7 else None)
-    if len(argv) in (5, 6) and argv[1] == "failure":
-        return publish_failure(argv[2], argv[3], argv[4], argv[5] if len(argv) == 6 else "")
+    if len(argv) in (5, 6, 7) and argv[1] == "failure":
+        return publish_failure(argv[2], argv[3], argv[4], argv[5] if len(argv) >= 6 else "", argv[6] if len(argv) == 7 else "model produced no report")
     fail("usage: model-deprecations.py publish SCRATCH INBOX YYYY-MM-DD SOURCE [CONCERNS]")
 
 
