@@ -803,6 +803,41 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_steer_is_named_in_the_steering_queue_messages() {
+        // docs/events.md, "steering_queue": the payload is `messages[]`, each
+        // with the keys of "Where a message came from", `command_id` among them.
+        let (mut bridge, _commands, lines) = test_bridge();
+        bridge.running = true;
+        request(&mut bridge, 1, "turn/steer", "c1");
+        feed(
+            &mut bridge,
+            &lines,
+            json!({"kind":"steering_queue","turn_id":"t1","payload":{"messages":[{"content":[{"type":"text","text":"earlier"}],"source":"driver","command_id":"c0"},{"content":[{"type":"text","text":"text"}],"source":"driver","command_id":"c1"}]}}),
+        );
+        let reply = written(&mut bridge).pop().expect("a reply");
+        assert_eq!(reply["id"], 1);
+        assert_eq!(
+            reply["result"],
+            json!({"turnId":"t1","disposition":"steered"})
+        );
+        assert!(bridge.pending.is_none());
+    }
+
+    #[test]
+    fn a_steering_queue_without_the_steer_settles_nothing() {
+        let (mut bridge, _commands, lines) = test_bridge();
+        bridge.running = true;
+        request(&mut bridge, 1, "turn/steer", "c1");
+        feed(
+            &mut bridge,
+            &lines,
+            json!({"kind":"steering_queue","turn_id":"t1","payload":{"messages":[{"content":[],"source":"driver","command_id":"c0"}]}}),
+        );
+        assert!(written(&mut bridge).is_empty());
+        assert!(bridge.pending.is_some());
+    }
+
+    #[test]
     fn a_turn_started_by_a_steer_logs_the_steer_as_a_user_message() {
         let (mut bridge, _commands, lines) = test_bridge();
         request(&mut bridge, 1, "turn/steer", "c1");
