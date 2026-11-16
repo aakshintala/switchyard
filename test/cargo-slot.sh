@@ -383,8 +383,10 @@ run_bounded 5 "${CMD[@]}" >"$R/out" 2>"$R/shim.err"
 rc=$?
 [ "$rc" = 127 ] || fail "all-visited passthrough loop: exit $rc, want 127"
 grep -q 'exec loop' "$R/shim.err" || fail "all-visited passthrough loop: missing exec loop diagnostic"
-grep -Fq "$T/passthrough/cargo" "$R/shim.err" || fail "all-visited passthrough loop: diagnostic omitted first stub"
-grep -Fq "$T/loop-only-2/cargo" "$R/shim.err" || fail "all-visited passthrough loop: diagnostic omitted second stub"
+# The shim lists normalised paths; $T has a doubled slash when TMPDIR ends in /.
+TN="$("$T/py/python3" -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$T")"
+grep -Fq "$TN/passthrough/cargo" "$R/shim.err" || fail "all-visited passthrough loop: diagnostic omitted first stub"
+grep -Fq "$TN/loop-only-2/cargo" "$R/shim.err" || fail "all-visited passthrough loop: diagnostic omitted second stub"
 
 # A real cargo child starts a fresh chain even though it inherits the parent's
 # visited list; its own passthrough stub must still reach real cargo.

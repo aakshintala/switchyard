@@ -255,7 +255,7 @@ def visited_paths():
     # The exec chain keeps its pid; a nested cargo process does not.
     if os.environ.get("CARGO_SLOT_VISITED_PID") != str(os.getpid()):
         return []
-    return [path for path in os.environ.get("CARGO_SLOT_VISITED", "").split(os.pathsep) if path]
+    return [os.path.abspath(path) for path in os.environ.get("CARGO_SLOT_VISITED", "").split(os.pathsep) if path]
 
 
 def find_real_cargo(path_env, shim_dir, visited):
