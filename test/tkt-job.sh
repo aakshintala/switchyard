@@ -776,6 +776,8 @@ make_record stub-1 BLOCKED none 0 2 0
 setup_case blocked
 reset_stub
 make_record stub-1 BLOCKED none 0 2 0
+printf 'Base: %s\n\n## Files\n\n- src/existing.c\n' "$H" >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan "$CDIR/plan.md" || fail "BLOCKED sets known Base"
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 1 ] || fail "BLOCKED exits 1"
 expect_verdict "TKT tkt-job BLOCKED id=stub-1 log=*" "BLOCKED"
@@ -785,6 +787,20 @@ run_job --slot lane
 [ "$RC" -eq 1 ] || fail "same-head BLOCKED exits 1"
 expect_verdict "TKT tkt-job BLOCKED id=stub-1 reused=stub-1 log=*" "same-head BLOCKED"
 grep -Fq "tkt-state $S set job.lane ''" <<<"$OUT" || fail "same-head BLOCKED explains slot reset"
+
+# With commits beyond a known plan Base, the reused-job hint resumes only push.
+setup_case same-head-BLOCKED-push-only
+reset_stub
+make_record stub-1 BLOCKED none 0 2 0
+printf 'Base: %s\n\n## Files\n\n- src/existing.c\n' "$H" >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan "$CDIR/plan.md" || fail "push-only hint sets plan"
+bash "$TKT_STATE" "$S" set job.lane stub-1 || fail "push-only hint sets job"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m committed-work
+run_job --slot lane
+[ "$RC" -eq 1 ] || fail "push-only reused BLOCKED exits 1"
+grep -Fq "tkt-job $S --slot lane --resume stub-1 --prompt <file> --gate-from-plan" <<<"$OUT" || fail "push-only reused hint names resume"
+grep -Fq 'prompt asks only for the push step: push the branch and open the PR' <<<"$OUT" || fail "push-only reused hint explains prompt"
+! grep -Fq "tkt-state $S set job.lane ''" <<<"$OUT" || fail "push-only reused hint avoids state edit"
 
 # --- reused non-zero verdicts name stale heads and explain the next step ---
 for kind in ASK BLOCKED WALL-CAP JOB-ERROR GATE-FAIL CONCERNS NO-COMMITS; do

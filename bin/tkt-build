@@ -105,7 +105,11 @@ repair_hint() {
     pr)
       lane_job="$(tkt get job.lane 2>/dev/null || true)"
       if [ -n "$lane_job" ]; then
-        printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan --expect-commits; the resumed lane must finish its push step and open the PR before tkt-build %s --from gate\n' "$state" "$lane_job" "$state"
+        if [ -n "${base:-}" ] && [ "$(git -C "$worktree" rev-list --count "$base..HEAD" 2>/dev/null || printf 0)" -gt 0 ]; then
+          printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan; the prompt asks only for the push step (push the branch and open the PR), then run tkt-build %s --from gate\n' "$state" "$lane_job" "$state"
+        else
+          printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan --expect-commits; the resumed lane must finish its push step and open the PR before tkt-build %s --from gate\n' "$state" "$lane_job" "$state"
+        fi
       else
         printf 'Repair command: tkt-build %s --from lane (create the branch PR, then resume with --from review)\n' "$state"
       fi ;;
