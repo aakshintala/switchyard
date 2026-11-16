@@ -1134,8 +1134,10 @@ cmd_run() {
 write_findings() {
   findings_dir="$(dirname "$1")"
   case "$findings_dir" in ""|".") ;; *) mkdir -p "$findings_dir";; esac
-  if finding_rows input "$2" >/dev/null 2>/dev/null; then
-    finding_rows input "$2" >"$1"
+  local rows
+  rows="$(finding_rows input "$2" 2>/dev/null || true)"
+  if [ -n "$rows" ]; then
+    printf '%s\n' "$rows" >"$1"
   else
     printf 'no open findings\n' >"$1"
   fi
@@ -1190,9 +1192,10 @@ reprint_collected() {
             printf '%s\n' "$line"
           fi;;
       esac
-      case "$line" in
-        P1\ *|P2\ *|P3\ *) printf '%s\n' "$line"; printf '%s\n' "$line" >>"$src_f";;
-      esac
+      if finding_rows input <(printf '%s\n' "$line") >/dev/null 2>&1; then
+        printf '%s\n' "$line"
+        printf '%s\n' "$line" >>"$src_f"
+      fi
     done <<<"$text"
   done
 }
@@ -1655,9 +1658,9 @@ cmd_collect() {
           bad=$((bad + 1))
           continue
         fi
-        case "$line" in
-          P1\ *|P2\ *|P3\ *) printf '%s\n' "$line" >>"$verdicts_f";;
-        esac
+        if finding_rows input <(printf '%s\n' "$line") >/dev/null 2>&1; then
+          printf '%s\n' "$line" >>"$verdicts_f"
+        fi
       done <<<"$text"
     fi
     # A reviewer with findings may end DONE_WITH_CONCERNS; its verdict still stands.

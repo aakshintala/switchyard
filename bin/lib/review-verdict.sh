@@ -131,6 +131,7 @@ review_incomplete_rows() {
   REVIEW_INCOMPLETE_HAS_OPEN_P12=0
   [ -n "$REVIEW_INCOMPLETE_ROWS" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
+    line="$(printf '%s' "$line" | sed -e 's/[[:space:]]*$//')"
     [[ "$line" == *": fixed." ]] && continue
     if [[ "$line" == P[012]\ * ]]; then REVIEW_INCOMPLETE_HAS_OPEN_P12=1; fi
   done <"$file"
