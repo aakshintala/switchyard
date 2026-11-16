@@ -65,7 +65,7 @@ Briefs you send:
 - Mutant fixes: kill each MISSED or TIMEOUT with a test, or per docs/testing.md "Proving a test bites" remove the condition (`removed: <why>`) or exempt the function (`exempted: <reason>`); new code adds no untested mutant.
 
 Phases: plan, build.
-- Plan phase: preflight and planning (including the Verifier, or the determined path) precede the build.
+- Plan phase: preflight and planning (including the Verifier, or the determined path) precede the build; they run no builds.
 - When the plan is settled, and before tkt-build or any lane job, run `~/.agents/bin/fence-grant __N__ --paths <comma-separated plan Files> [--reads <comma-separated Reads>]`. Grant every Files path whole, put read-only paths under `--reads`, and do not use `--dry`.
 - Stop and report only for #1474 `QUESTIONS`, a `sweep-*` hold, the grant cap, or fence-grant exit 3 or 4. An ordinary `OVERLAP` does not stop the lane.
 - Outside-plan paths need no plan or fence-grant update. List each in the PR body's "Outside-plan files" section with a one-line reason; ask first for the contract-change stop-list above.
