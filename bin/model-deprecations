@@ -114,7 +114,7 @@ install_weekly() {
 }
 
 run_deprecations() {
-  local model today source_sha scratch delegate_output job_id rc inbox status_output delegate_status
+  local model today source_sha scratch delegate_output job_id rc inbox status_output delegate_status concerns_file record
   RUN_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/model-deprecations.XXXXXX")"
   trap cleanup_run EXIT
   scratch="$RUN_TMP_DIR/report.md"
@@ -164,7 +164,7 @@ run_deprecations() {
   else
     delegate_status=""
   fi
-  if [ "$rc" -ne 0 ] || [ "$delegate_status" != DONE ]; then
+  if [ "$rc" -ne 0 ] || { [ "$delegate_status" != DONE ] && [ "$delegate_status" != DONE_WITH_CONCERNS ]; }; then
     echo "model-deprecations: delegate job did not finish with DONE" >&2
     python3 -I "$helper" failure "$inbox" "$today" "$source_sha" "$delegate_status"
     return 1
@@ -174,7 +174,18 @@ run_deprecations() {
     python3 -I "$helper" failure "$inbox" "$today" "$source_sha" "$delegate_status"
     return 1
   fi
-  python3 -I "$helper" publish "$scratch" "$inbox" "$today" "$source_sha"
+  if [ "$delegate_status" = DONE_WITH_CONCERNS ]; then
+    concerns_file="$RUN_TMP_DIR/concerns.txt"
+    record="$(bash "$script_dir/job-record" "$job_id" 2>/dev/null || true)"
+    if [ -z "$record" ] || ! jq -j -r '.result.text // ""' "$record" >"$concerns_file" 2>/dev/null; then
+      echo "model-deprecations: cannot read delegate result text" >&2
+      python3 -I "$helper" failure "$inbox" "$today" "$source_sha" "$delegate_status"
+      return 1
+    fi
+    python3 -I "$helper" publish "$scratch" "$inbox" "$today" "$source_sha" "$concerns_file"
+  else
+    python3 -I "$helper" publish "$scratch" "$inbox" "$today" "$source_sha"
+  fi
 }
 
 [ "$#" -ge 1 ] || usage

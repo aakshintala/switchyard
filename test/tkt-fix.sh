@@ -1813,6 +1813,57 @@ fi
 
 # Without a Fix gate the fresh job keeps --gate-from-plan and GATE is the full Gate.
 if want fix-gate-fallback; then
+# First exercise the real tkt-job gate builder. The mocked fix job below also
+# moves scratch files, so this assertion pins the guard that runs before its gate.
+setup_case fix-gate-fallback-gate-script
+mkdir -p "$T/tmp/delegate-jobs" "$T/no-system-jobs"
+printf 'Grant 1\n\nTicket: 529\nPart: 1\nPaths:\n- fix.txt\nRanges: none\n' >"$CDIR/run/fiber-529-fence-grant-test.md"
+printf 'test brief\n' >"$T/gate-test-brief.md"
+cat >"$T/bin/tkt-job" <<EOF
+#!/usr/bin/env bash
+printf 'real-job|%s\\n' "\$*" >>"$T/calls.log"
+exec "$REAL_BIN/tkt-job" "\$@"
+EOF
+chmod +x "$T/bin/tkt-job"
+cat >"$T/bin/delegate" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cmd="\${1:-}"; shift || true
+case "\$cmd" in
+  run)
+    cwd=""; gate=""
+    while [ \$# -gt 0 ]; do
+      case "\$1" in
+        --cwd) cwd="\$2"; shift 2 ;;
+        --gate) gate="\$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    id=gate-job-1
+    mkdir -p "\$cwd/run"
+    printf 'fix scratch log\\n' >"\$cwd/run/fix.log"
+    gate_rc=0
+    (cd "\$cwd" && DELEGATE_JOB_ID="\$id" DELEGATE_JOB_CHAIN="\$id" /bin/sh -c "\$gate") >"$T/real-gate-output" 2>&1 || gate_rc=\$?
+    head="\$(git -C "\$cwd" rev-parse HEAD)"
+    jq -n --arg id "\$id" --arg cwd "\$cwd" --arg gate "\$gate" --arg head "\$head" --argjson gate_rc "\$gate_rc" \\
+      '{status:"DONE",result:{status:"DONE",text:"fix gate fixture",gateResult:{passed:(\$gate_rc == 0),command:\$gate,exitCode:\$gate_rc,outputTail:"ok",outputPath:"/tmp/gate.log",startedAtMs:1700000000000,durationMs:0},changeSet:{headBefore:\$head,headAfter:\$head,newCommits:[],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false},concerns:null},supervisorPid:1,startedAtMs:1700000000000,endedAtMs:1700000001000,caller:"test",callerPid:1,callerCommand:"test",callerCwd:\$cwd,resume:{model:"fix-model",backend:"test",cwd:\$cwd,sessionId:null,gate:\$gate,toolIdleMs:7200000,idleMs:null,wallMs:null,addDirs:[]}}' \\
+      >"\$DELEGATE_JOBS_DIR/\$id.json"
+    printf '%s\\n' "\$id"
+    ;;
+  watch) ;;
+  *) echo "stub delegate: unknown \$cmd" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$T/bin/delegate"
+DELEGATE_JOBS_DIR="$T/tmp/delegate-jobs" JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs" TKT_FIX_DISPATCH=1 \
+  bash "$REAL_BIN/tkt-job" "$S" --slot fix1 --brief "$T/gate-test-brief.md" --model fix-model --gate-from-plan \
+  >"$T/real-job.out" 2>"$T/real-job.err" || fail "real gate-builder fix job failed: $(cat "$T/real-job.err")"
+gate_script="$(find "$CDIR/run" -type f -name 'switchyard-529-fix1-gate-*.sh' -print -quit)"
+[ -n "$gate_script" ] || fail "fix-gate-fallback: real fix job did not write its gate script"
+grep -Fq 'tkt-stray-run.sh' "$gate_script" || fail "fix-gate-fallback: real fix gate script omits tkt-stray-run.sh"
+[ ! -e "$WT/run/fix.log" ] || fail "fix-gate-fallback: real fix gate left the stray log in the worktree"
+grep -qx 'fix scratch log' "$CDIR/run/stray-gate-job-1-fix.log" || fail "fix-gate-fallback: real fix gate did not move the stray log"
+
 setup_case fix-gate-fallback
 printf 'stray-run' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "fix-gate-fallback exited $?: $(cat "$T/stderr")"

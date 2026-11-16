@@ -38,13 +38,19 @@ case "${1:-}" in
     [ -z "$(find "$cwd" -mindepth 1 -print -quit)" ] || empty=no
     printf 'run model=%s cwd=%s scratch=%s empty=%s\n' "$model" "$cwd" "$report_path" "$empty" >>"$DELEGATE_CALLS"
     printf '%s\n' "$prompt" >"$DELEGATE_PROMPT"
-    if [ "${DEPRECATIONS_STUB_MODE:-report}" = report ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ]; then
+    mkdir -p "$DELEGATE_JOBS_DIR"
+    printf '{"status":"%s","result":{"status":"%s","text":"%s"}}\n' \
+      "${DEPRECATIONS_STATUS:-DONE}" "${DEPRECATIONS_STATUS:-DONE}" "${DEPRECATIONS_RESULT_TEXT:-}" \
+      >"$DELEGATE_JOBS_DIR/12345678-1234-1234-1234-123456789abc.json"
+    if [ "${DEPRECATIONS_STUB_MODE:-report}" = report ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = blank ]; then
       report_date="$(sed -n 's/^Report date: //p' <<<"$prompt")"
       source_line="$(sed -n 's/^Source line: //p' <<<"$prompt")"
       if [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ]; then
         printf '# Wrong heading\n' >"$report_path"
       elif [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ]; then
         printf '# Model deprecations %s\n%s\n\n## skipped\n' "$report_date" "$source_line" >"$report_path"
+      elif [ "${DEPRECATIONS_STUB_MODE:-report}" = blank ]; then
+        : >"$report_path"
       else
         cat >"$report_path" <<REPORT
 # Model deprecations $report_date
@@ -86,6 +92,7 @@ chmod +x "$STUBS/delegate"
 export PATH="$STUBS:$PATH"
 export DELEGATE_CALLS="$T/delegate-calls"
 export DELEGATE_PROMPT="$T/delegate-prompt"
+export DELEGATE_JOBS_DIR="$T/delegate-jobs"
 export MODEL_DEPRECATIONS_TODAY=2026-05-04
 : >"$DELEGATE_CALLS"
 
@@ -127,6 +134,26 @@ case "$RUN_CWD" in "$TMPDIR"/model-deprecations.*) ;; *) fail "delegate cwd was 
 grep -q '^run .* empty=yes$' "$DELEGATE_CALLS" || fail "delegate cwd was not empty at job start"
 grep -q '^Report date: 2026-05-04$' "$DELEGATE_PROMPT" || fail "date was not passed to the model"
 
+# A DONE_WITH_CONCERNS job with a report publishes it with the delegate result text.
+CONCERNS_INBOX="$T/concerns-inbox"
+DEPRECATIONS_STATUS=DONE_WITH_CONCERNS DEPRECATIONS_RESULT_TEXT='Synthetic concern: one source needs follow-up.' \
+  MODEL_CATALOG_INBOX="$CONCERNS_INBOX" bash "$BIN" run >"$T/concerns.out" 2>"$T/concerns.err" \
+  || fail "DONE_WITH_CONCERNS report failed: $(cat "$T/concerns.err")"
+CONCERNS_REPORT="$CONCERNS_INBOX/model-deprecations-2026-05-04.md"
+[ -f "$CONCERNS_REPORT" ] || fail "DONE_WITH_CONCERNS report was not published"
+grep -q '^# Model deprecations 2026-05-04$' "$CONCERNS_REPORT" || fail "DONE_WITH_CONCERNS report heading missing"
+grep -q '^## concerns$' "$CONCERNS_REPORT" || fail "DONE_WITH_CONCERNS report has no concerns section"
+grep -Fq 'Synthetic concern: one source needs follow-up.' "$CONCERNS_REPORT" || fail "delegate result text was not appended"
+
+# A non-empty no-change report is still published for DONE_WITH_CONCERNS.
+NO_CHANGE_CONCERNS_INBOX="$T/no-change-concerns-inbox"
+DEPRECATIONS_STUB_MODE=empty DEPRECATIONS_STATUS=DONE_WITH_CONCERNS DEPRECATIONS_RESULT_TEXT='Synthetic concern for no-change report.' \
+  MODEL_CATALOG_INBOX="$NO_CHANGE_CONCERNS_INBOX" bash "$BIN" run >"$T/no-change-concerns.out" 2>"$T/no-change-concerns.err" \
+  || fail "DONE_WITH_CONCERNS no-change report failed: $(cat "$T/no-change-concerns.err")"
+NO_CHANGE_CONCERNS_REPORT="$NO_CHANGE_CONCERNS_INBOX/model-deprecations-2026-05-04.md"
+[ -f "$NO_CHANGE_CONCERNS_REPORT" ] || fail "DONE_WITH_CONCERNS no-change report was not published"
+grep -Fq 'Synthetic concern for no-change report.' "$NO_CHANGE_CONCERNS_REPORT" || fail "no-change concern text was not appended"
+
 # An empty job writes nothing and can use a configured model.
 : >"$DELEGATE_CALLS"
 EMPTY_INBOX="$T/empty-inbox"
@@ -147,6 +174,28 @@ MISSING_REPORT="$MISSING_INBOX/model-deprecations-2026-05-04.md"
 [ -f "$MISSING_REPORT" ] || fail "missing scratch report did not publish a failure report"
 grep -q '^- all: model produced no report (delegate status: DONE)$' "$MISSING_REPORT" || fail "missing report status was not recorded"
 grep -q '^## skipped$' "$MISSING_REPORT" || fail "missing report failure has no skipped section"
+
+# DONE_WITH_CONCERNS without a scratch report still publishes a failure report and fails.
+CONCERNS_MISSING_INBOX="$T/concerns-missing-inbox"
+if DEPRECATIONS_STUB_MODE=missing DEPRECATIONS_STATUS=DONE_WITH_CONCERNS MODEL_CATALOG_INBOX="$CONCERNS_MISSING_INBOX" \
+  bash "$BIN" run >"$T/concerns-missing.out" 2>"$T/concerns-missing.err"; then
+  fail "DONE_WITH_CONCERNS with a missing scratch report was accepted"
+fi
+CONCERNS_MISSING_REPORT="$CONCERNS_MISSING_INBOX/model-deprecations-2026-05-04.md"
+[ -f "$CONCERNS_MISSING_REPORT" ] || fail "missing DONE_WITH_CONCERNS report did not publish failure report"
+grep -q '^- all: model produced no report (delegate status: DONE_WITH_CONCERNS)$' "$CONCERNS_MISSING_REPORT" \
+  || fail "missing DONE_WITH_CONCERNS report status was not recorded"
+
+# An empty scratch report under DONE_WITH_CONCERNS is also a failure.
+CONCERNS_EMPTY_INBOX="$T/concerns-empty-inbox"
+if DEPRECATIONS_STUB_MODE=blank DEPRECATIONS_STATUS=DONE_WITH_CONCERNS MODEL_CATALOG_INBOX="$CONCERNS_EMPTY_INBOX" \
+  bash "$BIN" run >"$T/concerns-empty.out" 2>"$T/concerns-empty.err"; then
+  fail "DONE_WITH_CONCERNS with an empty scratch report was accepted"
+fi
+CONCERNS_EMPTY_REPORT="$CONCERNS_EMPTY_INBOX/model-deprecations-2026-05-04.md"
+[ -f "$CONCERNS_EMPTY_REPORT" ] || fail "empty DONE_WITH_CONCERNS report did not publish failure report"
+grep -q '^- all: model produced no report (delegate status: DONE_WITH_CONCERNS)$' "$CONCERNS_EMPTY_REPORT" \
+  || fail "empty DONE_WITH_CONCERNS report status was not recorded"
 
 # A job that did not finish with DONE publishes a failure report with its known status.
 FAILED_INBOX="$T/failed-inbox"
