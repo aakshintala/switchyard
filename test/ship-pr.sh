@@ -424,6 +424,7 @@ gh() {
         rm -f "$ST/head-first-stale"
       fi
       state="$(rd state OPEN)"
+      [ ! -e "$ST/in-progress-stays-open" ] || state=OPEN
       json="$(jq -nc --arg h "$h" --arg s "$state" --arg d "$(rd draft false)" --arg ms "$(rd merge-state CLEAN)" --arg mg "$(rd mergeable MERGEABLE)" --arg b "$(rd body 'Resolves #97')" --arg ca "$(rd pr-created 2026-11-04T00:00:00Z)" \
         --argjson bn "$([ -e "$ST/body-null" ] && echo true || echo false)" --argjson c "$(rd commits '[]')" --arg m "$MERGE_SHA" \
         --argjson l "$(rd pr-labels '[]')" \
@@ -453,7 +454,7 @@ gh() {
       fi
       if [ -e "$ST/merge-fail-msg" ]; then
         cat "$ST/merge-fail-msg" >&2
-        grep -qF 'Merge already in progress' "$ST/merge-fail-msg" && { touch "$ST/in-progress-wait"; echo MERGED >"$ST/state"; }
+        grep -qF 'Merge already in progress' "$ST/merge-fail-msg" && { echo MERGED >"$ST/state"; }
         [ ! -e "$ST/merge-fails-but-merges" ] || echo MERGED >"$ST/state"
         exit 1
       fi
@@ -2608,6 +2609,15 @@ expect 0 "GraphQL 502 followed by an in-progress merge"
 [ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 2 ] || fail "Merge already in progress does not trigger another merge call"
 grep -q 'waiting for the in-progress merge' <<<"$ERR" || fail "in-progress merge waiting line: [$ERR]"
 grep -qF 'gh pr view 7 --repo O/N --json state,mergeCommit' "$ST/gh.log" || fail "in-progress path re-reads PR state: [$(cat "$ST/gh.log")]"
+
+setup
+printf 'Merge already in progress' >"$ST/merge-fail-msg"
+touch "$ST/in-progress-stays-open"
+main_before="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+ship; expect 1 "in-progress merge that stays OPEN without landing fails"
+grep -qF 'gh pr merge failed' <<<"$ERR" || fail "open in-progress merge names the failed merge: [$ERR]"
+[ "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)" = "$main_before" ] || fail "open in-progress merge did not land on main"
+[ "$(grep -c '^1$' "$ST/sleeps.txt")" -eq 11 ] || fail "open in-progress merge polls quickly: [$(cat "$ST/sleeps.txt")]"
 
 setup
 printf 'Pull request cannot be merged: review required.' >"$ST/merge-fail-once"

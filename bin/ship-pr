@@ -146,10 +146,11 @@
 #        resolve `<crate>` through Cargo metadata.
 #        Once merged, the PR and each used ticket get an audit/sighting comment;
 #        the failed gate output is retained for that acceptance.
-#        Exit 0 merged, 1 gate/CI/push/merge failure (including `gh-ci wait` exit 4
-#        when a required check never started, which needs a bound (`GH_CI_NO_JOBS_AFTER`);
-#        ship-pr sets none. A gate run on the PR merged with current
-#        origin/main counts as a gate failure unless --known-flake passes the same
+#        Exit 0 merged, 1 gate/CI/push/merge failure (including
+#        `git fetch origin main failed` after the PR is marked ready, and `gh-ci wait`
+#        exit 4 when a required check never started, which needs a bound
+#        (`GH_CI_NO_JOBS_AFTER`); ship-pr sets none. A gate run on the PR merged
+#        with current origin/main counts as a gate failure unless --known-flake passes the same
 #        acceptance checks on that output; a merge that lost the race
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 merge conflict (aborted), a conflict `gh-ci wait` found after the push,
@@ -1253,12 +1254,17 @@ find_landed_commit() {
   return 1
 }
 
+read_pr_merge_state() {
+  local IFS=$' \t\n'
+  gh pr view "$pr" --repo "$repo" --json state,mergeCommit \
+    --jq '[.state, (.mergeCommit.oid // "-")] | @tsv' 2>/dev/null || true
+}
+
 # A matching main commit is a merge only if the PR record has not caught up.
 # If it did, use GitHub's merge sha and retain the normal success output.
 accept_landed_commit() {
   local state merge_sha
-  IFS=$'\t' read -r state merge_sha < <(gh pr view "$pr" --repo "$repo" --json state,mergeCommit \
-    --jq '[.state, (.mergeCommit.oid // "-")] | @tsv' 2>/dev/null || true) || true
+  IFS=$'\t' read -r state merge_sha < <(read_pr_merge_state) || true
   landed_pr_state="${state:-UNKNOWN}"
   if [ "${state:-}" = "MERGED" ]; then
     recorded_merge=1
@@ -1273,8 +1279,7 @@ wait_for_in_progress_merge() {
   local i wait_state wait_sha
   say "Merge already in progress; waiting for the in-progress merge (up to 12 polls)"
   for i in $(seq 1 12); do
-    IFS=$'\t' read -r wait_state wait_sha < <(gh pr view "$pr" --repo "$repo" --json state,mergeCommit \
-      --jq '[.state, (.mergeCommit.oid // "-")] | @tsv' 2>/dev/null || true) || true
+    IFS=$'\t' read -r wait_state wait_sha < <(read_pr_merge_state) || true
     if [ "${wait_state:-}" = "MERGED" ]; then
       recorded_merge=1
       recorded_merge_sha="${wait_sha:--}"
@@ -1566,6 +1571,32 @@ show_merge_failure() {
     say "merge is BLOCKED on pinned head ${pin:0:8}; pending or failing workflow runs:"
     report_blocked_runs
   fi
+}
+
+merge_attempt() {
+  fetch_retry origin +refs/heads/main:refs/remotes/origin/main \
+    || die_after_ready 1 "git fetch origin main failed"
+  pre_merge_main="$(git -C "$worktree" rev-parse origin/main)" \
+    || die_after_ready 1 "cannot read origin/main before merge"
+  if merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
+    [ -z "$merge_err" ] || print_merge_error "$merge_err"
+    return 0
+  fi
+
+  show_merge_failure "$merge_err"
+  if find_landed_commit "$pre_merge_main"; then
+    accept_landed_commit
+    return 0
+  fi
+  if merge_already_in_progress "$merge_err"; then
+    if ! wait_for_in_progress_merge && find_landed_commit "$pre_merge_main"; then
+      accept_landed_commit
+    elif [ -z "$recorded_merge" ] && [ -z "$landed_without_record" ]; then
+      die_after_ready 1 "gh pr merge failed"
+    fi
+    return 0
+  fi
+  return 1
 }
 
 check_mutants_gate() {
@@ -1867,102 +1898,66 @@ while :; do
   merge_err=""
   merge_failed=""
   recorded_merge="" recorded_merge_sha="" landed_without_record="" landed_output_sha="" landed_pr_state=""
-  fetch_retry origin +refs/heads/main:refs/remotes/origin/main \
-    || die_after_ready 1 "git fetch origin main failed"
-  pre_merge_main="$(git -C "$worktree" rev-parse origin/main)" \
-    || die_after_ready 1 "cannot read origin/main before merge"
-  if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
-    show_merge_failure "$merge_err"
-    if find_landed_commit "$pre_merge_main"; then
-      accept_landed_commit
-      break
-    fi
-    if merge_already_in_progress "$merge_err"; then
-      if ! wait_for_in_progress_merge && find_landed_commit "$pre_merge_main"; then
-        accept_landed_commit
-      elif [ -z "$recorded_merge" ] && [ -z "$landed_without_record" ]; then
-        die_after_ready 1 "gh pr merge failed"
+  if merge_attempt; then
+    break
+  fi
+  lost_race=""
+  case "$merge_err" in
+    *"the head branch is not up to date with the base branch"*)
+      [ "$strict" = 1 ] && lost_race=1 ;;
+  esac
+  if [ -n "$lost_race" ]; then
+    state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || state=""
+    if [ "$state" != "MERGED" ]; then
+      fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die_after_ready 1 "git fetch origin main failed"
+      if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
+        lost_race_die "origin/main has not moved past ${pin:0:8}"
       fi
-      break
-    fi
-    lost_race=""
-    case "$merge_err" in
-      *"the head branch is not up to date with the base branch"*)
-        [ "$strict" = 1 ] && lost_race=1 ;;
-    esac
-    if [ -n "$lost_race" ]; then
-      state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || state=""
-      if [ "$state" != "MERGED" ]; then
-        fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die_after_ready 1 "git fetch origin main failed"
-        if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
-          lost_race_die "origin/main has not moved past ${pin:0:8}"
-        fi
-        [ -z "$lost_race_done" ] || lost_race_die "the merged head lost the race again"
-        [ "$retries" -lt 3 ] || lost_race_die "no retries left"
-        lost_race_done=1
-        retries=$((retries + 1))
-        merge_attempted=0
-        say "origin/main moved before the merge; merging again (retry $retries of 3)"
-        continue
-      fi
-    else
-      case "$merge_err" in
-        *"Base branch was modified"*|*"GraphQL"*)
-          case "$merge_err" in
-            *"GraphQL"*) say "GraphQL error during merge; retrying once after 5 s" ;;
-            *) say "base branch was modified during merge; retrying once after 5 s" ;;
-          esac
-          sleep 5
-          fetch_retry origin +refs/heads/main:refs/remotes/origin/main \
-            || die_after_ready 1 "git fetch origin main failed"
-          pre_merge_main="$(git -C "$worktree" rev-parse origin/main)" \
-            || die_after_ready 1 "cannot read origin/main before merge"
-          if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
-            show_merge_failure "$merge_err"
-            if find_landed_commit "$pre_merge_main"; then
-              accept_landed_commit
-              break
-            fi
-            if merge_already_in_progress "$merge_err"; then
-              if ! wait_for_in_progress_merge && find_landed_commit "$pre_merge_main"; then
-                accept_landed_commit
-              elif [ -z "$recorded_merge" ] && [ -z "$landed_without_record" ]; then
-                die_after_ready 1 "gh pr merge failed"
-              fi
-              break
-            fi
-            lost_race2=""
-            case "$merge_err" in
-              *"the head branch is not up to date with the base branch"*)
-                [ "$strict" = 1 ] && lost_race2=1 ;;
-            esac
-            if [ -n "$lost_race2" ]; then
-              state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || state=""
-              if [ "$state" != "MERGED" ]; then
-                fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die_after_ready 1 "git fetch origin main failed"
-                if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
-                  lost_race_die "origin/main has not moved past ${pin:0:8}"
-                fi
-                [ -z "$lost_race_done" ] || lost_race_die "the merged head lost the race again"
-                [ "$retries" -lt 3 ] || lost_race_die "no retries left"
-                lost_race_done=1
-                retries=$((retries + 1))
-                merge_attempted=0
-                say "origin/main moved before the merge; merging again (retry $retries of 3)"
-                continue
-              fi
-            else
-              merge_failed=1
-            fi
-          else
-            [ -z "$merge_err" ] || print_merge_error "$merge_err"
-          fi
-          ;;
-        *) die_after_ready 1 "gh pr merge failed" ;;
-      esac
+      [ -z "$lost_race_done" ] || lost_race_die "the merged head lost the race again"
+      [ "$retries" -lt 3 ] || lost_race_die "no retries left"
+      lost_race_done=1
+      retries=$((retries + 1))
+      merge_attempted=0
+      say "origin/main moved before the merge; merging again (retry $retries of 3)"
+      continue
     fi
   else
-    [ -z "$merge_err" ] || print_merge_error "$merge_err"
+    case "$merge_err" in
+      *"Base branch was modified"*|*"GraphQL"*)
+        case "$merge_err" in
+          *"GraphQL"*) say "GraphQL error during merge; retrying once after 5 s" ;;
+          *) say "base branch was modified during merge; retrying once after 5 s" ;;
+        esac
+        sleep 5
+        if merge_attempt; then
+          break
+        fi
+        lost_race2=""
+        case "$merge_err" in
+          *"the head branch is not up to date with the base branch"*)
+            [ "$strict" = 1 ] && lost_race2=1 ;;
+        esac
+        if [ -n "$lost_race2" ]; then
+          state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || state=""
+          if [ "$state" != "MERGED" ]; then
+            fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die_after_ready 1 "git fetch origin main failed"
+            if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
+              lost_race_die "origin/main has not moved past ${pin:0:8}"
+            fi
+            [ -z "$lost_race_done" ] || lost_race_die "the merged head lost the race again"
+            [ "$retries" -lt 3 ] || lost_race_die "no retries left"
+            lost_race_done=1
+            retries=$((retries + 1))
+            merge_attempted=0
+            say "origin/main moved before the merge; merging again (retry $retries of 3)"
+            continue
+          fi
+        else
+          merge_failed=1
+        fi
+        ;;
+      *) die_after_ready 1 "gh pr merge failed" ;;
+    esac
   fi
   break
 done
@@ -1973,8 +1968,7 @@ if [ -n "$landed_without_record" ]; then
 fi
 if [ -z "$merged" ]; then
   for i in $(seq 1 12); do
-    IFS=$'\t' read -r state sha < <(gh pr view "$pr" --repo "$repo" --json state,mergeCommit \
-      --jq '[.state, (.mergeCommit.oid // "-")] | @tsv' 2>/dev/null || true) || true
+    IFS=$'\t' read -r state sha < <(read_pr_merge_state) || true
     if [ "${state:-}" = "MERGED" ]; then merged=1; break; fi
     [ "$i" -lt 12 ] && sleep "${SHIP_PR_INTERVAL:-5}"
   done
