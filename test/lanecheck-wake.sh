@@ -631,82 +631,93 @@ else
   fail "missed-fw-ruling-is-resent (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
-# A STATUS: HOLD report suppresses wake messages until a newer ruling arrives.
-r=$(newrun hold-status)
-lane "$r" 5101 fiber-5101-build sid-5101
-mkdir -p "$r/rulings"
-printf 'repo=example/switchyard\nissue=5101\njob.lane=job-5101\n' >"$r/fiber-5101.state"
-set_session sid-5101 5101 turn-hold-status completed 3000000
-set_logs turn-hold-status 2900000 3000000 'STATUS: DONE'
-printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-build %s/fiber-5101.state\n' "$r" >"$T/box-procs"
-: >"$T/send-commands"
-out=$(run_lanecheck "$r" 3000)
-set_processes
-mkdir -p "$r/inbox"
-mac_report="$r/inbox/lane-5101-20261109T000000Z.md"
-printf 'STATUS: HOLD — waiting for a ruling.\n' >"$mac_report"
-python3 - "$mac_report" <<'PY'
+# Hold reports arrive either in place as run/fiber-<n>-report.md (#1953) or as a
+# Mac lane's inbox message lane-<n>-<ts>.md (#1958); both shapes must hold.
+hold_report_path() {
+  if [ "$4" = file ]; then
+    printf '%s/fiber-%s-report.md\n' "$1" "$2"
+  else
+    mkdir -p "$1/inbox"
+    printf '%s/inbox/lane-%s-%s.md\n' "$1" "$2" "$3"
+  fi
+}
+for shape in file mac; do
+  # A STATUS: HOLD report suppresses wake messages until a newer ruling arrives.
+  r=$(newrun "hold-status-$shape")
+  lane "$r" 5101 fiber-5101-build sid-5101
+  mkdir -p "$r/rulings"
+  printf 'repo=example/switchyard\nissue=5101\njob.lane=job-5101\n' >"$r/fiber-5101.state"
+  set_session sid-5101 5101 turn-hold-status completed 3000000
+  set_logs turn-hold-status 2900000 3000000 'STATUS: DONE'
+  printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-build %s/fiber-5101.state\n' "$r" >"$T/box-procs"
+  : >"$T/send-commands"
+  out=$(run_lanecheck "$r" 3000)
+  set_processes
+  mac_report=$(hold_report_path "$r" 5101 20261109T000000Z "$shape")
+  printf 'STATUS: HOLD — waiting for a ruling.\n' >"$mac_report"
+  python3 - "$mac_report" <<'PY'
 import os, sys
 os.utime(sys.argv[1], (1794253000, 1794253000))
 PY
-out=$(run_lanecheck "$r" 3000); lrc=$?
-if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 5101 hold' \
-   && [ ! -s "$T/send-commands" ]; then
-  ok status-hold-waits-without-wake
-else
-  fail "status-hold-waits-without-wake (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
-fi
-cat >"$r/rulings/ruling-5101-RULING-5101-2.md" <<'EOF'
+  out=$(run_lanecheck "$r" 3000); lrc=$?
+  if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 5101 hold' \
+     && [ ! -s "$T/send-commands" ]; then
+    ok "status-hold-waits-without-wake-$shape"
+  else
+    fail "status-hold-waits-without-wake-$shape (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
+  fi
+  cat >"$r/rulings/ruling-5101-RULING-5101-2.md" <<'EOF'
 RULING-5101-2: continue with the next step.
 EOF
-python3 - "$r/rulings/ruling-5101-RULING-5101-2.md" <<'PY'
+  python3 - "$r/rulings/ruling-5101-RULING-5101-2.md" <<'PY'
 import os, sys
 os.utime(sys.argv[1], (1794253010, 1794253010))
 PY
-set_processes
-: >"$T/last-send"
-out=$(run_lanecheck "$r" 3001); lrc=$?
-if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5101 .*job job-5101 (tkt-build) finished' \
-   && grep -Fq 'ticket #5101, job job-5101 (tkt-build)' "$T/last-send"; then
-  ok newer-ruling-clears-hold-and-normal-wake-fires
-else
-  fail "newer-ruling-clears-hold-and-normal-wake-fires (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
-fi
+  set_processes
+  : >"$T/last-send"
+  out=$(run_lanecheck "$r" 3001); lrc=$?
+  if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5101 .*job job-5101 (tkt-build) finished' \
+     && grep -Fq 'ticket #5101, job job-5101 (tkt-build)' "$T/last-send"; then
+    ok "newer-ruling-clears-hold-and-normal-wake-fires-$shape"
+  else
+    fail "newer-ruling-clears-hold-and-normal-wake-fires-$shape (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+  fi
 
-# An ACK of an archived hold ruling suppresses wakes just like STATUS: HOLD.
-r=$(newrun hold-ack)
-lane "$r" 5102 fiber-5102-build sid-5102
-printf 'repo=example/switchyard\nissue=5102\njob.fix1=job-5102\n' >"$r/fiber-5102.state"
-mkdir -p "$r/rulings"
-set_session sid-5102 5102 turn-hold-ack completed 3000000
-set_logs turn-hold-ack 2900000 3000000 'STATUS: DONE'
-printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-5102.state\n' "$r" >"$T/box-procs"
-: >"$T/send-commands"
-out=$(run_lanecheck "$r" 3000)
-set_processes
-cat >"$r/rulings/ruling-5102-RULING-5102-1.md" <<'EOF'
+  # An ACK of an archived hold ruling suppresses wakes just like STATUS: HOLD.
+  r=$(newrun "hold-ack-$shape")
+  lane "$r" 5102 fiber-5102-build sid-5102
+  printf 'repo=example/switchyard\nissue=5102\njob.fix1=job-5102\n' >"$r/fiber-5102.state"
+  mkdir -p "$r/rulings"
+  set_session sid-5102 5102 turn-hold-ack completed 3000000
+  set_logs turn-hold-ack 2900000 3000000 'STATUS: DONE'
+  printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-5102.state\n' "$r" >"$T/box-procs"
+  : >"$T/send-commands"
+  out=$(run_lanecheck "$r" 3000)
+  set_processes
+  cat >"$r/rulings/ruling-5102-RULING-5102-1.md" <<'EOF'
 RULING-5102-1: hold this lane until the next ruling.
 hold: wait for an explicit go-ahead.
 EOF
-mkdir -p "$r/inbox"
-mac_report="$r/inbox/lane-5102-20261109T000001Z.md"
-cat >"$mac_report" <<'EOF'
+  mac_report=$(hold_report_path "$r" 5102 20261109T000001Z "$shape")
+  cat >"$mac_report" <<'EOF'
 STATUS: DONE — work paused.
 ACK RULING-5102-1
 EOF
-python3 - "$r/rulings/ruling-5102-RULING-5102-1.md" "$mac_report" <<'PY'
+  python3 - "$r/rulings/ruling-5102-RULING-5102-1.md" "$mac_report" <<'PY'
 import os, sys
 os.utime(sys.argv[1], (1794253000, 1794253000))
 os.utime(sys.argv[2], (1794253001, 1794253001))
 PY
-: >"$T/send-commands"
-out=$(run_lanecheck "$r" 3000); lrc=$?
-if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 5102 hold' \
-   && [ ! -s "$T/send-commands" ]; then
-  ok ack-of-hold-ruling-waits-without-wake
-else
-  fail "ack-of-hold-ruling-waits-without-wake (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
-fi
+  : >"$T/send-commands"
+  out=$(run_lanecheck "$r" 3000); lrc=$?
+  if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 5102 hold' \
+     && [ ! -s "$T/send-commands" ]; then
+    ok "ack-of-hold-ruling-waits-without-wake-$shape"
+  else
+    fail "ack-of-hold-ruling-waits-without-wake-$shape (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
+  fi
+
+done
 
 # A go ruling may mention a hold without marking itself as a hold.
 r=$(newrun ack-of-go-ruling)
