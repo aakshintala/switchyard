@@ -187,7 +187,8 @@ parse_p3_verify_findings() {
         section=""
       fi
       if finding_row_is_closed "$section" "$line"; then
-        previous_list_item="$current_list_item"
+        # A continuation line keeps the list item open for the next wrapped line.
+        previous_list_item=$((current_list_item | wrapped_continuation))
         continue
       fi
       if [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then

@@ -975,7 +975,7 @@ ship; expect 5 "bare P2 after a fixed row refuses despite later open P3"; expect
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
-  {created_at:"2026-11-04T11:00:00Z",id:126,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed:\n- P3 a.rs:1 (fixed): first fixed row\n  Wrapped continuation text\n- P3 b.rs:2 (fixed): later fixed row\nOpen:\nP3 c.rs:3 — open finding — fix")}
+  {created_at:"2026-11-04T11:00:00Z",id:126,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed:\n- P3 a.rs:1 (fixed): first fixed row\n  Wrapped continuation text\n  second wrapped line\n- P3 b.rs:2 (fixed): later fixed row\nOpen:\nP3 c.rs:3 — open finding — fix")}
 ]' >"$ST/review-comments"
 ship; expect 0 "wrapped continuation keeps later fixed bullets closed"
 [ "$(jq 'length' "$ST/created-issues")" = 1 ] || fail "only the open P3 is filed after a wrapped continuation: [$(cat "$ST/created-issues")]"
@@ -994,7 +994,7 @@ ship; expect 5 "Fixed at HEAD with extra prose does not close a bare P2"; expect
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
-  {created_at:"2026-11-04T11:00:00Z",id:128,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\n## Not judged\nP1 new issue under not judged\nOpen:\nP3 c.rs:3 — open finding — fix")}
+  {created_at:"2026-11-04T11:00:00Z",id:128,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\n### Not judged\nP1 new issue under not judged\nOpen:\nP3 c.rs:3 — open finding — fix")}
 ]' >"$ST/review-comments"
 ship; expect 5 "bare P1 under Not judged refuses despite later open P3"; expect_refused REVIEW; no_merge "bare P1 under Not judged"
 
