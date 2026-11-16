@@ -1449,26 +1449,36 @@ fn is_idle_exit(line: &Value) -> bool {
     line["kind"] == "session.exited" && line["reason"] == "idle"
 }
 
-/// Waits for the supervisor's inbox note, which it writes just after the
-/// state change `watch_until` returns on. The note file is itself the
-/// supervisor's signal, read as the `DELEGATE_SESSION_TEST_*` readiness
-/// files are; a hook would be a second file written beside it.
-fn wait_for_note(inbox: &Path, note: &str) {
+/// The readiness file the supervisor creates once it has written its first
+/// inbox note (`DELEGATE_SESSION_TEST_NOTE_WRITTEN`). It sits beside the
+/// inbox, not in it, so the inbox holds only notes.
+fn note_signal(e: &Env) -> PathBuf {
+    e.dir.join("note-written")
+}
+
+fn wait_for_signal(path: &Path) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let notes: Vec<String> = std::fs::read_dir(inbox)
-            .unwrap()
-            .filter_map(|entry| std::fs::read_to_string(entry.unwrap().path()).ok())
-            .collect();
-        if notes.iter().any(|text| text == note) {
-            return;
-        }
+    while !path.exists() {
         assert!(
             std::time::Instant::now() < deadline,
-            "inbox has no {note:?}: {notes:?}"
+            "readiness signal did not arrive: {path:?}"
         );
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Blocks until the supervisor signals its inbox note, then reads the inbox
+/// once.
+fn wait_for_note(e: &Env, inbox: &Path, note: &str) {
+    wait_for_signal(&note_signal(e));
+    let notes: Vec<String> = std::fs::read_dir(inbox)
+        .unwrap()
+        .filter_map(|entry| std::fs::read_to_string(entry.unwrap().path()).ok())
+        .collect();
+    assert!(
+        notes.iter().any(|text| text == note),
+        "inbox has no {note:?}: {notes:?}"
+    );
 }
 
 struct OneTurn {
@@ -1502,7 +1512,9 @@ fn one_fiber_turn(turn_events: fn(&str) -> Vec<Value>) -> OneTurn {
         conn.accept(&close, json!({}));
         conn.send(event("fiber_exited", session_id, 99, json!({"exit_code":0})));
     });
-    let id = started_session_id(&start_fiber_session(&e, MODEL, &brief, &inbox, &[]));
+    let signal = note_signal(&e).display().to_string();
+    let signal = [("DELEGATE_SESSION_TEST_NOTE_WRITTEN", signal.as_str())];
+    let id = started_session_id(&start_fiber_session(&e, MODEL, &brief, &inbox, &signal));
     // Watch blocks until the turn ends; 0 is idle.
     let watch = e.delegate(&["session", "watch", &id, "--json"], None);
     assert_eq!(
@@ -1512,7 +1524,7 @@ fn one_fiber_turn(turn_events: fn(&str) -> Vec<Value>) -> OneTurn {
         String::from_utf8_lossy(&watch.stderr)
     );
     let watched: Value = serde_json::from_slice(&watch.stdout).unwrap();
-    wait_for_note(&inbox, &format!("[session {id} idle]\n"));
+    wait_for_note(&e, &inbox, &format!("[session {id} idle]\n"));
     let lines = session_log_lines(&e, &id);
     let stopped = e.delegate(&["session", "stop", &id, "--json"], None);
     assert!(
@@ -1640,11 +1652,13 @@ fn fiber_session_reconnect_exhaustion_marks_the_session_dead() {
         // The scenario returns: the connection drops and the hub's listener
         // goes with it, so every reconnect attempt is refused.
     });
-    let id = started_session_id(&start_fiber_session(&e, MODEL, &brief, &inbox, &[]));
+    let signal = note_signal(&e).display().to_string();
+    let signal = [("DELEGATE_SESSION_TEST_NOTE_WRITTEN", signal.as_str())];
+    let id = started_session_id(&start_fiber_session(&e, MODEL, &brief, &inbox, &signal));
     let state = watch_until(&e, &id, "dead");
     assert_eq!(state["dead"]["reason"], "hostExited", "{state:#}");
     assert_eq!(state["dead"]["exitCode"], 1, "{state:#}");
-    wait_for_note(&inbox, &format!("[session {id} dead]\n"));
+    wait_for_note(&e, &inbox, &format!("[session {id} dead]\n"));
     let watch = e.delegate(&["session", "watch", &id, "--json"], None);
     assert_eq!(watch.status.code(), Some(4));
     let commands = fake.finish();

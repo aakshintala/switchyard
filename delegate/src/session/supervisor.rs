@@ -1934,6 +1934,8 @@ fn write_note_or_log(
     {
         fatal_write.store(true, Ordering::SeqCst);
     }
+    // Test-only: unset, this is one `env::var_os` call and nothing else.
+    super::signal_test_readiness("DELEGATE_SESSION_TEST_NOTE_WRITTEN");
 }
 
 fn update_store(
