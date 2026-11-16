@@ -991,36 +991,7 @@ cmd_start() {
           else
             echo "review-pr: refusing --ruling $ruling_id: $ruling_refutes_failure${ruling_refutes_failure_prefix:+: $ruling_refutes_failure_prefix}" >&2
           fi
-          if [ "$ruling_refutes_failure" = no-match ] || [ "$ruling_refutes_failure" = ambiguous ]; then
-            if [ "$ruling_refutes_failure" = ambiguous ]; then
-              candidate_total="${#ruling_match_matched_bases[@]}"
-            else
-              candidate_total="${#ruling_match_candidate_bases[@]}"
-            fi
-            if [ "$candidate_total" -eq 0 ]; then
-              echo "review-pr: no open candidate rows" >&2
-            else
-              candidate_limit="$candidate_total"
-              [ "$candidate_limit" -le 20 ] || candidate_limit=20
-              for ((candidate_index = 0; candidate_index < candidate_limit; candidate_index++)); do
-                if [ "$ruling_refutes_failure" = ambiguous ]; then
-                  candidate_row="${ruling_match_matched_bases[$candidate_index]}"
-                  candidate_source="${ruling_match_matched_sources[$candidate_index]}"
-                else
-                  candidate_row="${ruling_match_candidate_bases[$candidate_index]}"
-                  candidate_source="${ruling_match_candidate_sources[$candidate_index]}"
-                fi
-                if [ "${#candidate_row}" -gt 100 ]; then
-                  candidate_row="${candidate_row:0:100}..."
-                fi
-                echo "review-pr: open candidate [$candidate_source]: $candidate_row" >&2
-              done
-              if [ "$candidate_total" -gt "$candidate_limit" ]; then
-                candidate_more=$((candidate_total - candidate_limit))
-                echo "review-pr: ... $candidate_more more candidate rows" >&2
-              fi
-            fi
-          fi
+          ruling_refutes_print_candidates "$ruling_refutes_failure" review-pr
           if [ "$ruling_refutes_failure" != bad-refutes ]; then
             [ -z "$ruling_refutes_hint" ] || echo "review-pr: $ruling_refutes_hint" >&2
           fi

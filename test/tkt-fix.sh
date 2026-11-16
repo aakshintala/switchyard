@@ -732,7 +732,7 @@ write_ruling_comment 99 'refutes: P1 fix.txt:1 — a because the concern is unfo
 run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = 2 ] || fail "ruling-trailing-prose exited $run_rc, want refusal: $out $(cat "$T/stderr")"
 grep -Fq 'TKT tkt-fix RULING-REFUSED reason=no-match comment=99' <<<"$out" || fail "ruling-trailing-prose had wrong refusal: $out"
-grep -Fq 'Use a column-0 `refutes: <exact leading text of the row>` line; put any reason on the next line.' <<<"$out" || fail "ruling-trailing-prose form hint is missing: $out"
+grep -Fq "Use a column-0 \`refutes: <row prefix>\` line; the prefix starts with \`P<n> \`, ends where the row has a space, a \`:\`, or a \`,\`, \`.\` or \`;\` followed by a space or the row's end, and matches exactly one open row. Put any reason on the next line." <<<"$out" || fail "ruling-trailing-prose form hint is missing: $out"
 ! grep -q '^job|' "$T/calls.log" || fail "ruling-trailing-prose dispatched a fix job: $(cat "$T/calls.log")"
 fi
 

@@ -671,7 +671,7 @@ write_ruling_comment 922 'refutes: P2 absent.sh:9'
 run_verify_rulings 922
 [ "$RC" = 2 ] || fail "ruling-refutes-no-match exited $RC, want 2: $OUT"
 assert_first_verdict 'RULING-REFUSED reason=no-match comment=922' 'ruling-refutes-no-match'
-grep -Fq 'Use a column-0 `refutes: <exact leading text of the row>` line; put any reason on the next line.' <<<"$OUT" || fail "ruling-refutes-no-match form hint is missing: $OUT"
+grep -Fq "Use a column-0 \`refutes: <row prefix>\` line; the prefix starts with \`P<n> \`, ends where the row has a space, a \`:\`, or a \`,\`, \`.\` or \`;\` followed by a space or the row's end, and matches exactly one open row. Put any reason on the next line." <<<"$OUT" || fail "ruling-refutes-no-match form hint is missing: $OUT"
 assert_no_review 'ruling-refutes-no-match'
 assert_no_slot 'ruling-refutes-no-match'
 ! grep -q '^refuted:' "$F" || fail "ruling-refutes-no-match modified the caller's findings file"
@@ -695,7 +695,7 @@ write_ruling_comment 924 'refutes: P1 src/main.sh:1 — initial finding because 
 run_verify_ruling 924
 [ "$RC" = 2 ] || fail "ruling-refutes-trailing-prose exited $RC, want 2: $OUT"
 assert_first_verdict 'RULING-REFUSED reason=no-match comment=924' 'ruling-refutes-trailing-prose'
-grep -Fq 'Use a column-0 `refutes: <exact leading text of the row>` line; put any reason on the next line.' <<<"$OUT" || fail "ruling-refutes-trailing-prose form hint is missing: $OUT"
+grep -Fq "Use a column-0 \`refutes: <row prefix>\` line; the prefix starts with \`P<n> \`, ends where the row has a space, a \`:\`, or a \`,\`, \`.\` or \`;\` followed by a space or the row's end, and matches exactly one open row. Put any reason on the next line." <<<"$OUT" || fail "ruling-refutes-trailing-prose form hint is missing: $OUT"
 assert_no_review 'ruling-refutes-trailing-prose'
 assert_no_slot 'ruling-refutes-trailing-prose'
 
