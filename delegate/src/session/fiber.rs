@@ -405,7 +405,7 @@ fn emit_event(out: &mut impl Write, event: &Value) {
         "turn_started" => ("turn/started", json!({"turnId":turn_id})),
         "turn_completed" => (
             "turn/completed",
-            json!({"turnId":turn_id,"terminal":match p.get("outcome").and_then(Value::as_str).unwrap_or(""){"completed"=>"completed","interrupted"=>"cancelled",_=>"failed"},"error":p.get("error"),"questions":p.get("questions")}),
+            json!({"turnId":turn_id,"terminal":match p.get("outcome").and_then(Value::as_str).unwrap_or(""){"completed"=>"completed","interrupted"=>"cancelled",_=>"failed"},"error":msp_error(p.get("error")),"questions":p.get("questions")}),
         ),
         "user_message" => (
             "item/completed",
@@ -436,6 +436,18 @@ fn emit_event(out: &mut impl Write, event: &Value) {
     );
     let _ = out.flush();
 }
+
+/// Fiber's `error` object is `{code, message}` (docs/events.md, "error");
+/// MSP's turn error is `{kind, message}`, so `code` becomes `kind`.
+fn msp_error(error: Option<&Value>) -> Value {
+    match error {
+        Some(error) if error.is_object() => {
+            json!({"kind":error.get("code"),"message":error.get("message")})
+        }
+        _ => Value::Null,
+    }
+}
+
 fn emit_idle_exit(out: &mut impl Write) {
     let _ = writeln!(
         out,

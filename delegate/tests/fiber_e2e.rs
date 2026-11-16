@@ -1558,6 +1558,23 @@ fn fiber_session_failed_turn_ends_failed() {
     let last_turn = &turn.watched["session"]["lastTurn"];
     assert_eq!(last_turn["turnId"], "t1", "{last_turn:#}");
     assert_eq!(last_turn["terminal"], "failed", "{last_turn:#}");
+    // Fiber's `error` is `{code, message}` (docs/events.md, "error");
+    // MSP's is `{kind, message}`, with `kind` the Fiber `code`.
+    assert_eq!(
+        last_turn["error"],
+        json!({"kind":"provider_error","message":"the model call failed"}),
+        "{last_turn:#}"
+    );
+    let completed = turn
+        .lines
+        .iter()
+        .find(|line| line["kind"] == "turn.completed")
+        .expect("a turn.completed log line");
+    assert_eq!(
+        completed["error"],
+        json!({"kind":"provider_error","message":"the model call failed"}),
+        "{completed:#}"
+    );
 }
 
 #[test]
