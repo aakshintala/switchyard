@@ -1160,7 +1160,7 @@ churn_lane() { # ticket lane backed by a local delegate record store
 }
 churn_state() { # run ticket plan-verdict epoch rule-ok epoch
   local run="$1" ticket="$2" plan_at="$3" rule_at="$4" state="$1/fiber-$2.state"
-  printf 'repo=aakshintala/switchyard\nissue=%s\nplan_verdict=ok\nplan_verdict_at=%s\n' \
+  printf 'repo=example/switchyard\nissue=%s\nplan_verdict=ok\nplan_verdict_at=%s\n' \
     "$ticket" "$(epoch_stamp "$plan_at")" >"$state"
   printf '%s tkt-plan rule-ok by=surveyor ruling=RULING-%s-1 comment=1\n' \
     "$(epoch_stamp "$rule_at")" "$ticket" >"${state%.state}.journal"
