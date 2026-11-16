@@ -9,14 +9,23 @@ ruling_match_begin() {
   ruling_match_seen=()
   ruling_match_count=0
   ruling_match_base=""
-  ruling_match_candidate_bases=()
-  ruling_match_candidate_sources=()
-  ruling_match_matched_bases=()
-  ruling_match_matched_sources=()
+  # Entries are "<source><TAB><base>", in first-seen order.
+  ruling_match_candidates=()
+  ruling_match_matched=()
+}
+
+# Succeed when the first argument equals any later one.
+ruling_match_has() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do
+    [ "$item" != "$needle" ] || return 0
+  done
+  return 1
 }
 
 ruling_match_file() {
-  local prefix="$1" path="$2" kind="$3" row base status prior duplicate candidate_index candidate_source boundary_match
+  local prefix="$1" path="$2" kind="$3" row base status entry candidate_source boundary_match
   # A ruling may copy the row's markup; compare both sides without it.
   prefix="$(normalize_finding_line "$prefix")"
   case "$kind" in history) candidate_source='posted round' ;; *) candidate_source='findings file' ;; esac
@@ -33,18 +42,9 @@ ruling_match_file() {
     fi
     [ "$status" = open ] || continue
 
-    duplicate=0
-    for candidate_index in "${!ruling_match_candidate_bases[@]}"; do
-      if [ "${ruling_match_candidate_bases[$candidate_index]}" = "$base" ] \
-        && [ "${ruling_match_candidate_sources[$candidate_index]}" = "$candidate_source" ]; then
-        duplicate=1
-        break
-      fi
-    done
-    if [ "$duplicate" -eq 0 ]; then
-      ruling_match_candidate_bases+=("$base")
-      ruling_match_candidate_sources+=("$candidate_source")
-    fi
+    entry="$candidate_source"$'\t'"$base"
+    ruling_match_has "$entry" ${ruling_match_candidates[@]+"${ruling_match_candidates[@]}"} \
+      || ruling_match_candidates+=("$entry")
 
     boundary_match=0
     case "$base" in
@@ -53,28 +53,42 @@ ruling_match_file() {
       "$prefix"|"$prefix "*|"$prefix":*|"$prefix",|"$prefix",\ *|"$prefix".|"$prefix".\ *|"$prefix"\;|"$prefix"\;\ *) boundary_match=1 ;;
     esac
     [ "$boundary_match" -eq 1 ] || continue
-    duplicate=0
-    for candidate_index in "${!ruling_match_matched_bases[@]}"; do
-      if [ "${ruling_match_matched_bases[$candidate_index]}" = "$base" ] \
-        && [ "${ruling_match_matched_sources[$candidate_index]}" = "$candidate_source" ]; then
-        duplicate=1
-        break
-      fi
-    done
-    if [ "$duplicate" -eq 0 ]; then
-      ruling_match_matched_bases+=("$base")
-      ruling_match_matched_sources+=("$candidate_source")
-    fi
+    ruling_match_has "$entry" ${ruling_match_matched[@]+"${ruling_match_matched[@]}"} \
+      || ruling_match_matched+=("$entry")
 
-    duplicate=0
-    for prior in ${ruling_match_seen[@]+"${ruling_match_seen[@]}"}; do
-      if [ "$prior" = "$base" ]; then duplicate=1; break; fi
-    done
-    [ "$duplicate" -eq 0 ] || continue
+    ! ruling_match_has "$base" ${ruling_match_seen[@]+"${ruling_match_seen[@]}"} || continue
     ruling_match_seen+=("$base")
     ruling_match_count=$((ruling_match_count + 1))
     [ "$ruling_match_count" -ne 1 ] || ruling_match_base="$base"
   done <"$path"
+}
+
+# After a no-match or ambiguous ruling_refutes_validate_file failure, print the
+# open rows it saw (no-match) or the rows the prefix matched (ambiguous) to
+# stderr: at most 20, each cut to 100 characters, labelled by source.
+ruling_refutes_print_candidates() {
+  local failure="$1" label="${2:-review-pr}" entry row source total limit index
+  local -a entries=()
+  case "$failure" in
+    ambiguous) entries=(${ruling_match_matched[@]+"${ruling_match_matched[@]}"}) ;;
+    no-match) entries=(${ruling_match_candidates[@]+"${ruling_match_candidates[@]}"}) ;;
+    *) return 0 ;;
+  esac
+  total="${#entries[@]}"
+  if [ "$total" -eq 0 ]; then
+    echo "$label: no open candidate rows" >&2
+    return 0
+  fi
+  limit="$total"
+  [ "$limit" -le 20 ] || limit=20
+  for ((index = 0; index < limit; index++)); do
+    entry="${entries[$index]}"
+    source="${entry%%$'\t'*}"
+    row="${entry#*$'\t'}"
+    [ "${#row}" -le 100 ] || row="${row:0:100}..."
+    echo "$label: open candidate [$source]: $row" >&2
+  done
+  [ "$total" -le "$limit" ] || echo "$label: ... $((total - limit)) more candidate rows" >&2
 }
 
 # Parse and validate every column-0 refutes: line in one ruling comment.
@@ -109,7 +123,7 @@ ruling_refutes_validate_file() {
     if [ "$ruling_match_count" -eq 0 ]; then
       ruling_refutes_failure=no-match
       ruling_refutes_failure_prefix="$ruling_prefix"
-      ruling_refutes_hint='Use a column-0 `refutes: <exact leading text of the row>` line; put any reason on the next line.'
+      ruling_refutes_hint='Use a column-0 `refutes: <row prefix>` line; the prefix starts with `P<n> `, ends where the row has a space, a `:`, or a `,`, `.` or `;` followed by a space or the row'"'"'s end, and matches exactly one open row. Put any reason on the next line.'
       return 1
     fi
     if [ "$ruling_match_count" -ne 1 ]; then
