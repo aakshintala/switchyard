@@ -454,16 +454,13 @@ symbol_snapshot() {
 }
 
 # Compare cited symbols from verified_base to the plan's current Base. The
-# globals reanchor_has_citations, reanchor_changed_symbols and
-# mechanical_reanchor describe the result; drift is set for changed symbols.
+# globals reanchor_changed_symbols describe changed citations; drift is set for them.
 classify_reanchor() {
-  local vbase old_hash old_verdict p citation_path symbol symbol_name old_tree new_tree
+  local vbase p citation_path symbol symbol_name old_tree new_tree
   local old_path new_path old_content new_content old_snapshot new_snapshot changed
   local dir="$worktree"
-  reanchor_has_citations=0
-  mechanical_reanchor=0
-  drift=0
   reanchor_changed_symbols=()
+  drift=0
   vbase="$(t get verified_base 2>/dev/null || true)"
   [ -n "$vbase" ] && [ "$vbase" != "$base" ] || return 0
   git -C "$worktree" merge-base --is-ancestor "$vbase" "$base" 2>/dev/null || return 0
@@ -486,7 +483,6 @@ classify_reanchor() {
     else p="$citation_path"
     fi
     covered "$p" || continue
-    reanchor_has_citations=1
     changed=0
     [ "$new_kind" = found ] && [ "$old_kind" = found ] || changed=1
     symbol_name="${symbol##*::}"
@@ -511,17 +507,6 @@ classify_reanchor() {
 
   if reanchor_has_changed_symbols; then
     drift=1
-    return 0
-  fi
-  [ "$reanchor_has_citations" -eq 1 ] || return 0
-  old_hash="$(t get verified_plan_hash 2>/dev/null || true)"
-  old_verdict="$(t get plan_verdict 2>/dev/null || true)"
-  case "$old_verdict" in ok|triaged) ;; *) return 0 ;; esac
-  [ -n "$old_hash" ] || return 0
-  if old_body_hash="$(plan_object_body_hash "$old_hash" 2>/dev/null)" &&
-     new_body_hash="$(plan_body_hash "$plan" 2>/dev/null)" &&
-     [ "$old_body_hash" = "$new_body_hash" ]; then
-    mechanical_reanchor=1
   fi
 }
 
@@ -747,30 +732,20 @@ do_verify() {
   fi
   round="$(ronum)"
   classify_reanchor
-  if [ "$mechanical_reanchor" -eq 1 ]; then
-    plan_verdict_write "$tkt_state" "$state" ok "$base" "$plan" "$worktree"
-    verified_plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
-    t set verified_base "$base"
-    t set verified_plan_hash "$verified_plan_hash"
-    t set plan_stop_verdict_key ""
-    t set plan_stop_verdict_at ""
-    t set build_stale_recovery_base ""
-    t set build_stale_recovery_plan_hash ""
-    emit "REANCHORED base=$base" 0 "cited symbol bodies and signatures are unchanged; no Verifier round spent"
-  fi
-  # Re-anchor analysis and the task-scoped drift exemption are independent: a
-  # cited plan whose body changed still receives the existing drift check.
+  # Re-anchor analysis and the Files-scoped drift exemption are independent:
+  # a cited plan whose body changed still receives the existing drift check.
   vbase="$(t get verified_base 2>/dev/null || true)"
-  if [ -n "$vbase" ]; then
-    tpaths=()
-    while IFS= read -r p; do tpaths+=("$p"); done < <(plan_task_pathspecs "$plan" "$worktree" "$base")
-    if [ "${#tpaths[@]}" -eq 0 ]; then
-      while IFS= read -r p; do tpaths+=("$p"); done < <(plan_files_pathspecs "$plan")
-    fi
-    if [ "${#tpaths[@]}" -gt 0 ]; then
-      if dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${tpaths[@]}" 2>/dev/null)"; then
-        [ -n "$dstat" ] && drift=1
-      fi
+  base_reanchored=0
+  files_diff_checked=0
+  if [ -n "$vbase" ] && [ "$vbase" != "$base" ] && git -C "$worktree" merge-base --is-ancestor "$vbase" "$base" 2>/dev/null; then
+    base_reanchored=1
+    plan_files=()
+    while IFS= read -r p; do plan_files+=("$p"); done < <(plan_files_pathspecs "$plan")
+    if [ "${#plan_files[@]}" -eq 0 ]; then
+      files_diff_checked=1
+    elif dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${plan_files[@]}" 2>/dev/null)"; then
+      files_diff_checked=1
+      [ -n "$dstat" ] && drift=1
     fi
   fi
   # A build-phase STALE recovery carries a state marker tied to its new Base
@@ -791,6 +766,26 @@ do_verify() {
         fi
       fi
     fi
+  fi
+  if [ "$base_reanchored" -eq 1 ] && [ "$files_diff_checked" -eq 1 ] && [ "$drift" -eq 0 ] && [ "$unresolved_fix" -eq 0 ]; then
+    prior_verdict="$(t get plan_verdict 2>/dev/null || true)"
+    prior_plan_hash="$(t get verified_plan_hash 2>/dev/null || true)"
+    case "$prior_verdict" in ok|triaged)
+      if [ -n "$prior_plan_hash" ] \
+        && prior_body_hash="$(plan_object_body_hash "$prior_plan_hash" 2>/dev/null)" \
+        && current_body_hash="$(plan_body_hash "$plan" 2>/dev/null)" \
+        && [ "$prior_body_hash" = "$current_body_hash" ]; then
+        plan_verdict_write "$tkt_state" "$state" ok "$base" "$plan" "$worktree"
+        verified_plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+        t set verified_base "$base"
+        t set verified_plan_hash "$verified_plan_hash"
+        t set plan_stop_verdict_key ""
+        t set plan_stop_verdict_at ""
+        t set build_stale_recovery_base ""
+        t set build_stale_recovery_plan_hash ""
+        emit "PLAN-OK drift=none" 0 "the recorded Base change touched no plan Files; the unchanged plan remains PLAN OK without a Verifier round"
+      fi ;;
+    esac
   fi
   if [ "$drift" -eq 0 ] && [ "$unresolved_fix" -eq 0 ]; then
     if [ -n "$(t get confirmed_for 2>/dev/null || true)" ]; then
