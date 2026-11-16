@@ -799,7 +799,7 @@ git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m committ
 run_job --slot lane --expect-commits
 [ "$RC" -eq 1 ] || fail "push-only reused NO-COMMITS exits 1"
 grep -Fq "tkt-job $S --slot lane --resume stub-1 --prompt <file> --gate-from-plan" <<<"$OUT" || fail "push-only reused hint names resume"
-grep -Fq 'prompt asks only for the push step: push the branch and open the PR' <<<"$OUT" || fail "push-only reused hint explains prompt"
+grep -Fq 'prompt asks for one push-only action: push the branch and open the PR' <<<"$OUT" || fail "push-only reused hint explains prompt"
 ! grep -Fq "tkt-state $S set job.lane ''" <<<"$OUT" || fail "push-only reused hint avoids state edit"
 
 for kind in GATE-FAIL-with-commits BLOCKED-with-commits; do
