@@ -140,8 +140,15 @@ plan_posted() {
 }
 
 has_open_findings() {
-  local file="$1"
-  [ -n "$file" ] && [ -r "$file" ] && finding_rows input "$file" >/dev/null
+  local file="$1" rows
+  # P3 never blocks: ship-pr files or matches an issue for each P3 row, so
+  # only P1 and P2 rows route to tkt-fix (#1932).
+  [ -n "$file" ] && [ -r "$file" ] || return 1
+  rows="$(finding_rows input "$file")" || return 1
+  case "$rows" in
+    'P1 '*|'P2 '*|*$'\nP1 '*|*$'\nP2 '*) return 0 ;;
+  esac
+  return 1
 }
 
 add_overlap_context() {

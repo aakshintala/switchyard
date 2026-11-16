@@ -483,6 +483,36 @@ for status in ready done; do
   done
 done
 
+# Only P1 and P2 rows route to tkt-fix; P3-only findings reach the tkt-ship
+# stop, where ship-pr files their issues (#1932).
+for findings_case in p3-only p1 p2 p2-p3 p3-tab; do
+  reset_case "findings-$findings_case"
+  state_set "$STATE" review_status "done"
+  state_set "$STATE" reviewed 0000000000000000000000000000000000000001
+  state_journal "$STATE" 'tkt-fix FIX-OK'
+  findings_file="$CASE_DIR/findings.md"
+  case "$findings_case" in
+    p3-only) printf 'P3 src/a.sh:1 — nit one\nP3 src/b.sh:2 — nit two\n' ;;
+    p1) printf 'P1 src/a.sh:1 — broken\n' ;;
+    p2) printf 'P3 src/a.sh:1 — nit\nP2 src/b.sh:2 — wrong\n' ;;
+    p2-p3) printf 'P2 src/a.sh:1 — wrong\nP3 src/b.sh:2 — nit\n' ;;
+    p3-tab) printf 'P3 src/a.sh:1 — nit\nP2\tsrc/b.sh:2 — tab is not a row\n' ;;
+  esac >"$findings_file"
+  state_set "$STATE" findings "$findings_file"
+  run_drive
+  case "$findings_case" in
+    p3-only|p3-tab)
+      [ "$(head -n 1 "$OUT")" = 'TKT tkt-drive STOP next=tkt-ship' ] || fail "$findings_case findings did not reach the tkt-ship stop: $(cat "$OUT") $(cat "$ERR")"
+      [ "$(grep -c '^tkt-fix|' "$TEST_CALLS" || true)" -eq 0 ] || fail "$findings_case findings called tkt-fix"
+      ;;
+    *)
+      grep -Fq "tkt-fix|$STATE --verify --findings $findings_file" "$TEST_CALLS" || fail "$findings_case findings did not route to tkt-fix --verify: $(cat "$TEST_CALLS")"
+      ;;
+  esac
+  [ "$(grep -c '^tkt-ship|' "$TEST_CALLS" || true)" -eq 0 ] || fail "$findings_case findings called tkt-ship"
+  assert_no_merge
+done
+
 # Every documented or fallback review_status takes a non-shipping route.
 for status in missing pending gate-failed ready done skipped other; do
   reset_case "status-$status"
