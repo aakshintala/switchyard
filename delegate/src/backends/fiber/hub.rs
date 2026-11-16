@@ -413,9 +413,19 @@ impl Out {
         self.pending.retain(|command| command.id != id);
     }
 
-    fn resend_pending(&mut self) -> bool {
+    fn resend_pending(&mut self, prompt_seen: Option<&str>) -> bool {
         let mut lines = Vec::with_capacity(self.pending.len());
         for command in &mut self.pending {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&command.line) else {
+                continue;
+            };
+            let name = value.get("command").and_then(|name| name.as_str());
+            if !matches!(name, Some("prompt") | Some("close") | Some("add_directory")) {
+                continue;
+            }
+            if name == Some("prompt") && prompt_seen == Some(command.id.as_str()) {
+                continue;
+            }
             command.resent = true;
             lines.push(command.line.clone());
         }
@@ -1075,6 +1085,13 @@ enum WaitOutcome {
     Lost,
 }
 
+struct ReconnectResult {
+    result: serde_json::Value,
+    replay: Vec<Vec<u8>>,
+    prompt_seen: bool,
+    terminal: Option<BackendResult>,
+}
+
 impl HubConn {
     /// One poll of the socket: a whole line, a quiet slice, or a lost
     /// connection. The poll lasts at most `poll_slice`; bytes of an
@@ -1173,10 +1190,21 @@ impl HubConn {
                     };
                     let recovering_subscribe = rest.sub_id == id;
                     match self.reconnect(socket_path, bounds, rest, known) {
-                        Ok(result) => {
+                        Ok(reconnected) => {
                             *known = known_ids(rest, shared);
+                            if let Some(result) = reconnected.terminal {
+                                break WaitOutcome::Stopped(Step::End(result));
+                            }
                             if recovering_subscribe {
-                                break WaitOutcome::Ack(Ack::Accepted { result });
+                                rest.recovered_replay = Some(reconnected.replay);
+                                break WaitOutcome::Ack(Ack::Accepted {
+                                    result: reconnected.result,
+                                });
+                            }
+                            if id == rest.prompt_id && reconnected.prompt_seen {
+                                break WaitOutcome::Ack(Ack::Accepted {
+                                    result: serde_json::Value::Null,
+                                });
                             }
                         }
                         Err(text) => break WaitOutcome::Stopped(Step::Fail(text)),
@@ -1284,7 +1312,7 @@ impl HubConn {
         bounds: &Bounds,
         rest: &mut Rest,
         known: &mut KnownIds,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<ReconnectResult, String> {
         let Some(session_id) = rest.session_id.clone() else {
             return Err(lost_text("unknown"));
         };
@@ -1300,8 +1328,10 @@ impl HubConn {
         };
         let deadline = reconnect_deadline(rest);
         let mut fatal = None;
-        let mut last_error = None;
+        let mut last_connect_error = None;
         let mut connected = false;
+        let mut prompt_was_seen = pending_prompt(&shared).is_some() && rest.turn_started;
+        let mut close_after_replay = false;
 
         for delay in RECONNECT_BACKOFF {
             if let Some(deadline) = deadline {
@@ -1330,7 +1360,7 @@ impl HubConn {
                     conn
                 }
                 Err(text) if reconnectable_connect_error(&text) => {
-                    last_error = Some(text);
+                    last_connect_error = Some(text);
                     continue;
                 }
                 Err(text) => {
@@ -1360,17 +1390,143 @@ impl HubConn {
             ) {
                 WaitOutcome::Ack(Ack::Accepted { result }) => {
                     rest.replay_until = last_seq_of(&result);
+                    rest.ack = old_ack;
+                    let replay_end = last_seq_of(&result);
+                    let inspect_replay = !rest.prompt_id.is_empty() || rest.turn_started;
+                    let prompt = pending_prompt(&shared);
+                    let mut replay = Vec::new();
+                    let mut terminal = None;
+                    let mut replay_lost = false;
+
+                    if let Some(end) = replay_end
+                        && end > rest.highest_seq.unwrap_or(0)
+                    {
+                        loop {
+                            pause!(&shared, Point::BeforeRead);
+                            match candidate.next_line(rest.bounds.poll_slice) {
+                                Next::Tick => {
+                                    if let Some(step) = rest.check(&shared, now(&shared)) {
+                                        match step {
+                                            Step::Continue => {}
+                                            Step::CloseOnce => close_after_replay = true,
+                                            Step::End(result) => {
+                                                lock(&shared.out).ended = true;
+                                                terminal = Some(result);
+                                            }
+                                            Step::Fail(text) => fatal = Some(text),
+                                        }
+                                    }
+                                }
+                                Next::Lost => {
+                                    replay_lost = true;
+                                    break;
+                                }
+                                Next::Line(raw) => {
+                                    pause!(&shared, Point::AfterLine);
+                                    let (kind, value) = match parse_line(&raw) {
+                                        Ok(parsed) => parsed,
+                                        Err(text) => {
+                                            fatal = Some(text);
+                                            break;
+                                        }
+                                    };
+                                    if !inspect_replay {
+                                        replay.push(raw.clone());
+                                    }
+                                    if inspect_replay && terminal.is_none() {
+                                        if kind == "turn_started"
+                                            && prompt.as_ref().is_some_and(|prompt| {
+                                                prompt_is_in_turn_started(&value, prompt)
+                                            })
+                                        {
+                                            prompt_was_seen = true;
+                                            rest.turn_started = true;
+                                        }
+                                        let step = rest.handle_live(&raw, &shared);
+                                        match step {
+                                            Step::Continue => {}
+                                            Step::CloseOnce => close_after_replay = true,
+                                            Step::End(result) => {
+                                                lock(&shared.out).ended = true;
+                                                terminal = Some(result);
+                                            }
+                                            Step::Fail(text) => fatal = Some(text),
+                                        }
+                                        if fatal.is_none()
+                                            && terminal.is_none()
+                                            && let Some(step) = rest.check(&shared, now(&shared))
+                                        {
+                                            match step {
+                                                Step::Continue => {}
+                                                Step::CloseOnce => close_after_replay = true,
+                                                Step::End(result) => {
+                                                    lock(&shared.out).ended = true;
+                                                    terminal = Some(result);
+                                                }
+                                                Step::Fail(text) => fatal = Some(text),
+                                            }
+                                        }
+                                    }
+                                    if value
+                                        .get("seq")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .is_some_and(|seq| seq >= end)
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                            if replay_lost || fatal.is_some() || terminal.is_some() {
+                                break;
+                            }
+                        }
+                    }
+                    if fatal.is_some() {
+                        break;
+                    }
+                    if replay_lost {
+                        continue;
+                    }
+                    if let Some(end) = replay_end {
+                        rest.last_seq = Some(end);
+                        rest.highest_seq = Some(end);
+                    }
+                    rest.replay_until = None;
+
+                    let prompt_seen = prompt_was_seen && prompt.is_some();
+                    let suppressed_prompt = prompt
+                        .as_ref()
+                        .filter(|_| prompt_seen)
+                        .map(|(id, _)| id.as_str());
+                    if prompt_seen && let Some((id, _)) = prompt.as_ref() {
+                        lock(&shared.out).forget_pending(id);
+                    }
+
                     let resent = {
                         let mut out = lock(&shared.out);
-                        if !out.resend_pending() {
-                            false
-                        } else {
-                            out.subscribed = true;
+                        out.subscribed = true;
+                        if terminal.is_some() {
                             true
+                        } else {
+                            out.resend_pending(suppressed_prompt)
                         }
                     };
                     if !resent {
                         continue;
+                    }
+                    if let Some(verdict) = terminal {
+                        *self = candidate;
+                        rest.ack = old_ack;
+                        *known = known_ids(rest, &shared);
+                        return Ok(ReconnectResult {
+                            result: result.clone(),
+                            replay,
+                            prompt_seen,
+                            terminal: Some(verdict),
+                        });
+                    }
+                    if close_after_replay {
+                        let _ = apply_step(&mut candidate, rest, Step::CloseOnce);
                     }
                     if lock(&shared.out).intent != Intent::None {
                         shared.close_now_once();
@@ -1381,7 +1537,12 @@ impl HubConn {
                     *self = candidate;
                     rest.ack = old_ack;
                     *known = known_ids(rest, &shared);
-                    return Ok(result);
+                    return Ok(ReconnectResult {
+                        result,
+                        replay,
+                        prompt_seen,
+                        terminal: None,
+                    });
                 }
                 WaitOutcome::Ack(Ack::Rejected { code, message }) => {
                     fatal = Some(crash_text(format!(
@@ -1400,10 +1561,7 @@ impl HubConn {
                     ));
                     break;
                 }
-                WaitOutcome::Lost => {
-                    last_error = Some(lost_text(&session_id));
-                    continue;
-                }
+                WaitOutcome::Lost => continue,
             }
         }
         // When no replacement passed hub_hello, the old writer is still in
@@ -1426,10 +1584,20 @@ impl HubConn {
             out.summary_sent = false;
         }
         rest.ack = old_ack;
-        Err(fatal
-            .or(last_error)
-            .unwrap_or_else(|| lost_text(&session_id)))
+        Err(fatal.unwrap_or_else(|| {
+            last_connect_error
+                .map(|error| reconnect_exhaustion_text(&session_id, &error))
+                .unwrap_or_else(|| lost_text(&session_id))
+        }))
     }
+}
+
+fn reconnect_exhaustion_text(session_id: &str, last_error: &str) -> String {
+    let suffix = format!("\n{FIXED}");
+    let lost = lost_text(session_id);
+    let lost_body = lost.strip_suffix(&suffix).unwrap_or(&lost);
+    let last_error = last_error.strip_suffix(&suffix).unwrap_or(last_error);
+    crash_text(format!("{lost_body}; last reconnect error: {last_error}"))
 }
 
 fn reconnect_deadline(rest: &Rest) -> Option<Instant> {
@@ -1473,6 +1641,36 @@ fn start_session(result: &serde_json::Value) -> Result<String, String> {
             "protocol error: start accepted with no session_id".to_string(),
         )),
     }
+}
+
+fn pending_prompt(shared: &Shared) -> Option<(String, serde_json::Value)> {
+    let out = lock(&shared.out);
+    out.pending.iter().find_map(|command| {
+        let value = serde_json::from_str::<serde_json::Value>(&command.line).ok()?;
+        if value.get("command").and_then(|name| name.as_str()) != Some("prompt") {
+            return None;
+        }
+        Some((
+            command.id.clone(),
+            value.get("args")?.get("content")?.clone(),
+        ))
+    })
+}
+
+fn prompt_is_in_turn_started(
+    value: &serde_json::Value,
+    prompt: &(String, serde_json::Value),
+) -> bool {
+    value
+        .get("payload")
+        .and_then(|payload| payload.get("input"))
+        .and_then(|input| input.as_array())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("command_id").and_then(|id| id.as_str()) == Some(prompt.0.as_str())
+                    || item.get("content") == Some(&prompt.1)
+            })
+        })
 }
 
 /// The fold point a `subscribe` answer carries, when it carries a numeric
@@ -1727,6 +1925,9 @@ fn drive_turn(
             return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
         }
     }
+    if req.resume.is_none() {
+        rest.recovered_replay = None;
+    }
     // prompt with the client-minted id C, unless the run is stopping: then
     // go to the read loop in the stopping state (R2).
     pause!(shared, Point::AfterSubscribeAck);
@@ -1802,55 +2003,95 @@ fn drive_turn(
         };
         rest.ack = Some(subscribe_wait);
         let mut fold = Vec::new();
-        loop {
-            pause!(shared, Point::BeforeRead);
-            match conn.next_line(rest.bounds.poll_slice) {
-                Next::Tick => {
-                    if let Some(Step::Fail(text)) = rest.check(&shared, now(&shared)) {
-                        rest.ack = None;
-                        return fail_with_cleanup(&mut conn, &mut rest, text);
-                    }
-                }
-                Next::Lost => match conn.reconnect(socket, &req.bounds, &mut rest, &mut known) {
-                    Ok(result) => {
-                        let Some(replay_end) = last_seq_of(&result) else {
-                            rest.ack = None;
-                            return fail_with_cleanup(
-                                &mut conn,
-                                &mut rest,
-                                crash_text("reconnect subscribe accepted without last_seq".into()),
-                            );
-                        };
-                        last_seq = replay_end;
-                        fold.clear();
-                        resume_buffer.clear();
-                    }
+        let replay_already_read = if let Some(replay) = rest.recovered_replay.take() {
+            resume_buffer = replay;
+            for raw in &resume_buffer {
+                let (kind, value) = match parse_line(raw) {
+                    Ok(parsed) => parsed,
                     Err(text) => {
                         rest.ack = None;
                         return fail_with_cleanup(&mut conn, &mut rest, text);
                     }
-                },
-                Next::Line(raw) => {
-                    let (kind, value) = match parse_line(&raw) {
-                        Ok(parsed) => parsed,
-                        Err(text) => {
+                };
+                if kind == "repository_code_offered" {
+                    rest.ack = None;
+                    return fail_with_cleanup(&mut conn, &mut rest, repository_offer_text());
+                }
+                fold.push(value);
+            }
+            true
+        } else {
+            false
+        };
+        if !replay_already_read {
+            loop {
+                pause!(shared, Point::BeforeRead);
+                match conn.next_line(rest.bounds.poll_slice) {
+                    Next::Tick => {
+                        if let Some(Step::Fail(text)) = rest.check(&shared, now(&shared)) {
                             rest.ack = None;
                             return fail_with_cleanup(&mut conn, &mut rest, text);
                         }
-                    };
-                    if kind == "repository_code_offered" {
-                        rest.ack = None;
-                        return fail_with_cleanup(&mut conn, &mut rest, repository_offer_text());
                     }
-                    let fold_end = resume_fold_end(&kind, &value, last_seq);
-                    fold.push(value);
-                    resume_buffer.push(raw);
-                    if fold_end {
-                        break;
+                    Next::Lost => {
+                        match conn.reconnect(socket, &req.bounds, &mut rest, &mut known) {
+                            Ok(reconnected) => {
+                                if let Some(result) = reconnected.terminal {
+                                    rest.ack = None;
+                                    return apply_step(&mut conn, &mut rest, Step::End(result))
+                                        .expect("reconnected terminal ends the run");
+                                }
+                                let Some(replay_end) = last_seq_of(&reconnected.result) else {
+                                    rest.ack = None;
+                                    return fail_with_cleanup(
+                                        &mut conn,
+                                        &mut rest,
+                                        crash_text(
+                                            "reconnect subscribe accepted without last_seq".into(),
+                                        ),
+                                    );
+                                };
+                                last_seq = replay_end;
+                                fold = reconnected
+                                    .replay
+                                    .iter()
+                                    .filter_map(|raw| parse_line(raw).ok().map(|(_, value)| value))
+                                    .collect();
+                                resume_buffer = reconnected.replay;
+                                break;
+                            }
+                            Err(text) => {
+                                rest.ack = None;
+                                return fail_with_cleanup(&mut conn, &mut rest, text);
+                            }
+                        }
                     }
-                    if let Some(Step::Fail(text)) = rest.check(&shared, now(&shared)) {
-                        rest.ack = None;
-                        return fail_with_cleanup(&mut conn, &mut rest, text);
+                    Next::Line(raw) => {
+                        let (kind, value) = match parse_line(&raw) {
+                            Ok(parsed) => parsed,
+                            Err(text) => {
+                                rest.ack = None;
+                                return fail_with_cleanup(&mut conn, &mut rest, text);
+                            }
+                        };
+                        if kind == "repository_code_offered" {
+                            rest.ack = None;
+                            return fail_with_cleanup(
+                                &mut conn,
+                                &mut rest,
+                                repository_offer_text(),
+                            );
+                        }
+                        let fold_end = resume_fold_end(&kind, &value, last_seq);
+                        fold.push(value);
+                        resume_buffer.push(raw);
+                        if fold_end {
+                            break;
+                        }
+                        if let Some(Step::Fail(text)) = rest.check(&shared, now(&shared)) {
+                            rest.ack = None;
+                            return fail_with_cleanup(&mut conn, &mut rest, text);
+                        }
                     }
                 }
             }
@@ -1960,7 +2201,13 @@ fn drive_turn(
                 }
             }
             Next::Lost => match conn.reconnect(socket, &req.bounds, &mut rest, &mut known) {
-                Ok(_) => continue,
+                Ok(reconnected) => {
+                    if let Some(result) = reconnected.terminal {
+                        return apply_step(&mut conn, &mut rest, Step::End(result))
+                            .expect("reconnected terminal ends the run");
+                    }
+                    continue;
+                }
                 Err(text) => return fail_with_cleanup(&mut conn, &mut rest, text),
             },
             Next::Line(raw) => {
@@ -2003,6 +2250,7 @@ struct Rest<'a> {
     last_seq: Option<u64>,
     highest_seq: Option<u64>,
     replay_until: Option<u64>,
+    recovered_replay: Option<Vec<Vec<u8>>>,
     turn_started: bool,
     completed_ok: bool,
     bad_outcome: Option<String>,
@@ -2029,6 +2277,7 @@ impl<'a> Rest<'a> {
             last_seq: None,
             highest_seq: None,
             replay_until: None,
+            recovered_replay: None,
             turn_started: false,
             completed_ok: false,
             bad_outcome: None,
@@ -5798,6 +6047,160 @@ mod tests {
     }
 
     #[test]
+    fn replayed_prompt_is_not_resent_after_reconnect() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 0})));
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            srv.disconnect();
+
+            srv.accept_next();
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (reconnect_id, subscribe) = recv_id(srv);
+            assert_eq!(subscribe["command"], "subscribe");
+            assert_eq!(subscribe["args"]["level"], "full");
+            srv.send(&accepted(&reconnect_id, serde_json::json!({"last_seq": 2})));
+            srv.send(&turn_started_ev(&prompt_id, 1));
+            srv.send(&turn_completed_ev(2, "completed", None));
+
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            srv.send(&exited_ev(3, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        let res = run_turn(&hub_request(), &path, &|_| {});
+        let received = join_fake(&path, rx);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "subscribe", "close"]
+        );
+    }
+
+    #[test]
+    fn lost_initial_subscribe_ack_preserves_replayed_resume_fold() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (_, subscribe) = recv_id(srv);
+            assert_eq!(subscribe["command"], "subscribe");
+            assert_eq!(subscribe["session_id"], "s_1");
+            assert_eq!(subscribe["args"]["level"], "full");
+            srv.disconnect();
+
+            srv.accept_next();
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (reconnect_id, subscribe) = recv_id(srv);
+            assert_eq!(subscribe["command"], "subscribe");
+            assert_eq!(subscribe["session_id"], "s_1");
+            srv.send(&accepted(&reconnect_id, serde_json::json!({"last_seq": 1})));
+            srv.send(&ev(
+                "session_started",
+                1,
+                serde_json::json!({"supervised": true}),
+            ));
+
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            srv.send(&turn_started_ev(&prompt_id, 2));
+            srv.send(&turn_completed_ev(3, "completed", None));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            srv.send(&exited_ev(4, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        let mut request = hub_request();
+        request.resume = Some("s_1".to_string());
+        let res = run_turn(&request, &path, &|_| {});
+        let received = join_fake(&path, rx);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(
+            received_commands(&received),
+            ["subscribe", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn reconnect_replayed_exit_finishes_without_sending_close() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 0})));
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            srv.disconnect();
+
+            srv.accept_next();
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (reconnect_id, subscribe) = recv_id(srv);
+            assert_eq!(subscribe["command"], "subscribe");
+            assert_eq!(subscribe["args"]["level"], "full");
+            srv.send(&accepted(&reconnect_id, serde_json::json!({"last_seq": 3})));
+            srv.send(&turn_started_ev(&prompt_id, 1));
+            srv.send(&turn_completed_ev(2, "completed", None));
+            srv.send(&exited_ev(3, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        let res = run_turn(&hub_request(), &path, &|_| {});
+        let received = join_fake(&path, rx);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "subscribe"]
+        );
+    }
+
+    #[test]
+    fn reconnect_exhaustion_includes_last_connect_error() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 0})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            srv.send(&turn_started_ev(&prompt_id, 1));
+            srv.disconnect();
+            drop(srv.listener.take());
+        });
+        let mut request = hub_request();
+        request.bounds.turn_wait = Some(Duration::from_secs(5));
+        let res = run_turn(&request, &path, &|_| {});
+        join_fake(&path, rx);
+        assert!(
+            res.text
+                .starts_with("No answer before the connection was lost."),
+            "{}",
+            res.text
+        );
+        assert!(
+            res.text
+                .contains("last reconnect error: cannot connect to hub socket"),
+            "{}",
+            res.text
+        );
+    }
+
+    #[test]
     fn unanswered_prompt_is_resent_with_its_id_and_duplicate_is_accepted() {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
@@ -5809,12 +6212,11 @@ mod tests {
             let (sub_id, _) = recv_id(srv);
             srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 0})));
             let (prompt_id, _) = recv_id(srv);
-            srv.send(&turn_started_ev(&prompt_id, 1));
             srv.disconnect();
             srv.accept_next();
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
             let (reconnect_id, _) = recv_id(srv);
-            srv.send(&accepted(&reconnect_id, serde_json::json!({"last_seq": 1})));
+            srv.send(&accepted(&reconnect_id, serde_json::json!({"last_seq": 0})));
             let (resent_id, resent) = recv_id(srv);
             assert_eq!(resent["command"], "prompt");
             assert_eq!(resent_id, prompt_id);
@@ -5823,6 +6225,7 @@ mod tests {
                 "duplicate_command",
                 "already accepted",
             ));
+            srv.send(&turn_started_ev(&prompt_id, 1));
             srv.send(&turn_completed_ev(2, "completed", None));
             let (_, close) = recv_id(srv);
             assert_eq!(close["command"], "close");
