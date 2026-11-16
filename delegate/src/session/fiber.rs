@@ -781,6 +781,49 @@ mod tests {
     }
 
     #[test]
+    fn a_recorded_fiber_run_maps_to_msp_items_and_usage() {
+        let mut events = EventMap::default();
+        let mut out = Vec::new();
+        let recorded = include_str!("../../tests/fixtures/recorded/fiber/echo.jsonl");
+        for line in recorded.lines() {
+            events.emit(&mut out, &serde_json::from_str(line).unwrap());
+        }
+        let notes: Vec<Value> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let items = |method: &str, kind: &str| -> Vec<Value> {
+            notes
+                .iter()
+                .filter(|note| note["method"] == method && note["params"]["item"]["kind"] == kind)
+                .map(|note| note["params"]["item"].clone())
+                .collect()
+        };
+        let started = items("item/started", "toolCall");
+        let completed = items("item/completed", "toolCall");
+        assert_eq!(started.len(), 1, "{started:?}");
+        assert_eq!(started[0]["tool"], "shell");
+        assert_eq!(completed[0]["tool"], "shell");
+        assert_eq!(completed[0]["callId"], started[0]["callId"]);
+        assert_eq!(completed[0]["status"], "completed");
+        let texts: Vec<Value> = items("item/completed", "agentMessage")
+            .into_iter()
+            .map(|item| item["text"].clone())
+            .collect();
+        assert_eq!(texts, [json!("I'll run echo hi now."), json!("DONE")]);
+        assert_eq!(items("item/completed", "userMessage").len(), 1);
+        let usage = notes
+            .iter()
+            .rfind(|note| note["method"] == "session/tokenUsage")
+            .unwrap();
+        assert_eq!(
+            usage["params"]["cumulative"],
+            json!({"promptTokens":5542 + 170 + 5489,"outputTokens":88 + 18,"totalTokens":5542 + 170 + 5489 + 88 + 18})
+        );
+    }
+
+    #[test]
     fn idle_exit_emits_a_log_only_session_exit() {
         let mut out = Vec::new();
         emit_idle_exit(&mut out);
