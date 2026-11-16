@@ -12,6 +12,9 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
+/// How long the bridge waits for Fiber to exit after `close` with `now`.
+pub(crate) const CLOSE_NOW_WAIT: Duration = Duration::from_secs(1);
+
 pub fn main(args: &[String]) -> i32 {
     let Some(model) = args
         .windows(2)
@@ -261,7 +264,7 @@ pub fn main(args: &[String]) -> i32 {
             if !await_exit(link, &mut stdout, &mut running, stop_grace()) {
                 let now = msp::uuid7(now_ms());
                 let _ = link.send(serde_json::json!({"id":now,"command":"close","session_id":session_id,"args":{"now":true}}));
-                let _ = await_exit(link, &mut stdout, &mut running, Duration::from_secs(1));
+                let _ = await_exit(link, &mut stdout, &mut running, CLOSE_NOW_WAIT);
             }
         }
     }

@@ -1663,11 +1663,15 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
     );
     if shared.store.snapshot().status != Status::Dead {
         close_host_stdin(shared);
-        if shared
-            .host
-            .wait_for_exit(shared.config.stop_grace)
-            .is_none()
-        {
+        // The Fiber bridge waits the same grace for Fiber to exit, then sends
+        // `close` with `now` and waits again. Give it that wait, and as long
+        // again for its own exit, before any signal cuts the fallback short.
+        let exit_wait = if shared.kind == HostKind::Fiber {
+            shared.config.stop_grace + 2 * crate::session::fiber::CLOSE_NOW_WAIT
+        } else {
+            shared.config.stop_grace
+        };
+        if shared.host.wait_for_exit(exit_wait).is_none() {
             shared.host.signal_group(libc::SIGTERM);
             if shared.host.wait_for_exit(shared.config.term_wait).is_none() {
                 shared.host.signal_group(libc::SIGKILL);

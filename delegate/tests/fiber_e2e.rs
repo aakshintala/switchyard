@@ -1738,3 +1738,56 @@ fn fiber_session_completed_turn_logs_the_last_message_with_its_status_line() {
         .expect("no turn.completed line");
     assert!(completed["questions"].is_null(), "{completed:#}");
 }
+
+#[test]
+fn fiber_session_stop_sends_close_now_when_fiber_does_not_exit_within_the_grace() {
+    let (e, brief, inbox) = session_env();
+    let fake = e.fake_hub(1, move |_, session_id, conn| {
+        accept_start(conn, session_id);
+        subscribe_fresh(conn, session_id);
+        let prompt = conn.recv();
+        assert_eq!(prompt["command"], "prompt");
+        conn.accept(&prompt, json!({}));
+        conn.send(turn_event(
+            "turn_started",
+            session_id,
+            1,
+            "t1",
+            json!({"input":[{"command_id":prompt["id"],"type":"message"}]}),
+        ));
+        conn.send(turn_event(
+            "turn_completed",
+            session_id,
+            2,
+            "t1",
+            json!({"outcome":"completed"}),
+        ));
+        // The first close is accepted, but Fiber does not exit.
+        let close = conn.recv();
+        assert_eq!(close["command"], "close");
+        assert!(close["args"]["now"].is_null(), "{close}");
+        conn.accept(&close, json!({}));
+        let close_now = conn.recv();
+        assert_eq!(close_now["command"], "close", "{close_now}");
+        assert_eq!(close_now["args"]["now"], true, "{close_now}");
+        assert_ne!(close_now["id"], close["id"], "{close_now}");
+        conn.accept(&close_now, json!({}));
+        conn.send(event("fiber_exited", session_id, 3, json!({"exit_code":0})));
+    });
+    let grace = [("DELEGATE_SESSION_GRACE_MS", "300")];
+    let id = started_session_id(&start_fiber_session(&e, MODEL, &brief, &inbox, &grace));
+    wait_for_status(&e, &id, "idle", Duration::from_secs(10));
+    let stopped = e.command_with_env(&["session", "stop", &id, "--json"], None, true, &grace);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let state = wait_for_status(&e, &id, "dead", Duration::from_secs(10));
+    assert_eq!(state["dead"]["reason"], "stopped", "{state:#}");
+    let commands = fake.finish();
+    assert_eq!(
+        command_names(&commands[0]),
+        ["start", "subscribe", "prompt", "close", "close"]
+    );
+}
