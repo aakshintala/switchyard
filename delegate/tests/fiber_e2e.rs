@@ -1694,3 +1694,47 @@ fn fiber_session_start_accepts_both_lane_model_fiber_rows() {
         );
     }
 }
+
+#[test]
+fn fiber_session_completed_turn_logs_the_last_message_with_its_status_line() {
+    let turn = one_fiber_turn(|session_id| {
+        vec![
+            text_part(session_id, 2, "a_1", "Checked the failing test."),
+            text_part(
+                session_id,
+                3,
+                "a_2",
+                "The test passes now.\n\nSTATUS: DONE_WITH_CONCERNS",
+            ),
+            turn_event(
+                "turn_completed",
+                session_id,
+                4,
+                "t1",
+                json!({"outcome":"completed"}),
+            ),
+        ]
+    });
+    let last_turn = &turn.watched["session"]["lastTurn"];
+    assert_eq!(last_turn["terminal"], "completed", "{last_turn:#}");
+    let messages: Vec<&Value> = turn
+        .lines
+        .iter()
+        .filter(|line| line["kind"] == "message")
+        .collect();
+    let last = messages.last().expect("no message log line");
+    assert_eq!(last["turnId"], "t1", "{last:#}");
+    assert!(
+        last["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("STATUS: DONE_WITH_CONCERNS"),
+        "{last:#}"
+    );
+    let completed = turn
+        .lines
+        .iter()
+        .find(|line| line["kind"] == "turn.completed")
+        .expect("no turn.completed line");
+    assert!(completed["questions"].is_null(), "{completed:#}");
+}

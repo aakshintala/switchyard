@@ -408,7 +408,9 @@ fn emit_event(out: &mut impl Write, event: &Value) {
             "item/completed",
             json!({"item":{"kind":"userMessage","turnId":turn_id,"text":p.get("text"),"commandId":p.get("command_id")}}),
         ),
-        "agent_message" => (
+        // One text part of the assistant's reply. A part the provider sent
+        // with only opaque data has empty text and is no message.
+        "text_completed" if p.get("text").and_then(Value::as_str) != Some("") => (
             "item/completed",
             json!({"item":{"kind":"agentMessage","turnId":turn_id,"text":p.get("text")}}),
         ),
@@ -514,6 +516,26 @@ mod tests {
         );
         let line = String::from_utf8(out).unwrap();
         assert!(line.contains("cancelled"));
+    }
+
+    #[test]
+    fn text_parts_become_agent_messages_and_an_empty_part_is_none() {
+        let mut out = Vec::new();
+        emit_event(
+            &mut out,
+            &json!({"kind":"text_completed","turn_id":"t","payload":{"text":"STATUS: DONE"}}),
+        );
+        let line: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(line["method"], "item/completed");
+        assert_eq!(line["params"]["item"]["kind"], "agentMessage");
+        assert_eq!(line["params"]["item"]["turnId"], "t");
+        assert_eq!(line["params"]["item"]["text"], "STATUS: DONE");
+        let mut out = Vec::new();
+        emit_event(
+            &mut out,
+            &json!({"kind":"text_completed","turn_id":"t","payload":{"text":""}}),
+        );
+        assert!(out.is_empty());
     }
 
     #[test]
