@@ -625,8 +625,10 @@ printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:
 : >"$T/send-commands"
 out=$(run_lanecheck "$r" 3000)
 set_processes
-printf 'STATUS: HOLD — waiting for a ruling.\n' >"$r/fiber-5101-report.md"
-python3 - "$r/fiber-5101-report.md" <<'PY'
+mkdir -p "$r/inbox"
+mac_report="$r/inbox/lane-5101-20261109T000000Z.md"
+printf 'STATUS: HOLD — waiting for a ruling.\n' >"$mac_report"
+python3 - "$mac_report" <<'PY'
 import os, sys
 os.utime(sys.argv[1], (1794253000, 1794253000))
 PY
@@ -669,11 +671,13 @@ cat >"$r/rulings/ruling-5102-RULING-5102-1.md" <<'EOF'
 RULING-5102-1: hold this lane until the next ruling.
 hold: wait for an explicit go-ahead.
 EOF
-cat >"$r/fiber-5102-report.md" <<'EOF'
+mkdir -p "$r/inbox"
+mac_report="$r/inbox/lane-5102-20261109T000001Z.md"
+cat >"$mac_report" <<'EOF'
 STATUS: DONE — work paused.
 ACK RULING-5102-1
 EOF
-python3 - "$r/rulings/ruling-5102-RULING-5102-1.md" "$r/fiber-5102-report.md" <<'PY'
+python3 - "$r/rulings/ruling-5102-RULING-5102-1.md" "$mac_report" <<'PY'
 import os, sys
 os.utime(sys.argv[1], (1794253000, 1794253000))
 os.utime(sys.argv[2], (1794253001, 1794253001))
@@ -719,6 +723,31 @@ if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5103 .*job job-5103
   ok acked-go-ruling-prose-hold-does-not-suppress-wake
 else
   fail "acked-go-ruling-prose-hold-does-not-suppress-wake (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# A Mac lane's STATUS: DONE report does not suppress a finished-job wake.
+r=$(newrun mac-done-report)
+lane "$r" 5201 fiber-5201-build sid-5201
+printf 'repo=example/switchyard\nissue=5201\njob.lane=job-5201\n' >"$r/fiber-5201.state"
+set_session sid-5201 5201 turn-mac-done completed 3000000
+set_logs turn-mac-done 2900000 3000000 'STATUS: DONE'
+mkdir -p "$r/inbox"
+mac_report="$r/inbox/lane-5201-20261109T000002Z.md"
+printf 'STATUS: DONE — build is complete.\n' >"$mac_report"
+python3 - "$mac_report" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1794253000, 1794253000))
+PY
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-build %s/fiber-5201.state\n' "$r" >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+set_processes
+out=$(run_lanecheck "$r" 3001); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5201 .*job job-5201 (tkt-build) finished' \
+   && grep -Fq 'ticket #5201, job job-5201 (tkt-build)' "$T/last-send"; then
+  ok mac-done-report-still-wakes
+else
+  fail "mac-done-report-still-wakes (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
 # A detached job's incidental args may mention another ticket; its state file

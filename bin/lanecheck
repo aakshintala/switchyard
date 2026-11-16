@@ -1340,15 +1340,10 @@ RULING_ARCHIVE_FROM = float(os.environ.get("FW_RULING_ARCHIVE_FROM") or 17937936
 SNAP_AT = float(os.environ.get("FW_SNAP_AT") or 0.0)
 reported = {}
 inbox_reports = {}
-# Three sources, not two. A lane's report reaches me either as an inbox message
-# or as `run/fiber-<n>-report.md` written in place, and which one depends on the
-# machine: a box lane sends, a Mac delegate lane has no inbox to send to and only
-# writes the file. Scanning the inbox alone made every Mac lane's report
-# invisible here, so its row printed the bare STALL remedy "retire it if its
-# report landed" -- with the report sitting unread in run/. On 2026-11-06 #4040
-# cost nine hours that way: REVIEWED, CI green, PR #4298 ready to ship, and
-# nothing looking. The file is the same shape as the message, so it goes through
-# the same status precedence below rather than getting a branch of its own.
+# Three sources, not two. A lane's report reaches me either as an inbox file
+# (`box-<n>-…` from a box lane or `lane-<n>-…` from a Mac lane) or as
+# `run/fiber-<n>-report.md` written in place. Every shape goes through the same
+# status precedence below rather than getting a branch of its own.
 _srcs = [
     (glob.glob(os.path.join(R, "inbox", "*.md")), True),
     (glob.glob(os.path.join(R, "inbox", "read", "*.md")), True),
@@ -1357,7 +1352,7 @@ _srcs = [
 for _d, _is_inbox in _srcs:
     for p in _d:
         base = os.path.basename(p)
-        m = (re.match(r"^(?:[a-z]+-[a-z]+|box)-(\d{3,5})-", base)
+        m = (re.match(r"^(?:lane|[a-z]+-[a-z]+|box)-(\d{3,5})-", base)
              or re.match(r"^fiber-(\d{3,5})-report\.md$", base))
         if not m:
             continue
