@@ -691,7 +691,8 @@ out=$(run_lanecheck "$r" 3000)
 set_processes
 cat >"$r/rulings/ruling-5103-RULING-5103-1.md" <<'EOF'
 RULING-5103-1: proceed with the plan.
-The breaker hold ends after this step.
+Go: the breaker hold ends.
+Continue with the rest of the plan.
 EOF
 cat >"$r/fiber-5103-report.md" <<'EOF'
 STATUS: DONE — work continues.
@@ -763,22 +764,43 @@ else
   fail "finished-older-job-wakes-with-its-own-id (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
-# A finished job with no ticket-owned id cannot produce a reasonless wake.
-r=$(newrun reasonless-job)
+# An owned finished job without a unique ID wakes with process attribution.
+r=$(newrun owned-job-without-id)
 lane "$r" 6200 fiber-6200-build sid-6200
-printf 'repo=example/switchyard\nissue=6200\n' >"$r/fiber-6200.state"
-set_session sid-6200 6200 turn-reasonless completed 3000000
-set_logs turn-reasonless 2900000 3000000 'STATUS: DONE'
+printf 'repo=example/switchyard\nissue=6200\njob.preflight=job-pre-6200\njob.build=job-build-6200\njob.fix1=job-fix-6200\n' >"$r/fiber-6200.state"
+set_session sid-6200 6200 turn-owned-no-id completed 3000000
+set_logs turn-owned-no-id 2900000 3000000 'STATUS: DONE'
 printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-build %s/fiber-6200.state\n' "$r" >"$T/box-procs"
 : >"$T/send-commands"
 out=$(run_lanecheck "$r" 3000)
 set_processes
+: >"$T/last-send"
 out=$(run_lanecheck "$r" 3001); lrc=$?
-if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAITING 6200 .*no ticket-owned job id; no wake sent' \
-   && [ ! -s "$T/send-commands" ] && ! printf '%s\n' "$out" | grep -q '^WAKE 6200 '; then
-  ok finished-job-without-reason-is-not-woken
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fq "WAKE 6200 muse fiber-6200-build — tkt-build pid 101 (state $r/fiber-6200.state) finished (exit unknown)" \
+   && grep -Fq "ticket #6200, tkt-build pid 101 (state $r/fiber-6200.state) finished (exit unknown)" "$T/last-send" \
+   && grep -Fq 'Read its output and continue from your brief. End with STATUS.' "$T/last-send"; then
+  ok finished-owned-job-without-id-still-wakes
 else
-  fail "finished-job-without-reason-is-not-woken (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
+  fail "finished-owned-job-without-id-still-wakes (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# An owned gh-ci wait with no state path also wakes by command and PID.
+r=$(newrun owned-gh-ci-wait)
+lane "$r" 6201 fiber-6201-build sid-6201
+set_session sid-6201 6201 turn-gh-ci-wait completed 3000000
+set_logs turn-gh-ci-wait 2900000 3000000 'STATUS: DONE'
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/gh-ci wait 1953 --repo example/switchyard\n' >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+set_processes
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 3001); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fq 'gh-ci wait pid 101 finished (exit unknown)' \
+   && grep -Fq 'ticket #6201, gh-ci wait pid 101 finished (exit unknown)' "$T/last-send" \
+   && grep -Fq 'Read its output and continue from your brief. End with STATUS.' "$T/last-send"; then
+  ok finished-owned-gh-ci-wait-without-id-still-wakes
+else
+  fail "finished-owned-gh-ci-wait-without-id-still-wakes (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
 exit "$rc"

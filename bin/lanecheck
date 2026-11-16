@@ -1931,7 +1931,7 @@ def hold_timestamp(ticket, rep, assistant_messages, lane_started):
         for when, path, text in ruling_archives.get(ticket, []):
             first_line = text.splitlines()[0] if text.splitlines() else ""
             marked_hold = (re.search(r"(?m)^hold:", text)
-                           or re.search(r"\bHOLD\b", first_line, re.I))
+                           or re.search(r"\bHOLD\b", first_line))
             if (acked.intersection(archive_ids(text, path)) and marked_hold):
                 held_at.append(when)
     return max(held_at) if held_at else None
@@ -2251,36 +2251,39 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         elif not working and finished_jobs and deleg and not parked and not jobq:
             job = finished_jobs[0]
             job_id = job_reference(job)
-            if not job_id:
-                print(f"WAITING {n} {host} {sess} {job['cmd']} finished — "
-                      "no ticket-owned job id; no wake sent")
-                wake_done = True
-            else:
-                action_id = f"job:{job['pid']}:{job['cmd']}"
-                rc_text = job.get("rc") or "unknown"
+            action_id = f"job:{job['pid']}:{job['cmd']}"
+            rc_text = job.get("rc") or "unknown"
+            if job_id:
                 reason = f"job {job_id} ({job['cmd']}) finished (exit {rc_text})"
                 message = (f"WAKE (lanecheck): ticket #{n}, {reason}. "
                            f"Read job {job_id} output and continue from your brief. End with STATUS.")
-                result, count = send_action(lane_record, action_id, store, jid, message)
-                if result in ("sent", "failed"):
-                    label = "WAKE" if result == "sent" else "WAKE-FAILED"
-                    print(f"{label} {n} {host} {sess} — {reason} ({count}/2 this rolling hour)")
-                    lane_record["finished"] = [saved for saved in lane_record["finished"]
-                                                if saved is not job]
-                    save_wake_state()
-                    wake_done = True
-                elif result == "busy":
-                    print(f"WAKE-DEFERRED {n} {host} {sess} — {reason}; action remains pending for the next lanecheck")
-                    wake_done = True
-                elif result == "capped":
-                    print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
-                          f"{reason}; wake cap reached ({count}/2 this rolling hour), "
-                          "so no message was sent")
-                    wake_done = True
-                elif result == "unrecorded":
-                    print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
-                          "could not record the wake cap, so no message was sent")
-                    wake_done = True
+            else:
+                state_path = state_path_from_args(job.get("args", ""))
+                state_ref = f" (state {state_path})" if state_path else ""
+                reason = (f"{job['cmd']} pid {job['pid']}{state_ref} "
+                          f"finished (exit {rc_text})")
+                message = (f"WAKE (lanecheck): ticket #{n}, {reason}. "
+                           "Read its output and continue from your brief. End with STATUS.")
+            result, count = send_action(lane_record, action_id, store, jid, message)
+            if result in ("sent", "failed"):
+                label = "WAKE" if result == "sent" else "WAKE-FAILED"
+                print(f"{label} {n} {host} {sess} — {reason} ({count}/2 this rolling hour)")
+                lane_record["finished"] = [saved for saved in lane_record["finished"]
+                                            if saved is not job]
+                save_wake_state()
+                wake_done = True
+            elif result == "busy":
+                print(f"WAKE-DEFERRED {n} {host} {sess} — {reason}; action remains pending for the next lanecheck")
+                wake_done = True
+            elif result == "capped":
+                print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                      f"{reason}; wake cap reached ({count}/2 this rolling hour), "
+                      "so no message was sent")
+                wake_done = True
+            elif result == "unrecorded":
+                print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                      "could not record the wake cap, so no message was sent")
+                wake_done = True
         elif (not working and deleg and not parked and not jobq and not current_jobs
               and not finished_jobs and n not in pending and turn_lines is not None
               and tree_known and terminal == "completed" and last_turn_id):
