@@ -79,6 +79,12 @@ plan_has_commits_beyond_base() {
   [ "$count" -gt 0 ]
 }
 
+# plan_push_only_hint: the sentence tkt-job and tkt-build print when a lane
+# resume only has to push, which plan_has_commits_beyond_base decides.
+plan_push_only_hint() {
+  printf '%s' 'the prompt asks for one push-only action: push the branch and open the PR'
+}
+
 # plan_outcome PLAN: the first token of the Outcome line with backticks
 # stripped, read the same way as plan_base. Prints nothing when there is no
 # Outcome line.

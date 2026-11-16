@@ -149,7 +149,8 @@ def publish(scratch, inbox, today, source, concerns_path=None):
             concerns = Path(concerns_path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             fail("cannot read delegate concerns")
-        text = f"{text.rstrip()}\n\n## concerns\n{concerns.rstrip()}\n"
+        if concerns.strip():
+            text = f"{text.rstrip()}\n\n## concerns\n{concerns.rstrip()}\n"
     return write_report(text, inbox, today)
 
 
