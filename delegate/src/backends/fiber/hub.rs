@@ -423,6 +423,10 @@ impl Out {
             if session_mode && name == Some("add_directory") {
                 continue;
             }
+            // Turn mode resends an unanswered `add_directory` with its own id,
+            // like `prompt` and `close`: a session rejects a repeat of an id
+            // it accepted with `duplicate_command` (docs/invocation.md, "The
+            // command line"). Session mode skips it above.
             if !matches!(
                 name,
                 Some("prompt") | Some("steer") | Some("close") | Some("add_directory")
@@ -1409,7 +1413,6 @@ impl HubConn {
                 |_| None,
             ) {
                 WaitOutcome::Ack(Ack::Accepted { result }) => {
-                    rest.replay_until = last_seq_of(&result);
                     rest.ack = old_ack;
                     let replay_end = last_seq_of(&result);
                     let inspect_replay =
@@ -1540,7 +1543,6 @@ impl HubConn {
                         rest.last_seq = Some(end);
                         rest.highest_seq = Some(end);
                     }
-                    rest.replay_until = None;
 
                     let prompt_seen = prompt_was_seen && prompt.is_some();
                     let suppressed_prompt = prompt
@@ -2583,7 +2585,6 @@ struct Rest<'a> {
     closed: bool,
     last_seq: Option<u64>,
     highest_seq: Option<u64>,
-    replay_until: Option<u64>,
     recovered_replay: Option<Vec<Vec<u8>>>,
     turn_started: bool,
     completed_ok: bool,
@@ -2615,7 +2616,6 @@ impl<'a> Rest<'a> {
             closed: false,
             last_seq: None,
             highest_seq: None,
-            replay_until: None,
             recovered_replay: None,
             turn_started: false,
             completed_ok: false,
@@ -2771,10 +2771,6 @@ impl<'a> Rest<'a> {
             Err(text) => return Step::Fail(text),
         };
         if kind == "stream_reopened" {
-            self.replay_until = value
-                .get("payload")
-                .and_then(|payload| payload.get("last_seq"))
-                .and_then(serde_json::Value::as_u64);
             return Step::Continue;
         }
         if kind != "repository_code_offered"
@@ -2967,9 +2963,6 @@ impl<'a> Rest<'a> {
             && let Some(seq) = value.get("seq").and_then(|seq| seq.as_u64())
         {
             self.highest_seq = Some(self.highest_seq.map_or(seq, |seen| seen.max(seq)));
-            if self.replay_until.is_some_and(|end| seq >= end) {
-                self.replay_until = None;
-            }
         }
         if handle_line(raw, &mut self.state) {
             (self.on)(Event::Progress(ProgressSnapshotRaw {
