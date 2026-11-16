@@ -106,8 +106,18 @@ fn disposition(event: &Value, command_id: &str, steer: bool) -> Option<Dispositi
             Some(Disposition::Started(envelope_turn_id(event)))
         }
         // An applied steer is the user message the supervisor drops its
-        // pending steer on; a queued one is not delivered yet.
-        "steering_applied" | "steering_queue" if names_command(payload) => {
+        // pending steer on; a queued one is not delivered yet. The queue
+        // names each message it holds in `messages[]` (docs/events.md,
+        // "steering_queue").
+        "steering_applied" if names_command(payload) => {
+            Some(Disposition::Steered(envelope_turn_id(event)))
+        }
+        "steering_queue"
+            if payload
+                .get("messages")
+                .and_then(Value::as_array)
+                .is_some_and(|messages| messages.iter().any(names_command)) =>
+        {
             Some(Disposition::Steered(envelope_turn_id(event)))
         }
         "command_rejected" if names_command(payload) => {
