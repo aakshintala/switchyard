@@ -101,7 +101,7 @@ cat >"$T/quota.json" <<'JSON'
 JSON
 run_pick
 [ "$RC" -eq 0 ] || fail "highest score exit $RC: $ERR"
-[ "$OUT" = 'opencode-go/muse-spark-1.3-contributor muselaunch' ] || fail "highest score chose [$OUT]"
+[ "$OUT" = 'fiber/opencode-go/muse-spark-1.3-contributor muselaunch' ] || fail "highest score chose [$OUT]"
 case "$OUT" in muse/*) fail "muse provider yielded a muse model: $OUT";; esac
 [ -z "$ERR" ] || fail "normal pick wrote stderr: $ERR"
 
@@ -117,15 +117,15 @@ JSON
 printf '2026-11-13T00:00:00Z\t172\tmuse\tfiber-172-build\topencode-session-1\n2026-11-13T00:00:01Z\t173\tmuse\tfiber-173-build\topencode-session-2\n' >"$T/run/roster"
 cat >"$T/delegate.json" <<'JSON'
 {"ok":true,"sessions":[
-  {"id":"opencode-session-1","status":"running","model":"opencode-go/muse-spark-1.3-contributor"},
-  {"id":"opencode-session-2","status":"idle","model":"opencode-go/muse-spark-1.3-contributor"},
-  {"id":"unrostered-codex","status":"running","model":"openai/gpt-6-luna:medium"},
-  {"id":"dead-opencode","status":"dead","model":"opencode-go/muse-spark-1.3-contributor"}
+  {"id":"opencode-session-1","status":"running","model":"fiber/opencode-go/muse-spark-1.3-contributor"},
+  {"id":"opencode-session-2","status":"idle","model":"fiber/opencode-go/muse-spark-1.3-contributor"},
+  {"id":"unrostered-codex","status":"running","model":"fiber/codex/gpt-6-luna:medium"},
+  {"id":"dead-opencode","status":"dead","model":"fiber/opencode-go/muse-spark-1.3-contributor"}
 ]}
 JSON
 run_pick
 [ "$RC" -eq 0 ] || fail "load pick exit $RC: $ERR"
-[ "$OUT" = 'openai/gpt-6-luna:medium muselaunch' ] || fail "load did not pull OpenCode Go down: [$OUT]"
+[ "$OUT" = 'fiber/codex/gpt-6-luna:medium muselaunch' ] || fail "load did not pull OpenCode Go down: [$OUT]"
 
 # Box-only delegate sessions contribute load and can pull that model down.
 cat >"$T/quota.json" <<'JSON'
@@ -137,10 +137,10 @@ cat >"$T/quota.json" <<'JSON'
 JSON
 printf '2026-11-13T00:00:00Z\t176\tmuse\tfiber-176-build\tbox-opencode-1\n' >"$T/run/roster"
 printf '{"sessions":[]}\n' >"$T/delegate.json"
-printf '{"sessions":[{"id":"box-opencode-1","status":"running","model":"opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/box-delegate.json"
+printf '{"sessions":[{"id":"box-opencode-1","status":"running","model":"fiber/opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/box-delegate.json"
 run_pick
 [ "$RC" -eq 0 ] || fail "box-only load exit $RC: $ERR"
-[ "$OUT" = 'openai/gpt-6-luna:medium muselaunch' ] || fail "box-only load did not pull model down: [$OUT]"
+[ "$OUT" = 'fiber/codex/gpt-6-luna:medium muselaunch' ] || fail "box-only load did not pull model down: [$OUT]"
 
 # Box Claude agents are roster-matched and lower the Haiku score.
 cat >"$T/quota.json" <<'JSON'
@@ -155,7 +155,7 @@ printf '[]\n' >"$T/claude.json"
 printf '{"agents":[{"id":"box-claude-1","name":"fiber-179-build","status":"busy"}]}\n' >"$T/box-claude.json"
 run_pick
 [ "$RC" -eq 0 ] || fail "box Claude load exit $RC: $ERR"
-[ "$OUT" = 'openai/gpt-6-luna:medium muselaunch' ] || fail "box Claude load did not lower Haiku score: [$OUT]"
+[ "$OUT" = 'fiber/codex/gpt-6-luna:medium muselaunch' ] || fail "box Claude load did not lower Haiku score: [$OUT]"
 
 # A session visible on both hosts is counted once, not twice.
 cat >"$T/quota.json" <<'JSON'
@@ -166,16 +166,16 @@ cat >"$T/quota.json" <<'JSON'
 ]}
 JSON
 printf '2026-11-13T00:00:00Z\t177\tmuse\tfiber-177-build\tshared-session\n' >"$T/run/roster"
-printf '{"sessions":[{"id":"shared-session","status":"running","model":"opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/delegate.json"
-printf '{"sessions":[{"id":"shared-session","status":"running","model":"opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/box-delegate.json"
+printf '{"sessions":[{"id":"shared-session","status":"running","model":"fiber/opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/delegate.json"
+printf '{"sessions":[{"id":"shared-session","status":"running","model":"fiber/opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/box-delegate.json"
 run_pick
 [ "$RC" -eq 0 ] || fail "deduplicated load exit $RC: $ERR"
-[ "$OUT" = 'opencode-go/muse-spark-1.3-contributor muselaunch' ] || fail "duplicate session counted twice: [$OUT]"
+[ "$OUT" = 'fiber/opencode-go/muse-spark-1.3-contributor muselaunch' ] || fail "duplicate session counted twice: [$OUT]"
 
 # A roster lane retired by a ticket-scoped roster-done entry no longer adds load.
 printf '2026-11-13T00:00:00Z\t174\tmuse\tfiber-174-build\topencode-retired-id\n' >"$T/run/roster"
 printf '2026-11-13T00:00:01Z\t174\n' >"$T/run/roster-done"
-printf '{"sessions":[{"id":"opencode-retired-id","status":"running","model":"opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/delegate.json"
+printf '{"sessions":[{"id":"opencode-retired-id","status":"running","model":"fiber/opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/delegate.json"
 cat >"$T/quota.json" <<'JSON'
 {"providers":[
   {"id":"codex","status":"healthy","quotas":[{"percentRemaining":60}]},
@@ -185,7 +185,7 @@ cat >"$T/quota.json" <<'JSON'
 JSON
 run_pick
 [ "$RC" -eq 0 ] || fail "retired roster exit $RC: $ERR"
-[ "$OUT" = 'opencode-go/muse-spark-1.3-contributor muselaunch' ] || fail "retired session still counted: [$OUT]"
+[ "$OUT" = 'fiber/opencode-go/muse-spark-1.3-contributor muselaunch' ] || fail "retired session still counted: [$OUT]"
 
 # Critical and depleted providers are skipped even with abundant percentage.
 : >"$T/run/roster"
@@ -213,7 +213,7 @@ cat >"$T/quota.json" <<'JSON'
 JSON
 run_pick
 [ "$RC" -eq 0 ] || fail "haiku-above-floor exit $RC: $ERR"
-[ "$OUT" = 'opencode-go/muse-spark-1.3-contributor muselaunch' ] || fail "haiku was not excluded above floor: [$OUT]"
+[ "$OUT" = 'fiber/opencode-go/muse-spark-1.3-contributor muselaunch' ] || fail "haiku was not excluded above floor: [$OUT]"
 
 # If no other usable provider exceeds 20%, haiku competes on score and wins
 # with the highest one.
@@ -240,7 +240,7 @@ cat >"$T/quota.json" <<'JSON'
 JSON
 run_pick
 [ "$RC" -eq 0 ] || fail "haiku-scored-under-floor exit $RC: $ERR"
-[ "$OUT" = 'openai/gpt-6-luna:medium muselaunch' ] || fail "haiku won without the best score: [$OUT]"
+[ "$OUT" = 'fiber/codex/gpt-6-luna:medium muselaunch' ] || fail "haiku won without the best score: [$OUT]"
 
 # Quota providers codex/cursor never become codex/* or cursor models.
 cat >"$T/quota.json" <<'JSON'
@@ -254,7 +254,7 @@ cat >"$T/quota.json" <<'JSON'
 JSON
 run_pick
 [ "$RC" -eq 0 ] || fail "codex/cursor exclusion exit $RC: $ERR"
-[ "$OUT" = 'openai/gpt-6-luna:medium muselaunch' ] || fail "best allowed candidate was not selected: [$OUT]"
+[ "$OUT" = 'fiber/codex/gpt-6-luna:medium muselaunch' ] || fail "best allowed candidate was not selected: [$OUT]"
 case "$OUT" in codex/*|cursor/*) fail "forbidden model emitted: $OUT";; esac
 
 # No usable candidate returns status 2, no stdout, and a clear explanation.
@@ -279,11 +279,11 @@ cat >"$T/quota.json" <<'JSON'
 ]}
 JSON
 printf '2026-11-13T00:00:00Z\t178\tmuse\tfiber-178-build\tmac-opencode-id\n' >"$T/run/roster"
-printf '{"sessions":[{"id":"mac-opencode-id","status":"running","model":"opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/delegate.json"
+printf '{"sessions":[{"id":"mac-opencode-id","status":"running","model":"fiber/opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/delegate.json"
 printf '{"sessions":[]}\n' >"$T/box-delegate.json"
 BOX_DELEGATE_FAIL=1 run_pick
 [ "$RC" -eq 0 ] || fail "box probe failure exit $RC: $ERR"
-[ "$OUT" = 'openai/gpt-6-luna:medium muselaunch' ] || fail "box failure discarded Mac load: [$OUT]"
+[ "$OUT" = 'fiber/codex/gpt-6-luna:medium muselaunch' ] || fail "box failure discarded Mac load: [$OUT]"
 grep -q 'warning: box delegate probe failed; using Mac-only load' "$T/err" || fail "box failure warning missing: $ERR"
 
 # A box probe that exits 0 but prints non-JSON (an ssh banner) also warns
@@ -291,7 +291,7 @@ grep -q 'warning: box delegate probe failed; using Mac-only load' "$T/err" || fa
 printf 'Welcome banner\n{"sessions":[]}\n' >"$T/box-delegate.json"
 run_pick
 [ "$RC" -eq 0 ] || fail "box non-JSON exit $RC: $ERR"
-[ "$OUT" = 'openai/gpt-6-luna:medium muselaunch' ] || fail "box non-JSON discarded Mac load: [$OUT]"
+[ "$OUT" = 'fiber/codex/gpt-6-luna:medium muselaunch' ] || fail "box non-JSON discarded Mac load: [$OUT]"
 grep -q 'warning: box delegate JSON unavailable; using Mac-only load' "$T/err" || fail "box non-JSON warning missing: $ERR"
 printf '{"sessions":[]}\n' >"$T/box-delegate.json"
 
@@ -306,10 +306,10 @@ cat >"$T/quota.json" <<'JSON'
 ]}
 JSON
 printf '2026-11-13T00:00:00Z\t175\tmuse\tfiber-175-build\tprobe-failed-id\n' >"$T/run/roster"
-printf '{"sessions":[{"id":"probe-failed-id","status":"running","model":"opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/delegate.json"
+printf '{"sessions":[{"id":"probe-failed-id","status":"running","model":"fiber/opencode-go/muse-spark-1.3-contributor"}]}\n' >"$T/delegate.json"
 DELEGATE_FAIL=1 CLAUDE_FAIL=1 run_pick --explain
 [ "$RC" -eq 0 ] || fail "explain exit $RC: $ERR"
-[ "$OUT" = 'opencode-go/muse-spark-1.3-contributor muselaunch' ] || fail "failed probe was not zero load: [$OUT]"
+[ "$OUT" = 'fiber/opencode-go/muse-spark-1.3-contributor muselaunch' ] || fail "failed probe was not zero load: [$OUT]"
 [ "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')" = 1 ] || fail "explain stdout was not one line"
 [ "$(grep -c '^lane-model: candidate ' "$T/err")" -eq 3 ] || fail "explain did not report all candidates: $ERR"
 grep -q 'provider=opencode-go headroom=80% live lanes=0 score=80' "$T/err" || fail "explain lacks quota/load/score: $ERR"

@@ -1115,10 +1115,10 @@ setup_case resume-model
 reset_stub
 make_record old-9 BLOCKED none 0 2 0 none stub-1
 make_record stub-1 DONE 0 1 2 0
-run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --model openai/gpt-6-luna:xhigh
+run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --model fiber/codex/gpt-6-luna:xhigh
 [ "$RC" -eq 0 ] || fail "resume with --model exits 0"
 grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" || fail "resume with --model calls delegate resume"
-grep -qx 'resumemodel=openai/gpt-6-luna:xhigh' "$T/stub.log" || fail "resume passes --model to delegate resume"
+grep -qx 'resumemodel=fiber/codex/gpt-6-luna:xhigh' "$T/stub.log" || fail "resume passes --model to delegate resume"
 ! grep -q ' tkt-job gate slot=lane job=stub-1 ' "$CDIR/tkt.journal" || fail "resume without an original gate line journals no inherited gate"
 expected_resume_hash="$(shasum -a 256 <"$T/resume-prompt.md" | awk '{print $1}')"
 [ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "$expected_resume_hash" ] || fail "resume of a legacy slot stores the resume prompt hash"

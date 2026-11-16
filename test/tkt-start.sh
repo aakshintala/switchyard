@@ -1574,7 +1574,7 @@ want "SKIPPED filing=" 0 part-closing-no-warning
 [ "$(grep -ci 'warning.*--part.*closing' "$CDIR/stderr")" -eq 0 ] \
   || fail "part-closing-no-warning: Part of closing warned: $(cat "$CDIR/stderr")"
 
-# OpenAI bare ids pass only when the pool lists that exact id; effort ids still pass.
+# OpenAI and Fiber/Codex bare ids pass only when the pool lists that exact id; effort ids still pass.
 setup openai-pool-bare ONE AGAINST
 run_start --model lane=openai/gpt-6.1-sol
 want "CURRENT " 0 openai-pool-bare
@@ -1584,16 +1584,29 @@ want "CURRENT " 0 openai-pool-bare
 setup openai-bare ONE AGAINST
 run_start --model lane=openai/gpt-6-luna
 [ "$RC" -eq 2 ] || fail "openai-bare: exit $RC, want 2"
-grep -qF "tkt-start: --model role 'lane' requires an openai effort suffix" "$CDIR/stderr" \
+grep -qF "tkt-start: --model role 'lane' requires an effort suffix (e.g. :medium)" "$CDIR/stderr" \
   || fail "openai-bare: stderr does not name the role: $(cat "$CDIR/stderr")"
 [ ! -e "$RUN/widget-42.state" ] || fail "openai-bare: state was written"
 
 setup openai-prefix-bare ONE AGAINST
 run_start --model lane=openai/gpt-6.1
 [ "$RC" -eq 2 ] || fail "openai-prefix-bare: exit $RC, want 2"
-grep -qF "tkt-start: --model role 'lane' requires an openai effort suffix" "$CDIR/stderr" \
+grep -qF "tkt-start: --model role 'lane' requires an effort suffix (e.g. :medium)" "$CDIR/stderr" \
   || fail "openai-prefix-bare: stderr does not name the role: $(cat "$CDIR/stderr")"
 [ ! -e "$RUN/widget-42.state" ] || fail "openai-prefix-bare: state was written"
+
+setup fiber-codex-bare ONE AGAINST
+run_start --model lane=fiber/codex/gpt-6-luna
+[ "$RC" -eq 2 ] || fail "fiber-codex-bare: exit $RC, want 2"
+grep -qF "tkt-start: --model role 'lane' requires an effort suffix (e.g. :medium)" "$CDIR/stderr" \
+  || fail "fiber-codex-bare: stderr does not name the role: $(cat "$CDIR/stderr")"
+[ ! -e "$RUN/widget-42.state" ] || fail "fiber-codex-bare: state was written"
+
+setup fiber-codex-suffixed ONE AGAINST
+run_start --no-preflight --model lane=fiber/codex/gpt-6-luna:medium
+want "SKIPPED filing=" 0 fiber-codex-suffixed
+[ "$(grep -c '^model\.lane=fiber/codex/gpt-6-luna:medium$' "$RUN/widget-42.state")" -eq 1 ] \
+  || fail "fiber-codex-suffixed: state misses the effort-qualified model"
 
 POOL_FIXTURE="$T/openai-dot-prefix-pool"
 mkdir -p "$POOL_FIXTURE/bin"
@@ -1605,7 +1618,7 @@ TKT="$POOL_FIXTURE/bin/tkt-start"
 run_start --model lane=openai/gpt-6
 TKT="$SCRIPT_DIR/../bin/tkt-start"
 [ "$RC" -eq 2 ] || fail "openai-dot-prefix-bare: exit $RC, want 2"
-grep -qF "tkt-start: --model role 'lane' requires an openai effort suffix" "$CDIR/stderr" \
+grep -qF "tkt-start: --model role 'lane' requires an effort suffix (e.g. :medium)" "$CDIR/stderr" \
   || fail "openai-dot-prefix-bare: stderr does not name the role: $(cat "$CDIR/stderr")"
 [ ! -e "$RUN/widget-42.state" ] || fail "openai-dot-prefix-bare: state was written"
 

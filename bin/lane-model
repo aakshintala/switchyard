@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # lane-model: choose a box lane's session model from quota headroom and live load.
-# Candidates: openai/gpt-6-luna:medium, opencode-go/muse-spark-1.3-contributor,
+# Candidates: fiber/codex/gpt-6-luna:medium, fiber/opencode-go/muse-spark-1.3-contributor,
 # and claude-haiku-5-5. muse/* needs --model-ruling and is not a candidate.
 # Usage: lane-model [--explain]   (prints '<model> <launcher>')
 # LANE_MODEL_QUOTA, LANE_MODEL_DELEGATE, and LANE_MODEL_CLAUDE override the probes.
@@ -103,8 +103,8 @@ box_claude_ok = box_claude_ok == "1"
 explain = explain == "1"
 
 candidates = [
-    ("openai/gpt-6-luna:medium", "codex", "muselaunch"),
-    ("opencode-go/muse-spark-1.3-contributor", "opencode-go", "muselaunch"),
+    ("fiber/codex/gpt-6-luna:medium", "codex", "muselaunch"),
+    ("fiber/opencode-go/muse-spark-1.3-contributor", "opencode-go", "muselaunch"),
     ("claude-haiku-5-5", "claude", "boxlaunch"),
 ]
 
