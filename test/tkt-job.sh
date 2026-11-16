@@ -24,7 +24,7 @@ export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
 mkdir -p "$T/home/.agents/bin"
 printf '{"providers":[]}\n' >"$T/quota.json"
 export QUOTA_FEED="file://$T/quota.json"
-unset DELEGATE_JOBS_DIR
+unset DELEGATE_JOBS_DIR TKT_FIX_DISPATCH
 
 [ -x "$REAL_BIN/fill-brief" ] || fail "real fill-brief missing"
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
@@ -106,6 +106,7 @@ case "\$cmd" in
     n="\$((\$(cat "$T/counter") + 1))"
     printf '%s' "\$n" >"$T/counter"
     printf 'run|model=%s|cwd=%s|gate=%s|prompt=%s\n' "\$model" "\$cwd" "\$gate" "\$prompt" >>"\$log"
+    printf 'fixdispatch=%s\n' "\${TKT_FIX_DISPATCH:-unset}" >>"\$log"
     if [ -n "\$model_ruling" ]; then printf 'runmodelruling=%s\n' "\$model_ruling" >>"\$log"; fi
     if [ -n "\$idle" ]; then printf 'idle=%s\n' "\$idle" >>"\$log"; fi
     if [ -n "\$idle_ms" ]; then printf 'idleMs=%s\n' "\$idle_ms" >>"\$log"; fi
@@ -131,6 +132,7 @@ case "\$cmd" in
     n="\$((\$(cat "$T/counter") + 1))"
     printf '%s' "\$n" >"$T/counter"
     printf 'resume|id=%s|prompt=%s|new=stub-%s\n' "\$id" "\$prompt" "\$n" >>"\$log"
+    printf 'fixdispatch=%s\n' "\${TKT_FIX_DISPATCH:-unset}" >>"\$log"
     if [ -n "\$gate" ]; then printf 'resumegate=%s\n' "\$gate" >>"\$log"; fi
     if [ -n "\$rmodel" ]; then printf 'resumemodel=%s\n' "\$rmodel" >>"\$log"; fi
     if [ -n "\$model_ruling" ]; then printf 'resumemodelruling=%s\n' "\$model_ruling" >>"\$log"; fi
@@ -312,6 +314,40 @@ EOF
 printf 'extra words here\n' >"$T/extra.md"
 printf 'do the thing\n' >"$T/brief.md"
 printf 'resume prompt\n' >"$T/resume-prompt.md"
+
+# --- fix slots require tkt-fix, while its explicit dispatch marker is allowed --
+setup_case fix-slot-refused
+reset_stub
+cp "$S" "$CDIR/before.state"
+run_job --slot fix1 --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 2 ] || fail "unmarked fix1 exits 2 (rc=$RC)"
+grep -Fq "tkt-fix $S (--verify|--no-verify) --findings <file>" "$CDIR/stderr.txt" || fail "fix1 refusal names the tkt-fix findings route"
+grep -Fq "tkt-fix $S (--verify|--no-verify) --resume <job id> --prompt <file>" "$CDIR/stderr.txt" || fail "fix1 refusal names both tkt-fix resume modes"
+grep -Fq "tkt-state $S set job.fix1 ''" "$CDIR/stderr.txt" || fail "fix1 refusal names the job slot clear"
+grep -Fq "tkt-state $S set job.fix1.prompt ''" "$CDIR/stderr.txt" || fail "fix1 refusal names the prompt slot clear"
+! grep -q '^TKT tkt-job ' "$CDIR/stderr.txt" || fail "fix1 refusal uses plain stderr, not a verdict tag"
+! grep -q . "$T/stub.log" || fail "unmarked fix1 does not call delegate"
+! grep -Fq 'job.fix1=' "$S" || fail "unmarked fix1 leaves job.fix1 unset"
+! grep -Fq 'job.fix1.prompt=' "$S" || fail "unmarked fix1 leaves job.fix1.prompt unset"
+cmp -s "$S" "$CDIR/before.state" || fail "unmarked fix1 does not change state"
+
+setup_case fix-slot-dispatch
+reset_stub
+make_record stub-1 DONE none 0 1 0
+export TKT_FIX_DISPATCH=1
+run_job --slot fix1 --template "$T/tmpl-basic.md" --model test-model
+unset TKT_FIX_DISPATCH
+[ "$RC" -eq 0 ] || fail "marked fix1 proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^run|' "$T/stub.log" || fail "marked fix1 dispatches through delegate"
+grep -qx 'fixdispatch=unset' "$T/stub.log" || fail "marked fix1 does not pass TKT_FIX_DISPATCH to delegate"
+[ "$(bash "$TKT_STATE" "$S" get job.fix1)" = stub-1 ] || fail "marked fix1 stores its job id"
+
+setup_case no-marker-lane
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 0 ] || fail "lane without fix marker remains unaffected (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^run|' "$T/stub.log" || fail "lane without fix marker dispatches"
 
 # --- a build slot self-grants from the posted plan when no grant exists ------
 setup_case fence-required
@@ -828,7 +864,49 @@ for st in ERROR STALLED; do
   grep -qx "result line 2" <<<"$OUT" || fail "$st digest keeps the text tail"
 done
 
-# --- ERROR with no resume session prints neither a session nor a hint ---
+# --- fix-slot ERROR resumes route through tkt-fix, not tkt-job ----------------
+setup_case fix-error-resume-hint
+reset_stub
+make_record stub-1 ERROR none 0 2 0
+add_resume stub-1 sess-fix
+export TKT_FIX_DISPATCH=1
+run_job --slot fix1 --template "$T/tmpl-basic.md" --model test-model
+unset TKT_FIX_DISPATCH
+[ "$RC" -eq 1 ] || fail "fix-slot ERROR exits 1 (rc=$RC)"
+grep -Fq "Continue it with: tkt-fix $S (--verify|--no-verify) --resume stub-1 --prompt <file>" <<<"$OUT" || fail "fix-slot ERROR hint routes through tkt-fix with both modes"
+! grep -Fq "Continue it with: tkt-job $S --slot fix1" <<<"$OUT" || fail "fix-slot ERROR hint does not suggest direct tkt-job resume"
+
+# --- fix-slot ASK resumes route through tkt-fix, while clear hint stays valid --
+setup_case fix-reused-ask-hint
+reset_stub
+make_record stub-1 NEEDS_CONTEXT none 0 2 0
+jq --arg h "$H" '.result.changeSet.headAfter = $h' "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp"
+mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json"
+bash "$TKT_STATE" "$S" set job.fix1 stub-1 || fail "seed fix-slot ASK"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m advance
+now="$(git -C "$WT" rev-parse --short=12 HEAD)"
+export TKT_FIX_DISPATCH=1
+run_job --slot fix1 --expect-commits
+unset TKT_FIX_DISPATCH
+[ "$RC" -eq 1 ] || fail "fix-slot ASK exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-job ASK id=stub-1 reused=stub-1 stale-head=$H now=$now log=*" "fix-slot ASK"
+grep -Fq "Answer with: tkt-fix $S (--verify|--no-verify) --resume stub-1 --prompt <file>" <<<"$OUT" || fail "fix-slot ASK hint routes through tkt-fix with both modes"
+! grep -Fq "Answer with: tkt-job $S --slot fix1" <<<"$OUT" || fail "fix-slot ASK hint does not suggest direct tkt-job resume"
+
+setup_case fix-reused-clear-hint
+reset_stub
+make_record stub-1 BLOCKED none 0 2 0
+jq --arg h "$H" '.result.changeSet.headAfter = $h' "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp"
+mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json"
+bash "$TKT_STATE" "$S" set job.fix1 stub-1 || fail "seed fix-slot clear hint"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m advance
+export TKT_FIX_DISPATCH=1
+run_job --slot fix1 --expect-commits
+unset TKT_FIX_DISPATCH
+[ "$RC" -eq 1 ] || fail "fix-slot BLOCKED exits 1 (rc=$RC)"
+grep -Fq "tkt-state $S set job.fix1 '';" <<<"$OUT" || fail "fix-slot clear hint still names the correct slot reset"
+
+# --- ERROR with no resume session prints neither a session nor a hint --------
 setup_case job-error-noresume
 reset_stub
 make_record stub-1 ERROR none 0 2 0
@@ -1308,7 +1386,25 @@ gout="$(DELEGATE_JOB_ID=stub-1 bash "$1" 2>&1)"; grc=$?
 grep -q "GATE PASS" <<<"$gout" || fail "a passing gate script prints GATE PASS"
 grep -Fq "tkt-stray-run.sh" "$1" || fail "a plan gate absorbs stray run files"
 plan_journal_cmd="$(grep 'tkt-job gate slot=lane job=stub-1 ' "$CDIR/tkt.journal" | sed -E 's/.*cmd64=([^ ]+).*/\1/' | base64 -D)"
-[[ "$plan_journal_cmd" == *"tkt-stray-run.sh"* && "$plan_journal_cmd" == *" && true" ]] || fail "--gate-from-plan journals the combined guard and plan command: $plan_journal_cmd"
+[ "$plan_journal_cmd" = true ] || fail "--gate-from-plan journals the bare plan Gate, not the stray-run step: $plan_journal_cmd"
+# gate-credit and tkt-gate --from-job read the row through job_gate_journal_match
+# and compare it with the plan Gate, so the row they read must equal it.
+(
+  script_dir="$REAL_BIN"
+  . "$REAL_BIN/lib/job-walk.sh"
+  job_gate_journal_match "$CDIR/tkt.journal" stub-1
+  [ "$job_gate_journal_cmd" = true ] || { echo "fresh row reads back as: $job_gate_journal_cmd"; exit 1; }
+  legacy_cmd="bash $REAL_BIN/lib/tkt-stray-run.sh $CDIR/tkt.state $CDIR/run && true"
+  printf '%s tkt-job gate slot=fix1 job=legacy-1 cmd64=%s env64=%s\n' "2026-11-15T22:23:55Z" \
+    "$(printf '%s' "$legacy_cmd" | jq -Rrs '@base64')" "$(printf '' | jq -Rrs '@base64')" >"$T/legacy.journal"
+  job_gate_journal_match "$T/legacy.journal" legacy-1
+  [ "$job_gate_journal_cmd" = true ] || { echo "903c98a row reads back as: $job_gate_journal_cmd"; exit 1; }
+  other_cmd="bash /tmp/other.sh a b && true"
+  printf '%s tkt-job gate slot=fix1 job=other-1 cmd64=%s env64=%s\n' "2026-11-15T22:23:55Z" \
+    "$(printf '%s' "$other_cmd" | jq -Rrs '@base64')" "$(printf '' | jq -Rrs '@base64')" >"$T/other.journal"
+  job_gate_journal_match "$T/other.journal" other-1
+  [ "$job_gate_journal_cmd" = "$other_cmd" ] || { echo "another prefix was stripped: $job_gate_journal_cmd"; exit 1; }
+) || fail "journal reader returns the plan Gate for fresh and 903c98a rows and keeps other prefixes"
 
 setup_case gate-journal-explicit
 reset_stub
@@ -1657,7 +1753,9 @@ for slot in lane preflight confirm fix1 reviewer; do
   setup_case wall-no-$slot
   reset_stub
   make_record stub-1 DONE none 0 1 0
+  if [ "$slot" = fix1 ]; then export TKT_FIX_DISPATCH=1; else unset TKT_FIX_DISPATCH; fi
   run_job --slot $slot --template "$T/tmpl-basic.md" --model test-model
+  unset TKT_FIX_DISPATCH
   [ "$RC" -eq 0 ] || fail "$slot exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
   grep -q "^wallMs=" "$T/stub.log" && fail "$slot passes no wall cap"
 done
@@ -1715,7 +1813,7 @@ gate_script="$(grep '^resumegate=' "$T/stub.log" | sed 's/^resumegate=bash //')"
 grep -q "true" "$gate_script" || fail "resume gate script holds the plan gate command"
 grep -Fq "tkt-stray-run.sh" "$gate_script" || fail "resume plan gate absorbs stray run files"
 resume_journal_cmd="$(grep 'tkt-job gate slot=lane job=stub-1 ' "$CDIR/tkt.journal" | sed -E 's/.*cmd64=([^ ]+).*/\1/' | base64 -D)"
-[[ "$resume_journal_cmd" == *tkt-stray-run.sh* && "$resume_journal_cmd" == *" && true" ]] || fail "resume journals the combined guard and plan command: $resume_journal_cmd"
+[ "$resume_journal_cmd" = true ] || fail "resume journals the bare plan Gate, not the stray-run step: $resume_journal_cmd"
 
 # --- --resume forwards an explicit gate ---
 setup_case resume-gate-explicit
