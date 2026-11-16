@@ -994,13 +994,14 @@ run_build --from gate
 expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "prempty-resumed-lane"
 grep -Fqx "Repair command: tkt-job $S --slot lane --resume lane-resumable --prompt <file> --gate-from-plan --expect-commits; the resumed lane must finish its push step and open the PR before tkt-build $S --from gate" <<<"$OUT" \
   || fail "prempty-resumed-lane: repair hint keeps expect-commits when branch has no commits beyond Base"
+grep -q "^gate|" "$T/calls.log" && fail "prempty-resumed-lane: the gate never runs"
 # A committed branch uses a push-only resume hint without --expect-commits.
 setup_case prempty-resumed-lane-committed
 bash "$TKT_STATE" "$S" set job.lane lane-resumable || fail "prempty-resumed-lane-committed: set lane job"
 printf 'Base: %s\n\n## Files\n\n- src/existing.c\n' "$H" >"$CDIR/plan.md"
 bash "$TKT_STATE" "$S" set plan "$CDIR/plan.md" || fail "prempty-resumed-lane-committed: set plan"
 git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m committed-work
- touch "$T/empty-pr"
+touch "$T/empty-pr"
 run_build --from gate
 [ "$RC" -eq 2 ] || fail "prempty-resumed-lane-committed exits 2 (rc=$RC)"
 grep -Fq -- "--resume lane-resumable --prompt <file> --gate-from-plan; the prompt asks only for the push step (push the branch and open the PR)" <<<"$OUT" || fail "prempty-resumed-lane-committed: push-only hint"
