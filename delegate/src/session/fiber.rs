@@ -14,7 +14,9 @@ fn now_ms() -> u64 {
 }
 
 /// How long the bridge waits for Fiber to exit after `close` with `now`.
-pub(crate) const CLOSE_NOW_WAIT: Duration = Duration::from_secs(1);
+/// That close takes Fiber's shutdown path, and "The bound is 5 seconds from
+/// the signal to exit, per process" (Fiber docs/invocation.md, "Shutdown").
+pub(crate) const CLOSE_NOW_WAIT: Duration = Duration::from_secs(5);
 
 /// How long the bridge waits for Fiber to settle a `prompt` or `steer`. The
 /// supervisor kills a host that leaves a request unanswered for

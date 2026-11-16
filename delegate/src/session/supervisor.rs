@@ -65,6 +65,9 @@ pub const MAX_TEXT: usize = 8 * 1024 * 1024;
 pub const MAX_LINE: usize = 6 * MAX_TEXT + 1024;
 const ACCEPT_POLL: Duration = Duration::from_millis(25);
 const KILL_REAP_WAIT: Duration = Duration::from_secs(2);
+/// The Fiber bridge's time past its own waits to send `close` with `now`
+/// and exit once Fiber has.
+const FIBER_EXIT_MARGIN: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct SupervisorConfig {
@@ -1663,14 +1666,7 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
     );
     if shared.store.snapshot().status != Status::Dead {
         close_host_stdin(shared);
-        // The Fiber bridge waits the same grace for Fiber to exit, then sends
-        // `close` with `now` and waits again. Give it that wait, and as long
-        // again for its own exit, before any signal cuts the fallback short.
-        let exit_wait = if shared.kind == HostKind::Fiber {
-            shared.config.stop_grace + 2 * crate::session::fiber::CLOSE_NOW_WAIT
-        } else {
-            shared.config.stop_grace
-        };
+        let exit_wait = host_exit_wait(shared.kind, shared.config.stop_grace);
         if shared.host.wait_for_exit(exit_wait).is_none() {
             shared.host.signal_group(libc::SIGTERM);
             if shared.host.wait_for_exit(shared.config.term_wait).is_none() {
@@ -1807,6 +1803,18 @@ fn timeout_host(shared: &Shared, method: &str, message: &str) {
         false,
         &shared.fatal_write,
     );
+}
+
+/// How long a stop waits for the host to exit once its stdin is closed.
+/// The Fiber bridge waits the same grace for Fiber to exit, then sends
+/// `close` with `now` and waits `CLOSE_NOW_WAIT`. It gets both waits, and a
+/// margin for its own exit, before any signal cuts it short.
+fn host_exit_wait(kind: HostKind, stop_grace: Duration) -> Duration {
+    if kind == HostKind::Fiber {
+        stop_grace + crate::session::fiber::CLOSE_NOW_WAIT + FIBER_EXIT_MARGIN
+    } else {
+        stop_grace
+    }
 }
 
 fn terminate_host(host: &HostControl, term_wait: Duration) {
@@ -2137,6 +2145,18 @@ fn error_reply(code: &str, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fiber_stop_waits_out_the_bridge_close_and_close_now() {
+        let grace = Duration::from_millis(300);
+        let wait = host_exit_wait(HostKind::Fiber, grace);
+        assert!(
+            wait > grace + crate::session::fiber::CLOSE_NOW_WAIT,
+            "{wait:?}"
+        );
+        assert_eq!(host_exit_wait(HostKind::Muse, grace), grace);
+        assert_eq!(host_exit_wait(HostKind::Pi, grace), grace);
+    }
 
     #[test]
     fn expired_steer_resolution_is_not_reported_as_steered() {
