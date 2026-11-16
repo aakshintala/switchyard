@@ -707,6 +707,28 @@ else
   fail "finished-job-is-ticket-scoped-and-wake-names-job (rc=$lrc out=$out sends=$(cat "$T/send-commands" 2>/dev/null) message=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
+# A newer fix slot must not replace the ID captured for the older process.
+r=$(newrun older-finished-fix)
+lane "$r" 6301 fiber-6301-build sid-6301
+printf 'repo=example/switchyard\nissue=6301\nfixopen=1\njob.fix1=job-A-6301\n' >"$r/fiber-6301.state"
+set_session sid-6301 6301 turn-older-fix completed 3000000
+set_logs turn-older-fix 2900000 3000000 'STATUS: DONE'
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-6301.state\n' "$r" >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+printf 'repo=example/switchyard\nissue=6301\nfixopen=2\njob.fix1=job-A-6301\njob.fix2=job-B-6301\n' >"$r/fiber-6301.state"
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n102 100 00:10 bash /repo/bin/tkt-fix %s/fiber-6301.state\n' "$r" >"$T/box-procs"
+out=$(run_lanecheck "$r" 3001)
+set_processes
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 3002); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 6301 .*job job-A-6301 (tkt-fix) finished' \
+   && grep -Fq 'ticket #6301, job job-A-6301 (tkt-fix)' "$T/last-send"; then
+  ok finished-older-job-wakes-with-its-own-id
+else
+  fail "finished-older-job-wakes-with-its-own-id (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
 # A finished job with no ticket-owned id cannot produce a reasonless wake.
 r=$(newrun reasonless-job)
 lane "$r" 6200 fiber-6200-build sid-6200

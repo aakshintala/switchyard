@@ -1710,17 +1710,32 @@ def job_belongs_to_ticket(job, ticket):
     return str(job.get("ticket", "")) == ticket
 
 
-def job_reference(job, ticket, store):
+def job_id_for_process(job, ticket):
     args = job.get("args", "")
     ticket_jobs = state_job_ids(ticket)
     watch = re.search(r"\bdelegate\s+watch\s+([A-Za-z0-9-]+)", args)
-    if watch and watch.group(1) in ticket_jobs:
-        return watch.group(1)
-    if not ticket_jobs:
+    if watch:
+        return watch.group(1) if watch.group(1) in ticket_jobs else None
+    state_path = state_path_from_args(args)
+    if not state_path:
         return None
-    started = [(job_started_at_ms(job_id, store) or -1, job_id)
-               for job_id in ticket_jobs]
-    return max(started)[1]
+    values = state_values_for(state_path)
+    if values.get("issue") != ticket:
+        return None
+    command = job.get("cmd") or job_command(args)
+    if command == "tkt-fix":
+        slot = values.get("fixopen", "")
+        if slot.isdigit() and int(slot) > 0:
+            job_id = values.get("job.fix" + slot, "").strip()
+            if job_id:
+                return job_id
+    state_ids = {value.strip() for key, value in values.items()
+                 if re.fullmatch(r"job\.[^.]+", key) and value.strip()}
+    return next(iter(state_ids)) if len(state_ids) == 1 else None
+
+
+def job_reference(job):
+    return job.get("job_id")
 
 
 def job_started_at_ms(job_id, store):
@@ -2094,6 +2109,19 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                                      "args": row["args"], "elapsed": row["elapsed"],
                                      "ticket": n})
                 current_ids.add(identity)
+        previously_running = {
+            f"{job.get('pid')}:{job.get('cmd')}": job
+            for job in lane_record["running"] if job_belongs_to_ticket(job, n)
+        }
+        for job in current_jobs:
+            previous = previously_running.get(f"{job.get('pid')}:{job.get('cmd')}")
+            if previous is not None:
+                if previous.get("job_id"):
+                    job["job_id"] = previous["job_id"]
+            else:
+                job_id = job_id_for_process(job, n)
+                if job_id:
+                    job["job_id"] = job_id
         current_jobs.sort(key=lambda job: (job["elapsed"], job["pid"]))
         if ps_ok:
             finished = [job for job in lane_record["finished"]
@@ -2219,7 +2247,7 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
             wake_done = True
         elif not working and finished_jobs and deleg and not parked and not jobq:
             job = finished_jobs[0]
-            job_id = job_reference(job, n, store)
+            job_id = job_reference(job)
             if not job_id:
                 print(f"WAITING {n} {host} {sess} {job['cmd']} finished — "
                       "no ticket-owned job id; no wake sent")
