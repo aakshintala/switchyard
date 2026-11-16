@@ -524,16 +524,16 @@ fn fiber_session_start_and_stop_use_the_hub_bridge() {
         let prompt = conn.recv();
         assert_eq!(prompt["command"], "prompt");
         conn.accept(&prompt, json!({}));
-        conn.send(event("turn_started", session_id, 1, json!({"turn_id":"t1","input":[{"command_id":prompt["id"],"content":[{"type":"text","text":"Reply with DONE."}],"source":"driver","type":"message"}]})));
+        conn.send(turn_event("turn_started", session_id, 1, "t1", json!({"input":[{"command_id":prompt["id"],"content":[{"type":"text","text":"Reply with DONE."}],"source":"driver","type":"message"}]})));
         let steer = conn.recv();
         assert_eq!(steer["command"], "steer");
-        conn.send(event("steering_applied", session_id, 2, json!({"turn_id":"t1","command_id":steer["id"]})));
-        conn.send(event("user_message", session_id, 3, json!({"turn_id":"t1","text":"change text","command_id":steer["id"]})));
-        conn.send(event("turn_completed", session_id, 4, json!({"turn_id":"t1","outcome":"completed"})));
+        conn.send(turn_event("steering_applied", session_id, 2, "t1", json!({"command_id":steer["id"]})));
+        conn.send(turn_event("user_message", session_id, 3, "t1", json!({"text":"change text","command_id":steer["id"]})));
+        conn.send(turn_event("turn_completed", session_id, 4, "t1", json!({"outcome":"completed"})));
         let mut stop_command = conn.recv();
         if stop_command["command"] == "cancel" {
             conn.accept(&stop_command, json!({}));
-            conn.send(event("turn_completed", session_id, 3, json!({"turn_id":"t1","outcome":"interrupted"})));
+            conn.send(turn_event("turn_completed", session_id, 3, "t1", json!({"outcome":"interrupted"})));
             stop_command = conn.recv();
         }
         assert_eq!(stop_command["command"], "close");
@@ -607,20 +607,22 @@ fn fiber_session_interrupt_cancels_without_closing_the_hub_session() {
         let prompt = conn.recv();
         assert_eq!(prompt["command"], "prompt");
         conn.accept(&prompt, json!({}));
-        conn.send(event(
+        conn.send(turn_event(
             "turn_started",
             session_id,
             1,
-            json!({"turn_id":"t1","input":[{"command_id":prompt["id"],"type":"message"}]}),
+            "t1",
+            json!({"input":[{"command_id":prompt["id"],"type":"message"}]}),
         ));
         let cancel = conn.recv();
         assert_eq!(cancel["command"], "cancel");
         conn.accept(&cancel, json!({}));
-        conn.send(event(
+        conn.send(turn_event(
             "turn_completed",
             session_id,
             2,
-            json!({"turn_id":"t1","outcome":"interrupted"}),
+            "t1",
+            json!({"outcome":"interrupted"}),
         ));
         let close = conn.recv();
         assert_eq!(close["command"], "close");
@@ -688,17 +690,19 @@ fn fiber_session_send_resumes_an_idle_exited_fiber_with_a_prompt() {
         let first_prompt = conn.recv();
         assert_eq!(first_prompt["command"], "prompt");
         conn.accept(&first_prompt, json!({}));
-        conn.send(event(
+        conn.send(turn_event(
             "turn_started",
             session_id,
             1,
-            json!({"turn_id":"t1","input":[{"command_id":first_prompt["id"],"type":"message"}]}),
+            "t1",
+            json!({"input":[{"command_id":first_prompt["id"],"type":"message"}]}),
         ));
-        conn.send(event(
+        conn.send(turn_event(
             "turn_completed",
             session_id,
             2,
-            json!({"turn_id":"t1","outcome":"completed"}),
+            "t1",
+            json!({"outcome":"completed"}),
         ));
         conn.send(event("fiber_exited", session_id, 3, json!({"exit_code":0})));
         let resumed_prompt = conn.recv();
@@ -714,17 +718,19 @@ fn fiber_session_send_resumes_an_idle_exited_fiber_with_a_prompt() {
             4,
             json!({"last_seq":3}),
         ));
-        conn.send(event(
+        conn.send(turn_event(
             "turn_started",
             session_id,
             5,
-            json!({"turn_id":"t2","input":[{"command_id":resumed_prompt["id"],"type":"message"}]}),
+            "t2",
+            json!({"input":[{"command_id":resumed_prompt["id"],"type":"message"}]}),
         ));
-        conn.send(event(
+        conn.send(turn_event(
             "turn_completed",
             session_id,
             6,
-            json!({"turn_id":"t2","outcome":"completed"}),
+            "t2",
+            json!({"outcome":"completed"}),
         ));
         let close = conn.recv();
         assert_eq!(close["command"], "close");
@@ -828,17 +834,19 @@ fn fiber_session_stop_after_idle_exit_sends_no_hub_command() {
         let prompt = conn.recv();
         assert_eq!(prompt["command"], "prompt");
         conn.accept(&prompt, json!({}));
-        conn.send(event(
+        conn.send(turn_event(
             "turn_started",
             session_id,
             1,
-            json!({"turn_id":"t1","input":[{"command_id":prompt["id"],"type":"message"}]}),
+            "t1",
+            json!({"input":[{"command_id":prompt["id"],"type":"message"}]}),
         ));
-        conn.send(event(
+        conn.send(turn_event(
             "turn_completed",
             session_id,
             2,
-            json!({"turn_id":"t1","outcome":"completed"}),
+            "t1",
+            json!({"outcome":"completed"}),
         ));
         conn.send(event("fiber_exited", session_id, 3, json!({"exit_code":0})));
         conn.expect_eof();

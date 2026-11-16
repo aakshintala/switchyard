@@ -305,27 +305,13 @@ fn await_disposition(
             if found {
                 emit_event(out, &v);
                 *running = true;
-                return Ok((
-                    "started".into(),
-                    payload
-                        .get("turn_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .into(),
-                ));
+                return Ok(("started".into(), envelope_turn_id(&v)));
             }
         }
         if matches!(kind, "steering_applied" | "steering_queue")
             && payload.get("command_id").and_then(Value::as_str) == Some(command_id)
         {
-            return Ok((
-                "steered".into(),
-                payload
-                    .get("turn_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
-            ));
+            return Ok(("steered".into(), envelope_turn_id(&v)));
         }
         if kind == "command_rejected"
             && payload.get("command_id").and_then(Value::as_str) == Some(command_id)
@@ -351,6 +337,15 @@ fn await_disposition(
         emit_event(out, &v);
         let _ = (rpc_id, session_id, text);
     }
+}
+
+/// The `turn_id` from a hub event's envelope, or "" when the event has none.
+fn envelope_turn_id(event: &Value) -> String {
+    event
+        .get("turn_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .into()
 }
 
 fn stop_grace() -> Duration {
@@ -401,27 +396,29 @@ fn await_exit(
 fn emit_event(out: &mut impl Write, event: &Value) {
     let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
     let p = event.get("payload").cloned().unwrap_or(Value::Null);
+    // Fiber's envelope carries `turn_id`; the payload does not.
+    let turn_id = event.get("turn_id");
     let (method, params) = match kind {
-        "turn_started" => ("turn/started", json!({"turnId":p.get("turn_id")})),
+        "turn_started" => ("turn/started", json!({"turnId":turn_id})),
         "turn_completed" => (
             "turn/completed",
-            json!({"turnId":p.get("turn_id"),"terminal":match p.get("outcome").and_then(Value::as_str).unwrap_or(""){"completed"=>"completed","interrupted"=>"cancelled",_=>"failed"},"error":p.get("error"),"questions":p.get("questions")}),
+            json!({"turnId":turn_id,"terminal":match p.get("outcome").and_then(Value::as_str).unwrap_or(""){"completed"=>"completed","interrupted"=>"cancelled",_=>"failed"},"error":p.get("error"),"questions":p.get("questions")}),
         ),
         "user_message" => (
             "item/completed",
-            json!({"item":{"kind":"userMessage","turnId":p.get("turn_id"),"text":p.get("text"),"commandId":p.get("command_id")}}),
+            json!({"item":{"kind":"userMessage","turnId":turn_id,"text":p.get("text"),"commandId":p.get("command_id")}}),
         ),
         "agent_message" => (
             "item/completed",
-            json!({"item":{"kind":"agentMessage","turnId":p.get("turn_id"),"text":p.get("text")}}),
+            json!({"item":{"kind":"agentMessage","turnId":turn_id,"text":p.get("text")}}),
         ),
         "tool_started" => (
             "item/started",
-            json!({"item":{"kind":"toolCall","turnId":p.get("turn_id"),"tool":p.get("tool"),"callId":p.get("call_id")}}),
+            json!({"item":{"kind":"toolCall","turnId":turn_id,"tool":p.get("tool"),"callId":p.get("call_id")}}),
         ),
         "tool_completed" => (
             "item/completed",
-            json!({"item":{"kind":"toolCall","turnId":p.get("turn_id"),"tool":p.get("tool"),"callId":p.get("call_id"),"status":p.get("status")}}),
+            json!({"item":{"kind":"toolCall","turnId":turn_id,"tool":p.get("tool"),"callId":p.get("call_id"),"status":p.get("status")}}),
         ),
         "token_usage" => ("session/tokenUsage", json!({"cumulative":p})),
         "fiber_exited" => ("session/closed", json!({"reason":"stopped"})),
@@ -501,7 +498,7 @@ mod tests {
     #[test]
     fn late_steer_that_starts_the_next_turn_reports_started() {
         let link = link_with_line(
-            json!({"kind":"turn_started","payload":{"turn_id":"t2","input":[{"command_id":"c1"}]}}),
+            json!({"kind":"turn_started","turn_id":"t2","payload":{"input":[{"command_id":"c1"}]}}),
         );
         let mut output = Vec::new();
         let result = await_disposition(&link, &mut output, "c1", 1, &mut false, true, "s1", "text");
@@ -513,7 +510,7 @@ mod tests {
         let mut out = Vec::new();
         emit_event(
             &mut out,
-            &json!({"kind":"turn_completed","payload":{"turn_id":"t","outcome":"interrupted"}}),
+            &json!({"kind":"turn_completed","turn_id":"t","payload":{"outcome":"interrupted"}}),
         );
         let line = String::from_utf8(out).unwrap();
         assert!(line.contains("cancelled"));
