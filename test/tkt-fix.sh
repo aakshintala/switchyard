@@ -91,6 +91,14 @@ if [ "\$watch_only" -eq 1 ] && [[ " \$* " == *" --expect-commits "* ]]; then
   head_after="\$(jq -r '.result.changeSet.headAfter // ""' "\$record")"
   gate_exit="\$(jq -r '.result.gateResult | if . == null then "none" elif .exitCode != null then (.exitCode | tostring) elif .passed == true then "0" else "1" end' "\$record")"
   gate_word=none; [ "\$gate_exit" = none ] || gate_word=PASS
+  if [ "\$job_status" = DONE_WITH_CONCERNS ] && [ "\$gate_exit" != none ] && [ "\$gate_exit" != 0 ] \\
+    && [ -r "$T/collect-gate-mode" ]; then
+    printf 'gate-retry|job=%s|slot=%s\\n' "\$jobid" "\$slot" >>"$T/calls.log"
+    case "\$(cat "$T/collect-gate-mode")" in
+      pass) echo "TKT tkt-job CONCERNS id=\$jobid gate=PASS log=x"; exit 1 ;;
+      fail) echo "TKT tkt-job GATE-FAIL rc=9 gatelog=x log=x"; exit 1 ;;
+    esac
+  fi
   if [ "\$job_status" = DONE ] && [ "\$commits" = 0 ]; then
     echo "TKT tkt-job NO-COMMITS id=\$jobid gate=\$gate_word log=x"
     exit 1
@@ -2320,6 +2328,7 @@ grep -Fq 'tkt-fix: missing recorded round findings: fix_round.1.findings' "$T/st
 
 # --collect-fix only collects the id recorded for the computed open slot.
 setup_case collect-fix-wrong
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
 bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
 cp "$S" "$T/state-before-wrong-collect"
@@ -2328,6 +2337,41 @@ run_rc=0; bash "$TKT" "$S" --verify --collect-fix j2 >"$T/wrong.out" 2>"$T/stder
 grep -Fq 'tkt-fix: --collect-fix j2 is not the job of open slot fix1 (job.fix1=j1)' "$T/stderr" || fail "wrong collect-fix id did not name both ids: $(cat "$T/stderr")"
 cmp -s "$S" "$T/state-before-wrong-collect" || fail "wrong collect-fix id changed state"
 grep -q 'job|' "$T/calls.log" && fail "wrong collect-fix id called tkt-job"
+
+# A stored failed-gate fix in fixopen is recollected from its open slot even
+# though fixslot has already advanced; a passing gate retry continues one round.
+setup_case collect-fix-open-slot
+fixture_commit fix.txt "fix 1 committed" "fix: open fix slot"
+OPEN_HEAD="$(git -C "$WT" rev-parse HEAD)"
+OPEN_FINDINGS="$CDIR/fix-round-1-findings.md"
+cp "$CDIR/findings.md" "$OPEN_FINDINGS"
+drop_state_key round
+drop_state_key reviewed
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.1.start "$OLD" >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.1.findings "$OPEN_FINDINGS" >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.1.head "$OPEN_HEAD" >/dev/null
+mkdir -p "$TMPDIR/delegate-jobs"
+jq -n --arg before "$OLD" --arg after "$OPEN_HEAD" --arg cwd "$WT" \
+  '{status:"DONE_WITH_CONCERNS",result:{status:"DONE_WITH_CONCERNS",text:"gate failed on a test flake",gateResult:{command:"bash gate.sh",exitCode:1,passed:false,outputPath:"gate.log",outputTail:"flaky test failed"},changeSet:{headBefore:$before,headAfter:$after,newCommits:[$after],uncommittedFiles:[],filesChanged:["fix.txt"],diffstat:"1 file changed",dirtyAfter:false},concerns:null},resume:{cwd:$cwd,gate:"bash gate.sh"}}' \
+  >"$TMPDIR/delegate-jobs/j1.json" || fail "write open-slot failed-gate job record"
+printf 'pass' >"$T/collect-gate-mode"
+printf 'ORIGIN:%s:%s' "$CDIR/origin.git" refs/heads/tkt-529 >"$T/prhead"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --since "$OLD" --collect-fix j1 2>"$T/stderr")" \
+  || fail "open-slot collect exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK reviewed=' || fail "open-slot collect did not continue through verify: $out"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.head)" = "$OPEN_HEAD" ] || fail "open-slot collect lost fix1's head"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 1 ] || fail "open-slot collect did not count exactly one round"
+[ "$(bash "$TKT_STATE" "$S" get fixslot)" = 1 ] || fail "open-slot collect changed the already closed fixslot"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = 0 ] || fail "open-slot collect left fixopen set"
+[ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-529)" = "$OPEN_HEAD" ] || fail "open-slot collect did not push the fix head"
+grep -Fq "job|$S --slot fix1 --expect-commits" "$T/calls.log" || fail "open-slot collect did not watch fix1: $(cat "$T/calls.log")"
+grep -Fq 'gate-retry|job=j1|slot=fix1' "$T/calls.log" || fail "open-slot collect did not rerun the failed gate through tkt-job: $(cat "$T/calls.log")"
+[ "$(grep -c '^job|' "$T/calls.log")" = 1 ] || fail "open-slot collect dispatched a new fix job"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OPEN_HEAD" ] || fail "open-slot collect did not persist the pushed head"
 
 # NEEDS_CONTEXT closes its slot without a round; collect refuses it and names resume.
 if want collect-fix-needs-context; then run_collect_fix_needs_context; fi

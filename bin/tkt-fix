@@ -273,6 +273,13 @@ fixslot="$(t get fixslot 2>/dev/null || printf '0')"; case "$fixslot" in ''|*[!0
 part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
 if [ "$round" -gt "$fixslot" ]; then n=$((round + 1)); else n=$((fixslot + 1)); fi
 slot="fix$n"
+if [ -n "$collect_fix_job" ]; then
+  openfix="$(t get fixopen 2>/dev/null || printf '0')"
+  case "$openfix" in ''|*[!0-9]*) openfix=0 ;; *) openfix=$((10#$openfix)) ;; esac
+  if [ "$openfix" -gt 0 ] && open_job="$(t get "job.fix$openfix" 2>/dev/null || true)" && [ -n "$open_job" ]; then
+    slot="fix$openfix"
+  fi
+fi
 if [ -n "$resume" ]; then
   # A resume reuses the slot that owns its id; an id no walk reaches falls
   # back to the fresh slot. An id with no record at all is refused only

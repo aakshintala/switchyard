@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TKT="$SCRIPT_DIR/../bin/tkt-job"
 TKT_STATE="$SCRIPT_DIR/../bin/tkt-state"
 REAL_BIN="$SCRIPT_DIR/../bin"
+. "$REAL_BIN/lib/gate-script.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -623,6 +624,57 @@ run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 expect_verdict "TKT tkt-job GATE-FAIL rc=3 gatelog=/tmp/gate-test.log log=*" "GATE-FAIL"
 grep -q "reviewer is uneasy" <<<"$OUT" || fail "GATE-FAIL digest carries concerns"
 if bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "GATE-FAIL does not save concerns.lane"; fi
+
+prepare_failed_fix_gate_recheck() {
+  local case_name="$1" mode="$2" gate_script original_log gate_command
+  setup_case "$case_name"
+  reset_stub
+  make_record stub-1 DONE_WITH_CONCERNS 3 1 3 4
+  gate_script="$CDIR/run/switchyard-502-fix1-gate-original.sh"
+  original_log="$CDIR/original-gate-failure.log"
+  printf 'original failed gate output\n' >"$original_log"
+  printf '%s' "$mode" >"$T/gate-recheck-mode"
+  gate_command="if [ \"\$(cat '$T/gate-recheck-mode')\" = pass ]; then printf 'gate passed\\n'; else printf 'gate still fails\\n'; exit 9; fi"
+  write_gate_script "$gate_script" "$original_log" "" "$gate_command" \
+    "tkt-job: delegate runs it as the job-end gate"
+  jq --arg head "$H" --arg cwd "$WT" --arg gate "bash $gate_script" --arg output "$original_log" \
+    '.result.changeSet.headBefore = $head
+     | .result.changeSet.headAfter = $head
+     | .result.gateResult.outputPath = $output
+     | .resume.cwd = $cwd
+     | .resume.gate = $gate' "$T/records/stub-1.json" \
+    >"$T/records/stub-1.json.tmp" \
+    && mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json" \
+    || fail "$case_name: prepare recorded failed-gate job"
+  bash "$TKT_STATE" "$S" set job.fix1 stub-1 >/dev/null
+}
+
+# A tkt-fix collection reruns only its stored failed fix gate at the recorded
+# clean head, preserving the original failure log and never redispatching.
+prepare_failed_fix_gate_recheck fix-failed-gate-recheck pass
+original_log="$CDIR/original-gate-failure.log"
+export TKT_FIX_DISPATCH=1
+run_job --slot fix1 --expect-commits
+unset TKT_FIX_DISPATCH
+[ "$RC" = 1 ] || fail "rechecked DONE_WITH_CONCERNS remains a concern (rc=$RC)"
+expect_verdict "TKT tkt-job CONCERNS id=stub-1 reused=stub-1 log=*" "fix failed-gate retry"
+grep -Fq 'gateRetry=exit=0 log=' <<<"$OUT" || fail "fix failed-gate retry did not report its passing gate"
+retry_log="$(sed -n 's/^gateRetry=exit=0 log=//p' <<<"$OUT")"
+[ -r "$retry_log" ] && grep -Fq 'gate passed' "$retry_log" || fail "fix failed-gate retry did not execute the gate"
+cmp -s <(printf 'original failed gate output\n') "$original_log" || fail "fix failed-gate retry overwrote the original failure log"
+[ "$(jq -r '.result.gateResult.exitCode' "$T/records/stub-1.json")" = 3 ] || fail "fix failed-gate retry rewrote the immutable job record"
+grep -q '^watch|stub-1$' "$T/stub.log" || fail "fix failed-gate retry did not watch the stored job"
+! grep -q '^run|' "$T/stub.log" || fail "fix failed-gate retry dispatched another job"
+grep -q 'tkt-job gate retry slot=fix1 job=stub-1 exit=0' "${S%.state}.journal" || fail "fix failed-gate retry did not journal its result"
+
+prepare_failed_fix_gate_recheck fix-failed-gate-recheck-fails fail
+export TKT_FIX_DISPATCH=1
+run_job --slot fix1 --expect-commits
+unset TKT_FIX_DISPATCH
+[ "$RC" = 1 ] || fail "still-failing fix gate exits 1"
+expect_verdict "TKT tkt-job GATE-FAIL rc=9 gatelog=*" "still-failing fix gate retry"
+grep -Fq 'gateRetry=exit=9 log=' <<<"$OUT" || fail "still-failing fix gate retry did not report its failure"
+grep -q 'tkt-job gate retry slot=fix1 job=stub-1 exit=9' "${S%.state}.journal" || fail "still-failing fix gate retry did not journal its result"
 
 # --- DONE with a failed gate is a GATE-FAIL too: the script exit rules ---
 setup_case done-badgate
