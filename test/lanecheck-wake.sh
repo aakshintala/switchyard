@@ -658,6 +658,7 @@ out=$(run_lanecheck "$r" 3000)
 set_processes
 cat >"$r/rulings/ruling-5102-RULING-5102-1.md" <<'EOF'
 RULING-5102-1: hold this lane until the next ruling.
+hold: wait for an explicit go-ahead.
 EOF
 cat >"$r/fiber-5102-report.md" <<'EOF'
 STATUS: DONE — work paused.
@@ -675,6 +676,39 @@ if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 5102 hold' \
   ok ack-of-hold-ruling-waits-without-wake
 else
   fail "ack-of-hold-ruling-waits-without-wake (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
+fi
+
+# A go ruling may mention a hold without marking itself as a hold.
+r=$(newrun ack-of-go-ruling)
+lane "$r" 5103 fiber-5103-build sid-5103
+printf 'repo=example/switchyard\nissue=5103\njob.fix1=job-5103\n' >"$r/fiber-5103.state"
+mkdir -p "$r/rulings"
+set_session sid-5103 5103 turn-go-ack completed 3000000
+set_logs turn-go-ack 2900000 3000000 'STATUS: DONE'
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-5103.state\n' "$r" >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+set_processes
+cat >"$r/rulings/ruling-5103-RULING-5103-1.md" <<'EOF'
+RULING-5103-1: proceed with the plan.
+The breaker hold ends after this step.
+EOF
+cat >"$r/fiber-5103-report.md" <<'EOF'
+STATUS: DONE — work continues.
+ACK RULING-5103-1
+EOF
+python3 - "$r/rulings/ruling-5103-RULING-5103-1.md" "$r/fiber-5103-report.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1794253000, 1794253000))
+os.utime(sys.argv[2], (1794253001, 1794253001))
+PY
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 3000); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5103 .*job job-5103 (tkt-fix) finished' \
+   && grep -Fq 'ticket #5103, job job-5103 (tkt-fix)' "$T/last-send"; then
+  ok acked-go-ruling-prose-hold-does-not-suppress-wake
+else
+  fail "acked-go-ruling-prose-hold-does-not-suppress-wake (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
 # A detached job's incidental args may mention another ticket; its state file

@@ -1929,7 +1929,10 @@ def hold_timestamp(ticket, rep, assistant_messages, lane_started):
         acked.update(re.findall(r"(?im)^\s*ACK\s+(\S+)\s*$", source))
     if acked:
         for when, path, text in ruling_archives.get(ticket, []):
-            if acked.intersection(archive_ids(text, path)) and re.search(r"\bhold\b", text, re.I):
+            first_line = text.splitlines()[0] if text.splitlines() else ""
+            marked_hold = (re.search(r"(?m)^hold:", text)
+                           or re.search(r"\bHOLD\b", first_line, re.I))
+            if (acked.intersection(archive_ids(text, path)) and marked_hold):
                 held_at.append(when)
     return max(held_at) if held_at else None
 
