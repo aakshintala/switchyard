@@ -46,7 +46,7 @@ Every brief carries exactly one of these lines, verbatim:
 
 Use the implement skill's Commands table for `tkt-*` verdict routing.
 
-A brief without one is incomplete. A worker brief with a gate also carries, verbatim: "Run the gate in the foreground. Inside a job, never run the full gate in one tool call. Run the narrowest affected test set (the plan's task gates); delegate's gate runs the full check at job end. Run every process in the foreground."
+A brief without one is incomplete. A worker brief with a gate also carries, verbatim: "Run the gate in the foreground. Inside a job, never run the full gate (fiber's `scripts/check`) in one tool call. Run the narrowest affected test set (the plan's task gates); delegate's gate runs the full check at job end. Run every process in the foreground."
 
 A brief that says something is absent (unwritten, missing, not done) names the read that showed it: "none of the 5 comments is the classification", not "the ticket has 5 comments". A count says nothing about what the items contain. When you cannot name the read, ask the worker whether the thing exists instead of asserting it, since a worker handed a false premise builds on it.
 
