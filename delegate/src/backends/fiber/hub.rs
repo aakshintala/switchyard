@@ -1300,6 +1300,7 @@ impl HubConn {
         };
         let deadline = reconnect_deadline(rest);
         let mut fatal = None;
+        let mut last_error = None;
         let mut connected = false;
 
         for delay in RECONNECT_BACKOFF {
@@ -1328,7 +1329,10 @@ impl HubConn {
                     connected = true;
                     conn
                 }
-                Err(text) if reconnectable_connect_error(&text) => continue,
+                Err(text) if reconnectable_connect_error(&text) => {
+                    last_error = Some(text);
+                    continue;
+                }
                 Err(text) => {
                     fatal = Some(text);
                     break;
@@ -1396,7 +1400,10 @@ impl HubConn {
                     ));
                     break;
                 }
-                WaitOutcome::Lost => continue,
+                WaitOutcome::Lost => {
+                    last_error = Some(lost_text(&session_id));
+                    continue;
+                }
             }
         }
         // When no replacement passed hub_hello, the old writer is still in
@@ -1419,7 +1426,9 @@ impl HubConn {
             out.summary_sent = false;
         }
         rest.ack = old_ack;
-        Err(fatal.unwrap_or_else(|| lost_text(&session_id)))
+        Err(fatal
+            .or(last_error)
+            .unwrap_or_else(|| lost_text(&session_id)))
     }
 }
 
