@@ -86,6 +86,13 @@ gh() (
     # plus review-pr comment history for the refusal guard, as gh api --jq emits them
     ep="${*: -1}"
     case "$ep" in
+      repos/O/N/issues/comments/*)
+        id="${ep##*/}"
+        printf '%s\n' "$ep" >>"$T/state/ruling-api.txt"
+        [ -f "$T/state/ruling-comment-$id.json" ] || { echo "fake gh: comment $id missing" >&2; exit 1; }
+        cat "$T/state/ruling-comment-$id.json"
+        exit 0
+        ;;
       repos/O/N/issues/*/comments)
         if [ -e "$T/state/fail-comments" ]; then echo "fake gh: comments failed" >&2; exit 1; fi
         if [ ! -f "$T/state/comments.json" ]; then exit 0; fi
@@ -229,6 +236,13 @@ delegate() (
       printf '%s\n' "$PATH" >"$T/state/path-$role"
       printf '%s\n' "${DELEGATE_CALLER-unset}" >"$T/state/caller-$role"
       printf '%s\n' "${DELEGATE_CALLER_CWD-unset}" >"$T/state/caller-cwd-$role"
+      if [ -e "$T/state/capture-ruling-context" ]; then
+        for ruling_file in "$cwd"/.review-context/ruling-*.md; do
+          [ -f "$ruling_file" ] || continue
+          cp "$ruling_file" "$T/state/$(basename "$ruling_file")"
+        done
+        cp "$prompt" "$T/state/ruling-prompt.md"
+      fi
       if [ -n "$ruling" ]; then
         printf '%s %s %s\n' "$role" "$model" "$ruling" >>"$T/state/runs.txt"
       else
@@ -272,12 +286,45 @@ export T FAKE_SHA MAIN_SHA SYMLINK_SHA ESC_SHA
 export -f gh delegate sleep
 
 write_record() {
-  # write_record ROLE STATUS TEXT [GATE_EXIT]: GATE_EXIT absent means gateResult null.
-  local gate_json="null" text_json
+  # write_record ROLE STATUS TEXT [GATE_EXIT]: GATE_EXIT absent means
+  # gateResult null. Lifecycle and result fields match `job-record` records.
+  local gate_json="null"
   if [ $# -ge 4 ]; then gate_json="{\"exitCode\": $4}"; fi
-  text_json="$(printf '%s' "$3" | jq -Rs .)"
-  printf '{"status":"%s","result":{"status":"%s","text":%s,"gateResult":%s}}\n' \
-    "$2" "$2" "$text_json" "$gate_json" >"$T/canned/$1.json"
+  jq -n --arg status "$2" --arg text "$3" --arg cwd "$T/clone" \
+    --arg head "$FAKE_SHA" --argjson gate "$gate_json" '
+    {
+      status: $status,
+      supervisorPid: 1,
+      startedAtMs: 1,
+      endedAtMs: 2,
+      caller: "review-pr test",
+      callerPid: 1,
+      callerCommand: "review-pr test",
+      callerCwd: $cwd,
+      resume: {
+        model: "test/model", modelRuling: null, backend: "fiber",
+        cwd: $cwd, sessionId: "test-session", gate: "",
+        toolIdleMs: null, idleMs: null, wallMs: null, addDirs: []
+      },
+      result: {
+        status: $status,
+        text: $text,
+        sessionId: "test-session",
+        backend: "fiber",
+        model: "test/model",
+        usage: {inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0},
+        costUsd: 0,
+        costEstimated: true,
+        durationMs: 0,
+        jobId: "test-job",
+        changeSet: {
+          headBefore: $head, headAfter: $head, newCommits: [],
+          filesChanged: [], diffstat: "", uncommittedFiles: [], dirtyAfter: false
+        },
+        gateResult: $gate
+      }
+    }
+  ' >"$T/canned/$1.json"
 }
 
 reset_state() {
@@ -2948,6 +2995,61 @@ bash "$REVIEW" collect job-standards job-spec job-overbuild --findings-out "$T/r
 [ -f "$T/reprint-b.txt" ] || fail "reprint collect --findings-out writes the file"
 cmp -s "$T/reprint-a.saved" "$T/reprint-b.txt" || fail "reprint findings file matches the first collect's file"
 [ ! -e "$T/state/comment-pr.txt" ] || fail "reprint collect posts no PR comment"
+
+# --- case: review-pr run --verify stages validated recorded ruling context
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 file.txt:1 — wrong value — repair it\nP2 file.txt:2 — missing check — add it\n' >"$T/findings.txt"
+printf '{"id":77,"body":"refutes: P1 file.txt:1 — wrong value — repair it\\nThe spec permits this behavior.","html_url":"https://example.invalid/o/n/issues/7#issuecomment-77","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-77.json"
+printf '{"id":79,"body":"refutes: P2 file.txt:2 — missing check — add it\\nThis behavior is in scope.","html_url":"https://example.invalid/o/n/issues/7#issuecomment-79","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-79.json"
+touch "$T/state/capture-ruling-context"
+rm -f "$T/state/calls.txt" "$T/state/runs.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 77 --ruling 79 2>"$T/ruling-run.err")" || \
+  fail "verify with --ruling exits 0: $(cat "$T/ruling-run.err")"
+[ "$(cat "$T/state/ruling-77.md")" = $'refutes: P1 file.txt:1 — wrong value — repair it\nThe spec permits this behavior.' ] || \
+  fail "verify stages the first fetched ruling body as ruling-77.md"
+[ "$(cat "$T/state/ruling-79.md")" = $'refutes: P2 file.txt:2 — missing check — add it\nThis behavior is in scope.' ] || \
+  fail "verify stages the second fetched ruling body as ruling-79.md"
+grep -Fq '.review-context/ruling-77.md' "$T/state/ruling-prompt.md" && \
+  grep -Fq '.review-context/ruling-79.md' "$T/state/ruling-prompt.md" || \
+  fail "verify prompt lists every staged ruling"
+grep -Fq 'refuted: recorded ruling https://example.invalid/o/n/issues/7#issuecomment-77' "$T/state/ruling-prompt.md" && \
+  grep -Fq 'refuted: recorded ruling https://example.invalid/o/n/issues/7#issuecomment-79' "$T/state/ruling-prompt.md" || \
+  fail "verify findings cite each recorded ruling"
+grep -Fxq 'FIX-OK' <<<"$run_out" || fail "verify with --ruling collects FIX-OK"
+[ "$(cat "$T/state/ruling-api.txt")" = $'repos/O/N/issues/comments/77\nrepos/O/N/issues/comments/79' ] || \
+  fail "verify fetches each issue comment by id"
+rm -f "$T/state/capture-ruling-context"
+
+# --- case: a ruling without a refutes line refuses before any delegate call
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 file.txt:1 — wrong value — repair it\n' >"$T/findings.txt"
+printf '{"id":78,"body":"The spec permits this behavior.","html_url":"https://example.invalid/o/n/issues/7#issuecomment-78","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-78.json"
+rm -f "$T/state/calls.txt" "$T/state/runs.txt"
+st=0
+err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 78 2>&1 >/dev/null)" || st=$?
+[ "$st" -ne 0 ] || fail "ruling without refutes line is refused"
+grep -Fq 'review-pr: refusing --ruling 78: issue comment has no column-0 refutes: line' <<<"$err" || \
+  fail "no-refutes ruling refusal explains the required line"
+[ ! -e "$T/state/calls.txt" ] && [ ! -e "$T/state/runs.txt" ] || \
+  fail "no-refutes ruling refusal calls no delegate command"
+
+# --- case: --ruling without --verify is rejected before delegate calls
+reset_state
+rm -f "$T/state/calls.txt" "$T/state/runs.txt"
+st=0
+err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --ruling 80 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "--ruling without --verify exits 2"
+grep -Fq 'review-pr: --ruling is valid only with --verify' <<<"$err" || \
+  fail "--ruling without --verify explains the usage restriction"
+[ ! -e "$T/state/calls.txt" ] && [ ! -e "$T/state/runs.txt" ] || \
+  fail "--ruling without --verify calls no delegate command"
 
 # --- case: --context copies outside-checkout files into the verify worktree
 reset_state

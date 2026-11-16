@@ -17,6 +17,7 @@ cat >"$T/stub/ssh" <<'EOF'
 case " $* " in
   *"claude agents --json"*) cat "$STUBD/cagents" 2>/dev/null || echo '[]';;
   *"delegate session list --json"*) cat "$STUBD/dsess" 2>/dev/null || echo '{"ok":true,"sessions":[]}';;
+  *"delegate session stop "*) printf '%s\n' "$*" >>"$STUBD/stop-commands"; echo '{"ok":true}';;
   *"delegate session logs"*) cat "$STUBD/dlogs" 2>/dev/null || echo '{"ok":true,"lines":[]}';;
   *"delegate session send"*)
     if [ -f "$STUBD/send-busy" ]; then
@@ -61,7 +62,15 @@ case " $* " in
   *) exec /bin/ps "$@";;
 esac
 EOF
-for stub in gh file-claim inbox-watchers boxstale; do
+cat >"$T/stub/gh" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  cat "$STUBD/pr-view-${3:-}" 2>/dev/null || exit 1
+  exit 0
+fi
+exit 0
+EOF
+for stub in file-claim inbox-watchers boxstale; do
   cat >"$T/stub/$stub" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -99,7 +108,7 @@ lane() {
 set_session() {
   local sid="$1" ticket="$2" turn="$3" terminal="$4" ended="$5"
   cat >"$T/dsess" <<EOF
-{"ok":true,"sessions":[{"id":"$sid","status":"idle","turnCount":4,"hostPid":100,"supervisorPid":90,"lastTurn":{"turnId":"$turn","terminal":"$terminal","endedAt":$ended}}]}
+{"ok":true,"sessions":[{"id":"$sid","status":"idle","activeTurnId":null,"turnCount":4,"hostPid":100,"supervisorPid":90,"lastTurn":{"turnId":"$turn","terminal":"$terminal","endedAt":$ended}}]}
 EOF
 }
 set_logs() {
@@ -113,6 +122,23 @@ data = {"ok": True, "lines": [
     {"kind": "turn.completed", "turnId": turn, "terminal": "completed", "at": int(end)},
 ]}
 json.dump(data, open(path, "w"))
+PY
+}
+set_logs_with_user() {
+  local turn="$1" start="$2" end="$3" user_text="$4" assistant_text="$5"
+  python3 - "$T/dlogs" "$turn" "$start" "$end" "$user_text" "$assistant_text" <<'PY'
+import json, sys
+path, turn, start, end, user_text, assistant_text = sys.argv[1:]
+start, end = int(start), int(end)
+lines = [{"kind": "turn.started", "turnId": turn, "at": start}]
+if user_text:
+    lines.append({"kind": "user", "turnId": turn, "text": user_text,
+                  "at": start + (end - start) // 2})
+lines.extend([
+    {"kind": "message", "turnId": turn, "text": assistant_text, "at": end - 1},
+    {"kind": "turn.completed", "turnId": turn, "terminal": "completed", "at": end},
+])
+json.dump({"ok": True, "lines": lines}, open(path, "w"))
 PY
 }
 set_processes() {
@@ -605,78 +631,93 @@ else
   fail "missed-fw-ruling-is-resent (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
-# A STATUS: HOLD report suppresses wake messages until a newer ruling arrives.
-r=$(newrun hold-status)
-lane "$r" 5101 fiber-5101-build sid-5101
-mkdir -p "$r/rulings"
-printf 'repo=example/switchyard\nissue=5101\njob.lane=job-5101\n' >"$r/fiber-5101.state"
-set_session sid-5101 5101 turn-hold-status completed 3000000
-set_logs turn-hold-status 2900000 3000000 'STATUS: DONE'
-printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-build %s/fiber-5101.state\n' "$r" >"$T/box-procs"
-: >"$T/send-commands"
-out=$(run_lanecheck "$r" 3000)
-set_processes
-printf 'STATUS: HOLD — waiting for a ruling.\n' >"$r/fiber-5101-report.md"
-python3 - "$r/fiber-5101-report.md" <<'PY'
+# Hold reports arrive either in place as run/fiber-<n>-report.md (#1953) or as a
+# Mac lane's inbox message lane-<n>-<ts>.md (#1958); both shapes must hold.
+hold_report_path() {
+  if [ "$4" = file ]; then
+    printf '%s/fiber-%s-report.md\n' "$1" "$2"
+  else
+    mkdir -p "$1/inbox"
+    printf '%s/inbox/lane-%s-%s.md\n' "$1" "$2" "$3"
+  fi
+}
+for shape in file mac; do
+  # A STATUS: HOLD report suppresses wake messages until a newer ruling arrives.
+  r=$(newrun "hold-status-$shape")
+  lane "$r" 5101 fiber-5101-build sid-5101
+  mkdir -p "$r/rulings"
+  printf 'repo=example/switchyard\nissue=5101\njob.lane=job-5101\n' >"$r/fiber-5101.state"
+  set_session sid-5101 5101 turn-hold-status completed 3000000
+  set_logs turn-hold-status 2900000 3000000 'STATUS: DONE'
+  printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-build %s/fiber-5101.state\n' "$r" >"$T/box-procs"
+  : >"$T/send-commands"
+  out=$(run_lanecheck "$r" 3000)
+  set_processes
+  mac_report=$(hold_report_path "$r" 5101 20261109T000000Z "$shape")
+  printf 'STATUS: HOLD — waiting for a ruling.\n' >"$mac_report"
+  python3 - "$mac_report" <<'PY'
 import os, sys
 os.utime(sys.argv[1], (1794253000, 1794253000))
 PY
-out=$(run_lanecheck "$r" 3000); lrc=$?
-if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 5101 hold' \
-   && [ ! -s "$T/send-commands" ]; then
-  ok status-hold-waits-without-wake
-else
-  fail "status-hold-waits-without-wake (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
-fi
-cat >"$r/rulings/ruling-5101-RULING-5101-2.md" <<'EOF'
+  out=$(run_lanecheck "$r" 3000); lrc=$?
+  if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 5101 hold' \
+     && [ ! -s "$T/send-commands" ]; then
+    ok "status-hold-waits-without-wake-$shape"
+  else
+    fail "status-hold-waits-without-wake-$shape (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
+  fi
+  cat >"$r/rulings/ruling-5101-RULING-5101-2.md" <<'EOF'
 RULING-5101-2: continue with the next step.
 EOF
-python3 - "$r/rulings/ruling-5101-RULING-5101-2.md" <<'PY'
+  python3 - "$r/rulings/ruling-5101-RULING-5101-2.md" <<'PY'
 import os, sys
 os.utime(sys.argv[1], (1794253010, 1794253010))
 PY
-set_processes
-: >"$T/last-send"
-out=$(run_lanecheck "$r" 3001); lrc=$?
-if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5101 .*job job-5101 (tkt-build) finished' \
-   && grep -Fq 'ticket #5101, job job-5101 (tkt-build)' "$T/last-send"; then
-  ok newer-ruling-clears-hold-and-normal-wake-fires
-else
-  fail "newer-ruling-clears-hold-and-normal-wake-fires (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
-fi
+  set_processes
+  : >"$T/last-send"
+  out=$(run_lanecheck "$r" 3001); lrc=$?
+  if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5101 .*job job-5101 (tkt-build) finished' \
+     && grep -Fq 'ticket #5101, job job-5101 (tkt-build)' "$T/last-send"; then
+    ok "newer-ruling-clears-hold-and-normal-wake-fires-$shape"
+  else
+    fail "newer-ruling-clears-hold-and-normal-wake-fires-$shape (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+  fi
 
-# An ACK of an archived hold ruling suppresses wakes just like STATUS: HOLD.
-r=$(newrun hold-ack)
-lane "$r" 5102 fiber-5102-build sid-5102
-printf 'repo=example/switchyard\nissue=5102\njob.fix1=job-5102\n' >"$r/fiber-5102.state"
-mkdir -p "$r/rulings"
-set_session sid-5102 5102 turn-hold-ack completed 3000000
-set_logs turn-hold-ack 2900000 3000000 'STATUS: DONE'
-printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-5102.state\n' "$r" >"$T/box-procs"
-: >"$T/send-commands"
-out=$(run_lanecheck "$r" 3000)
-set_processes
-cat >"$r/rulings/ruling-5102-RULING-5102-1.md" <<'EOF'
+  # An ACK of an archived hold ruling suppresses wakes just like STATUS: HOLD.
+  r=$(newrun "hold-ack-$shape")
+  lane "$r" 5102 fiber-5102-build sid-5102
+  printf 'repo=example/switchyard\nissue=5102\njob.fix1=job-5102\n' >"$r/fiber-5102.state"
+  mkdir -p "$r/rulings"
+  set_session sid-5102 5102 turn-hold-ack completed 3000000
+  set_logs turn-hold-ack 2900000 3000000 'STATUS: DONE'
+  printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-5102.state\n' "$r" >"$T/box-procs"
+  : >"$T/send-commands"
+  out=$(run_lanecheck "$r" 3000)
+  set_processes
+  cat >"$r/rulings/ruling-5102-RULING-5102-1.md" <<'EOF'
 RULING-5102-1: hold this lane until the next ruling.
 hold: wait for an explicit go-ahead.
 EOF
-cat >"$r/fiber-5102-report.md" <<'EOF'
+  mac_report=$(hold_report_path "$r" 5102 20261109T000001Z "$shape")
+  cat >"$mac_report" <<'EOF'
 STATUS: DONE — work paused.
 ACK RULING-5102-1
 EOF
-python3 - "$r/rulings/ruling-5102-RULING-5102-1.md" "$r/fiber-5102-report.md" <<'PY'
+  python3 - "$r/rulings/ruling-5102-RULING-5102-1.md" "$mac_report" <<'PY'
 import os, sys
 os.utime(sys.argv[1], (1794253000, 1794253000))
 os.utime(sys.argv[2], (1794253001, 1794253001))
 PY
-: >"$T/send-commands"
-out=$(run_lanecheck "$r" 3000); lrc=$?
-if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 5102 hold' \
-   && [ ! -s "$T/send-commands" ]; then
-  ok ack-of-hold-ruling-waits-without-wake
-else
-  fail "ack-of-hold-ruling-waits-without-wake (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
-fi
+  : >"$T/send-commands"
+  out=$(run_lanecheck "$r" 3000); lrc=$?
+  if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 5102 hold' \
+     && [ ! -s "$T/send-commands" ]; then
+    ok "ack-of-hold-ruling-waits-without-wake-$shape"
+  else
+    fail "ack-of-hold-ruling-waits-without-wake-$shape (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
+  fi
+
+done
 
 # A go ruling may mention a hold without marking itself as a hold.
 r=$(newrun ack-of-go-ruling)
@@ -710,6 +751,31 @@ if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5103 .*job job-5103
   ok acked-go-ruling-prose-hold-does-not-suppress-wake
 else
   fail "acked-go-ruling-prose-hold-does-not-suppress-wake (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# A Mac lane's STATUS: DONE report does not suppress a finished-job wake.
+r=$(newrun mac-done-report)
+lane "$r" 5201 fiber-5201-build sid-5201
+printf 'repo=example/switchyard\nissue=5201\njob.lane=job-5201\n' >"$r/fiber-5201.state"
+set_session sid-5201 5201 turn-mac-done completed 3000000
+set_logs turn-mac-done 2900000 3000000 'STATUS: DONE'
+mkdir -p "$r/inbox"
+mac_report="$r/inbox/lane-5201-20261109T000002Z.md"
+printf 'STATUS: DONE — build is complete.\n' >"$mac_report"
+python3 - "$mac_report" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1794253000, 1794253000))
+PY
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-build %s/fiber-5201.state\n' "$r" >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+set_processes
+out=$(run_lanecheck "$r" 3001); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5201 .*job job-5201 (tkt-build) finished' \
+   && grep -Fq 'ticket #5201, job job-5201 (tkt-build)' "$T/last-send"; then
+  ok mac-done-report-still-wakes
+else
+  fail "mac-done-report-still-wakes (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
 # A detached job's incidental args may mention another ticket; its state file
@@ -841,6 +907,137 @@ if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fq 'gh-ci wait pid 101 finis
   ok finished-owned-gh-ci-wait-without-id-still-wakes
 else
   fail "finished-owned-gh-ci-wait-without-id-still-wakes (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# A final RETIRE report plus a merged PR retires through lanecheck's existing
+# roster/stop path and never wakes the finished session. Without a merged PR,
+# the same report is not terminal and the idle session still gets its wake.
+r=$(newrun retire-merged-report)
+lane "$r" 8101 fiber-8101-build sid-8101
+printf 'repo=example/switchyard\nissue=8101\npr=81\n' >"$r/fiber-8101.state"
+printf 'RETIRE issue=8101\n' >"$r/fiber-8101-report.md"
+printf '{"state":"MERGED","mergedAt":"2026-11-15T00:00:00Z"}\n' >"$T/pr-view-81"
+set_session sid-8101 8101 turn-retire-merged completed 8100000
+set_logs turn-retire-merged 8000000 8100000 'The ship is complete.'
+set_processes
+: >"$T/stop-commands"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 8100); lrc=$?
+if [ "$lrc" -eq 0 ] && [ ! -s "$T/send-commands" ] \
+   && awk -F '\t' '$2 == "8101" { found=1 } END { exit !found }' "$r/roster-done" \
+   && grep -Fq 'delegate session stop sid-8101' "$T/stop-commands"; then
+  ok merged-retire-report-stops-without-wake
+else
+  fail "merged-retire-report-stops-without-wake (rc=$lrc out=$out retired=$(cat "$r/roster-done") stops=$(cat "$T/stop-commands") sends=$(cat "$T/send-commands"))"
+fi
+
+r=$(newrun retire-unmerged-report)
+lane "$r" 8102 fiber-8102-build sid-8102
+printf 'repo=example/switchyard\nissue=8102\npr=82\n' >"$r/fiber-8102.state"
+printf 'RETIRE issue=8102\n' >"$r/fiber-8102-report.md"
+printf '{"state":"OPEN","mergedAt":null}\n' >"$T/pr-view-82"
+set_session sid-8102 8102 turn-retire-unmerged completed 8200000
+set_logs turn-retire-unmerged 8100000 8200000 'The ship is complete.'
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 8200); lrc=$?
+if [ "$lrc" -eq 0 ] && [ "$(grep -c 'delegate session send' "$T/send-commands" || true)" -eq 1 ] \
+   && printf '%s\n' "$out" | grep -q '^WAKE 8102 '; then
+  ok unmerged-retire-report-still-wakes
+else
+  fail "unmerged-retire-report-still-wakes (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
+fi
+
+# A lanecheck wake is not a new delivery of the ruling it repeats.
+r=$(newrun own-wake-is-not-delivery)
+lane "$r" 7001 fiber-7001-build sid-7001
+mkdir -p "$r/rulings"
+printf 'RULING-7001-1: apply this ruling.\n' >"$r/rulings/ruling-7001-RULING-7001-1.md"
+python3 - "$r/rulings/ruling-7001-RULING-7001-1.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1900, 1900))
+PY
+set_session sid-7001 7001 turn-own-wake completed 2100000
+set_logs_with_user turn-own-wake 2000000 2100000 \
+  "WAKE (lanecheck): ticket #7001, ruling path $r/rulings/ruling-7001-RULING-7001-1.md (missed steer RULING-7001-1)." \
+  'STATUS: DONE'
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 2101); lrc=$?
+if [ "$lrc" -eq 0 ] && [ ! -s "$T/send-commands" ] \
+   && ! printf '%s\n' "$out" | grep -q '^WAKE 7001 .*missed steer'; then
+  ok lanecheck-wake-is-not-ruling-delivery
+else
+  fail "lanecheck-wake-is-not-ruling-delivery (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
+fi
+
+# ACKing a newer archive answers every older ruling for the same ticket.
+r=$(newrun newer-ack-answers-older-ruling)
+lane "$r" 7002 fiber-7002-build sid-7002
+mkdir -p "$r/rulings"
+printf 'RULING-7002-1: older ruling.\n' >"$r/rulings/ruling-7002-RULING-7002-1.md"
+printf 'RULING-7002-2: newer ruling.\n' >"$r/rulings/ruling-7002-RULING-7002-2.md"
+python3 - "$r/rulings/ruling-7002-RULING-7002-1.md" "$r/rulings/ruling-7002-RULING-7002-2.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (2040, 2040))
+os.utime(sys.argv[2], (2050, 2050))
+PY
+set_session sid-7002 7002 turn-newer-ack completed 2100000
+set_logs_with_user turn-newer-ack 2000000 2100000 \
+  'RULING-7002-2: apply the newest ruling.' \
+  $'STATUS: DONE\nACK RULING-7002-2'
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 2101); lrc=$?
+if [ "$lrc" -eq 0 ] && [ ! -s "$T/send-commands" ] \
+   && ! printf '%s\n' "$out" | grep -q '^WAKE 7002 .*missed steer'; then
+  ok newer-ruling-ack-answers-older-archive
+else
+  fail "newer-ruling-ack-answers-older-archive (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
+fi
+
+# A real delivery is sent once, and the answer action survives cap rollover.
+r=$(newrun unacknowledged-answer-once)
+lane "$r" 7003 fiber-7003-build sid-7003
+mkdir -p "$r/rulings"
+printf 'RULING-7003-1: apply this ruling.\n' >"$r/rulings/ruling-7003-RULING-7003-1.md"
+python3 - "$r/rulings/ruling-7003-RULING-7003-1.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1900, 1900))
+PY
+set_session sid-7003 7003 turn-unacknowledged completed 2100000
+set_logs_with_user turn-unacknowledged 2000000 2100000 \
+  'RULING-7003-1: apply this ruling.' 'STATUS: DONE'
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 2101); lrc=$?
+if [ "$lrc" -ne 0 ] || [ "$(grep -c 'delegate session send' "$T/send-commands" || true)" -ne 1 ] \
+   || ! printf '%s\n' "$out" | grep -q '^WAKE 7003 .*missed steer RULING-7003-1'; then
+  fail "unacknowledged-answer-is-sent-once-first-pass (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
+else
+  out=$(run_lanecheck "$r" 5702); lrc=$?
+  if [ "$lrc" -eq 0 ] && [ "$(grep -c 'delegate session send' "$T/send-commands" || true)" -eq 1 ] \
+     && grep -Fq '"answer:ruling-7003-RULING-7003-1.md"' "$r/lanecheck-wake.json"; then
+    ok unacknowledged-answer-remains-once-after-cap-rollover
+  else
+    fail "unacknowledged-answer-remains-once-after-cap-rollover (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
+  fi
+fi
+
+# A fresh final assistant STATUS: HOLD is held like a report's status.
+r=$(newrun assistant-status-hold)
+lane "$r" 7004 fiber-7004-build sid-7004
+set_session sid-7004 7004 turn-assistant-hold completed 1794253010000
+set_logs_with_user turn-assistant-hold 1794253000000 1794253010000 '' \
+  'STATUS: HOLD — waiting for a ruling.'
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 1794253011); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 7004 hold' \
+   && [ ! -s "$T/send-commands" ]; then
+  ok final-assistant-status-hold-waits-without-wake
+else
+  fail "final-assistant-status-hold-waits-without-wake (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
 fi
 
 exit "$rc"
