@@ -423,11 +423,10 @@ impl Out {
             if session_mode && name == Some("add_directory") {
                 continue;
             }
-            // Outside session mode, `add_directory` is resent like `prompt`
-            // and `close`: after a reconnect the client resends each
-            // unanswered session command with its id, and Fiber rejects a
-            // copy that already arrived with `duplicate_command`
-            // (docs/invocation.md, "The command line").
+            // Turn mode resends an unanswered `add_directory` with its own id,
+            // like `prompt` and `close`: a session rejects a repeat of an id
+            // it accepted with `duplicate_command` (docs/invocation.md, "The
+            // command line"). Session mode skips it above.
             if !matches!(
                 name,
                 Some("prompt") | Some("steer") | Some("close") | Some("add_directory")

@@ -107,8 +107,8 @@ fn disposition(event: &Value, command_id: &str, steer: bool) -> Option<Dispositi
         {
             Some(Disposition::Started(envelope_turn_id(event)))
         }
-        // An applied steer and a queued one both count as delivered: the
-        // supervisor drops its pending steer on either. The queue names
+        // An applied steer and a queued one both settle the pending steer:
+        // the supervisor drops it on either. The queue names
         // each message it holds in `messages[]` (docs/events.md,
         // "steering_queue").
         "steering_applied" if names_command(payload) => {
