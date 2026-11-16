@@ -1513,6 +1513,9 @@ def read_processes(path, ok_path):
     return rows, True
 
 
+DELEGATE_WATCH_RE = re.compile(r"\bdelegate\s+watch\s+([A-Za-z0-9-]+)")
+
+
 def job_command(args):
     match = re.search(r"(?<![\w-])(tkt-[A-Za-z0-9-]+)(?:\s|$)", args)
     if match:
@@ -1674,11 +1677,10 @@ def state_values_for(path):
 
 
 def state_path_for(ticket, args=""):
-    for token in process_tokens(args):
-        if token.endswith(".state"):
-            candidate = os.path.abspath(token)
-            if os.path.isfile(candidate) or os.path.isfile(candidate[:-6] + ".journal"):
-                return candidate
+    candidate = state_path_from_args(args)
+    if candidate and (os.path.isfile(candidate)
+                      or os.path.isfile(candidate[:-6] + ".journal")):
+        return candidate
     candidates = sorted(glob.glob(os.path.join(R, "*-" + ticket + ".state")))
     for candidate in candidates:
         if state_values_for(candidate).get("issue") == ticket:
@@ -1703,7 +1705,7 @@ def state_job_ids(ticket):
 
 def job_belongs_to_ticket(job, ticket):
     args = job.get("args", "")
-    watch = re.search(r"\bdelegate\s+watch\s+([A-Za-z0-9-]+)", args)
+    watch = DELEGATE_WATCH_RE.search(args)
     if watch:
         return watch.group(1) in state_job_ids(ticket)
     state_path = state_path_from_args(args)
@@ -1715,7 +1717,7 @@ def job_belongs_to_ticket(job, ticket):
 def job_id_for_process(job, ticket):
     args = job.get("args", "")
     ticket_jobs = state_job_ids(ticket)
-    watch = re.search(r"\bdelegate\s+watch\s+([A-Za-z0-9-]+)", args)
+    watch = DELEGATE_WATCH_RE.search(args)
     if watch:
         return watch.group(1) if watch.group(1) in ticket_jobs else None
     state_path = state_path_from_args(args)
@@ -1729,6 +1731,7 @@ def job_id_for_process(job, ticket):
         slot = values.get("fixopen", "")
         if slot.isdigit() and int(slot) > 0:
             return values.get("job.fix" + slot, "").strip() or None
+        return None
     state_ids = {value.strip() for key, value in values.items()
                  if re.fullmatch(r"job\.[^.]+", key) and value.strip()}
     return next(iter(state_ids)) if len(state_ids) == 1 else None
@@ -1762,7 +1765,7 @@ def job_started_at_ms(job_id, store):
 
 def job_exit_code(command, args, ticket, store):
     if command == "delegate watch":
-        match = re.search(r"\bdelegate\s+watch\s+([A-Za-z0-9-]+)", args)
+        match = DELEGATE_WATCH_RE.search(args)
         if match:
             try:
                 job_id = match.group(1)
@@ -1957,7 +1960,10 @@ def hold_timestamp(ticket, rep, assistant_messages, lane_started):
         for when, path, text in ruling_archives.get(ticket, []):
             first_line = text.splitlines()[0] if text.splitlines() else ""
             marked_hold = (re.search(r"(?m)^hold:", text)
-                           or re.search(r"\bHOLD\b", first_line))
+                           or (re.search(r"\bHOLD\b", first_line)
+                               and not re.search(
+                                   r"\b(?:no|not)\s+HOLD\b|\bHOLD\s+(?:lifted|released)\b",
+                                   first_line)))
             if (acked.intersection(archive_ids(text, path)) and marked_hold):
                 held_at.append(when)
     return max(held_at) if held_at else None
@@ -2186,10 +2192,10 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                 if job_id:
                     job["job_id"] = job_id
         current_jobs.sort(key=lambda job: (job["elapsed"], job["pid"]))
+        lane_record["finished"] = [job for job in lane_record["finished"]
+                                    if job_belongs_to_ticket(job, n)]
         if ps_ok:
-            finished = [job for job in lane_record["finished"]
-                        if job_belongs_to_ticket(job, n)]
-            lane_record["finished"] = finished
+            finished = lane_record["finished"]
             finished_ids = {f"{job.get('pid')}:{job.get('cmd')}" for job in finished}
             for job in lane_record["running"]:
                 if not job_belongs_to_ticket(job, n):
@@ -2204,8 +2210,6 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
             lane_record["finished"] = [job for job in finished
                                        if f"{job.get('pid')}:{job.get('cmd')}" not in current_ids]
             lane_record["running"] = current_jobs
-        lane_record["finished"] = [job for job in lane_record["finished"]
-                                    if job_belongs_to_ticket(job, n)]
         finished_jobs = lane_record["finished"]
         turn_lines = None
         turn_started_ms = turn_ended_ms = None

@@ -319,7 +319,7 @@ printf '[]' >"$T/cagents"
 # Unknown rc stays explicitly unknown; lanecheck never infers a status code.
 r=$(newrun unknown-rc)
 lane "$r" 2102 fiber-2102-build sid-2102
-printf 'repo=example/switchyard\nissue=2102\njob.fix1=job-2102\n' >"$r/fiber-2102.state"
+printf 'repo=example/switchyard\nissue=2102\nfixopen=1\njob.fix1=job-2102\n' >"$r/fiber-2102.state"
 set_session sid-2102 2102 turn-unknown completed 3000000
 set_logs turn-unknown 2900000 3000000 'STATUS: RUNNING'
 printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-2102.state\n' "$r" >"$T/box-procs"
@@ -556,7 +556,7 @@ fi
 # by PID/cmd so the same lane gets a job-exit wake when that process disappears.
 r=$(newrun reparented-tkt-fix)
 lane "$r" 4177 fiber-4177 sid-4177
-printf 'repo=example/fiber\nissue=4177\njob.fix1=job-4177\n' >"$r/fiber-4177.state"
+printf 'repo=example/fiber\nissue=4177\nfixopen=1\njob.fix1=job-4177\n' >"$r/fiber-4177.state"
 set_session sid-4177 4177 turn-reparented completed 5000000
 set_logs turn-reparented 4900000 5000000 'STATUS: PENDING fix job'
 printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 1 00:12 /bin/sh -c tkt-fix %s/fiber-4177.state --no-verify\n' "$r" >"$T/box-procs"
@@ -722,7 +722,7 @@ done
 # A go ruling may mention a hold without marking itself as a hold.
 r=$(newrun ack-of-go-ruling)
 lane "$r" 5103 fiber-5103-build sid-5103
-printf 'repo=example/switchyard\nissue=5103\njob.fix1=job-5103\n' >"$r/fiber-5103.state"
+printf 'repo=example/switchyard\nissue=5103\nfixopen=1\njob.fix1=job-5103\n' >"$r/fiber-5103.state"
 mkdir -p "$r/rulings"
 set_session sid-5103 5103 turn-go-ack completed 3000000
 set_logs turn-go-ack 2900000 3000000 'STATUS: DONE'
@@ -751,6 +751,70 @@ if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5103 .*job job-5103
   ok acked-go-ruling-prose-hold-does-not-suppress-wake
 else
   fail "acked-go-ruling-prose-hold-does-not-suppress-wake (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# An uppercase HOLD on a go ruling's first line does not make it a hold.
+r=$(newrun ack-of-go-ruling-uppercase-hold)
+lane "$r" 5104 fiber-5104-build sid-5104
+printf 'repo=example/switchyard\nissue=5104\nfixopen=1\njob.fix1=job-5104\n' >"$r/fiber-5104.state"
+mkdir -p "$r/rulings"
+set_session sid-5104 5104 turn-go-upper-hold completed 3000000
+set_logs turn-go-upper-hold 2900000 3000000 'STATUS: DONE'
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-5104.state\n' "$r" >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+set_processes
+cat >"$r/rulings/ruling-5104-RULING-5104-1.md" <<'EOF'
+RULING-5104-1: go: HOLD lifted, proceed.
+EOF
+cat >"$r/fiber-5104-report.md" <<'EOF'
+STATUS: DONE — work continues.
+ACK RULING-5104-1
+EOF
+python3 - "$r/rulings/ruling-5104-RULING-5104-1.md" "$r/fiber-5104-report.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1794253000, 1794253000))
+os.utime(sys.argv[2], (1794253001, 1794253001))
+PY
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 3000); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^WAKE 5104 .*job job-5104 (tkt-fix) finished' \
+   && grep -Fq 'ticket #5104, job job-5104 (tkt-fix)' "$T/last-send"; then
+  ok acked-go-ruling-first-line-hold-prose-does-not-suppress-wake
+else
+  fail "acked-go-ruling-first-line-hold-prose-does-not-suppress-wake (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# An uppercase first-line HOLD remains a hold without a hold: line.
+r=$(newrun ack-of-first-line-hold)
+lane "$r" 5105 fiber-5105-build sid-5105
+printf 'repo=example/switchyard\nissue=5105\njob.fix1=job-5105\n' >"$r/fiber-5105.state"
+mkdir -p "$r/rulings"
+set_session sid-5105 5105 turn-first-line-hold completed 3000000
+set_logs turn-first-line-hold 2900000 3000000 'STATUS: DONE'
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-5105.state\n' "$r" >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+set_processes
+cat >"$r/rulings/ruling-5105-RULING-5105-1.md" <<'EOF'
+HOLD until X.
+EOF
+cat >"$r/fiber-5105-report.md" <<'EOF'
+STATUS: DONE — work paused.
+ACK RULING-5105-1
+EOF
+python3 - "$r/rulings/ruling-5105-RULING-5105-1.md" "$r/fiber-5105-report.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1794253000, 1794253000))
+os.utime(sys.argv[2], (1794253001, 1794253001))
+PY
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'WAITING 5105 hold' \
+   && [ ! -s "$T/send-commands" ]; then
+  ok acked-first-line-hold-still-suppresses-wake
+else
+  fail "acked-first-line-hold-still-suppresses-wake (rc=$lrc out=$out commands=$(cat "$T/send-commands" 2>/dev/null))"
 fi
 
 # A Mac lane's STATUS: DONE report does not suppress a finished-job wake.
@@ -783,7 +847,7 @@ fi
 r=$(newrun cross-ticket-job)
 lane "$r" 6101 fiber-6101-build sid-6101
 lane "$r" 6102 fiber-6102-build sid-6102
-printf 'repo=example/switchyard\nissue=6101\njob.fix1=job-A-6101\n' >"$r/fiber-6101.state"
+printf 'repo=example/switchyard\nissue=6101\nfixopen=1\njob.fix1=job-A-6101\n' >"$r/fiber-6101.state"
 printf 'repo=example/switchyard\nissue=6102\n' >"$r/fiber-6102.state"
 cat >"$T/dsess" <<'EOF'
 {"ok":true,"sessions":[
@@ -847,6 +911,44 @@ if [ "$lrc" -eq 0 ] && grep -Fq "ticket #6302, tkt-fix pid 101 (state $r/fiber-6
   ok fixopen-without-job-id-does-not-borrow-other-slot
 else
   fail "fixopen-without-job-id-does-not-borrow-other-slot (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# A tkt-fix process without fixopen must not borrow a unique preflight job ID.
+r=$(newrun fixopen-missing-with-preflight-job-id)
+lane "$r" 6304 fiber-6304-build sid-6304
+printf 'repo=example/switchyard\nissue=6304\njob.preflight=job-preflight-6304\n' >"$r/fiber-6304.state"
+set_session sid-6304 6304 turn-fixopen-absent completed 3000000
+set_logs turn-fixopen-absent 2900000 3000000 'STATUS: DONE'
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-6304.state\n' "$r" >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+set_processes
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 3001); lrc=$?
+if [ "$lrc" -eq 0 ] && grep -Fq "ticket #6304, tkt-fix pid 101 (state $r/fiber-6304.state) finished (exit unknown)" "$T/last-send" \
+   && ! grep -Fq 'job job-preflight-6304' "$T/last-send"; then
+  ok tkt-fix-without-fixopen-does-not-borrow-preflight-job
+else
+  fail "tkt-fix-without-fixopen-does-not-borrow-preflight-job (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# A zero fixopen slot must not borrow a unique preflight job ID.
+r=$(newrun fixopen-zero-with-preflight-job-id)
+lane "$r" 6305 fiber-6305-build sid-6305
+printf 'repo=example/switchyard\nissue=6305\nfixopen=0\njob.preflight=job-preflight-6305\n' >"$r/fiber-6305.state"
+set_session sid-6305 6305 turn-fixopen-zero completed 3000000
+set_logs turn-fixopen-zero 2900000 3000000 'STATUS: DONE'
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-6305.state\n' "$r" >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+set_processes
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 3001); lrc=$?
+if [ "$lrc" -eq 0 ] && grep -Fq "ticket #6305, tkt-fix pid 101 (state $r/fiber-6305.state) finished (exit unknown)" "$T/last-send" \
+   && ! grep -Fq 'job job-preflight-6305' "$T/last-send"; then
+  ok tkt-fix-with-zero-fixopen-does-not-borrow-preflight-job
+else
+  fail "tkt-fix-with-zero-fixopen-does-not-borrow-preflight-job (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
 # A still-running fix process picks up its own ID after tkt-fix writes the slot.
