@@ -125,9 +125,14 @@ finding_section_heading() {
   esac
 }
 
+section_is_closed() {
+  local section="$1"
+  [ "$section" = Fixed ] || [ "$section" = "Not judged" ]
+}
+
 finding_row_is_closed() {
   local section="$1" line="$2"
-  [ "$section" = Fixed ] || [ "$section" = "Not judged" ] || [[ "$line" == *": fixed." ]]
+  section_is_closed "$section" || [[ "$line" == *": fixed." ]]
 }
 
 # review_incomplete_rows FILE: populate the bare P0-P3 rows and whether an
@@ -175,7 +180,7 @@ parse_p3_verify_findings() {
         && [[ "$raw_line" =~ ^[[:space:]]+[^[:space:]] ]]; then
         wrapped_continuation=1
       fi
-      if { [ "$section" = Fixed ] || [ "$section" = "Not judged" ]; } \
+      if section_is_closed "$section" \
         && [ -n "$(printf '%s' "$raw_line" | tr -d '[:space:]')" ] \
         && [ "$current_list_item" = 0 ] \
         && [ "$wrapped_continuation" = 0 ]; then
