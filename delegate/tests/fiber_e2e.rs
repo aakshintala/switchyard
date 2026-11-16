@@ -256,7 +256,12 @@ impl FakeConn {
             .reader
             .read_line(&mut line)
             .expect("read client command");
-        assert!(count > 0, "client closed before sending the next command");
+        assert!(
+            count > 0,
+            "client closed before command {} on connection {}",
+            self.commands.lock().unwrap()[self.connection].len() + 1,
+            self.connection
+        );
         let value: Value = serde_json::from_str(&line).expect("client command JSON");
         self.commands.lock().unwrap()[self.connection].push(value.clone());
         value
@@ -267,6 +272,18 @@ impl FakeConn {
         line.push(b'\n');
         self.writer.write_all(&line).expect("write hub line");
         self.writer.flush().expect("flush hub line");
+    }
+
+    fn expect_eof(&mut self) {
+        let mut line = String::new();
+        let count = self
+            .reader
+            .read_line(&mut line)
+            .expect("read after bridge exit");
+        assert_eq!(
+            count, 0,
+            "bridge sent a hub command after idle exit: {line}"
+        );
     }
 
     fn accept(&mut self, command: &Value, result: Value) {
@@ -473,6 +490,409 @@ fn rewrite_record(e: &Env, id: &str, f: impl FnOnce(&mut Value)) {
     let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     f(&mut record);
     std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
+}
+
+#[test]
+fn fiber_session_start_and_stop_use_the_hub_bridge() {
+    let dir = PathBuf::from(format!(
+        "/tmp/fx-{}-{}",
+        std::process::id(),
+        NEXT_ENV.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let fiber_home = dir.join("fh");
+    std::fs::create_dir(&fiber_home).unwrap();
+    let e = Env { dir, fiber_home };
+    let brief = e.dir.join("brief.txt");
+    let inbox = e.dir.join("inbox");
+    std::fs::write(&brief, "Reply with DONE.").unwrap();
+    std::fs::create_dir(&inbox).unwrap();
+    let fake = e.fake_hub(1, move |_, session_id, conn| {
+        accept_start(conn, session_id);
+        subscribe_fresh(conn, session_id);
+        let prompt = conn.recv();
+        assert_eq!(prompt["command"], "prompt");
+        conn.accept(&prompt, json!({}));
+        conn.send(event("turn_started", session_id, 1, json!({"turn_id":"t1","input":[{"command_id":prompt["id"],"content":[{"type":"text","text":"Reply with DONE."}],"source":"driver","type":"message"}]})));
+        let steer = conn.recv();
+        assert_eq!(steer["command"], "steer");
+        conn.send(event("steering_applied", session_id, 2, json!({"turn_id":"t1","command_id":steer["id"]})));
+        conn.send(event("user_message", session_id, 3, json!({"turn_id":"t1","text":"change text","command_id":steer["id"]})));
+        conn.send(event("turn_completed", session_id, 4, json!({"turn_id":"t1","outcome":"completed"})));
+        let mut stop_command = conn.recv();
+        if stop_command["command"] == "cancel" {
+            conn.accept(&stop_command, json!({}));
+            conn.send(event("turn_completed", session_id, 3, json!({"turn_id":"t1","outcome":"interrupted"})));
+            stop_command = conn.recv();
+        }
+        assert_eq!(stop_command["command"], "close");
+        conn.accept(&stop_command, json!({}));
+        conn.send(event("fiber_exited", session_id, 4, json!({"exit_code":0,"text":"DONE"})));
+    });
+    let start = e.delegate(
+        &[
+            "session",
+            "start",
+            "--model",
+            MODEL,
+            "--brief",
+            brief.to_str().unwrap(),
+            "--inbox",
+            inbox.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let state: Value = serde_json::from_slice(&start.stdout).unwrap();
+    assert_eq!(state["ok"], true, "{state:#}");
+    assert_eq!(state["session"]["hostSessionId"], fake.session_id());
+    let id = state["session"]["id"].as_str().unwrap();
+    let sent = e.delegate(&["session", "send", id, "change text", "--json"], None);
+    assert!(
+        sent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    let sent_json: Value = serde_json::from_slice(&sent.stdout).unwrap();
+    assert_eq!(sent_json["disposition"], "steered", "{sent_json:#}");
+    let stopped = e.delegate(&["session", "stop", id, "--json"], None);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let commands = fake.finish();
+    let names = command_names(&commands[0]);
+    assert!(
+        names == ["start", "subscribe", "prompt", "steer", "close"]
+            || names == ["start", "subscribe", "prompt", "steer", "cancel", "close"],
+        "{names:?}"
+    );
+}
+
+#[test]
+fn fiber_session_interrupt_cancels_without_closing_the_hub_session() {
+    let dir = PathBuf::from(format!(
+        "/tmp/fx-{}-{}",
+        std::process::id(),
+        NEXT_ENV.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let fiber_home = dir.join("fh");
+    std::fs::create_dir(&fiber_home).unwrap();
+    let e = Env { dir, fiber_home };
+    let brief = e.dir.join("brief.txt");
+    let inbox = e.dir.join("inbox");
+    std::fs::write(&brief, "Reply with DONE.").unwrap();
+    std::fs::create_dir(&inbox).unwrap();
+    let fake = e.fake_hub(1, move |_, session_id, conn| {
+        accept_start(conn, session_id);
+        subscribe_fresh(conn, session_id);
+        let prompt = conn.recv();
+        assert_eq!(prompt["command"], "prompt");
+        conn.accept(&prompt, json!({}));
+        conn.send(event(
+            "turn_started",
+            session_id,
+            1,
+            json!({"turn_id":"t1","input":[{"command_id":prompt["id"],"type":"message"}]}),
+        ));
+        let cancel = conn.recv();
+        assert_eq!(cancel["command"], "cancel");
+        conn.accept(&cancel, json!({}));
+        conn.send(event(
+            "turn_completed",
+            session_id,
+            2,
+            json!({"turn_id":"t1","outcome":"interrupted"}),
+        ));
+        let close = conn.recv();
+        assert_eq!(close["command"], "close");
+        conn.accept(&close, json!({}));
+        conn.send(event("fiber_exited", session_id, 3, json!({"exit_code":0})));
+    });
+    let start = e.delegate(
+        &[
+            "session",
+            "start",
+            "--model",
+            MODEL,
+            "--brief",
+            brief.to_str().unwrap(),
+            "--inbox",
+            inbox.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let state: Value = serde_json::from_slice(&start.stdout).unwrap();
+    let id = state["session"]["id"].as_str().unwrap();
+    let interrupted = e.delegate(&["session", "stop", id, "--interrupt", "--json"], None);
+    assert!(
+        interrupted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&interrupted.stderr)
+    );
+    let stopped = e.delegate(&["session", "stop", id, "--json"], None);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let commands = fake.finish();
+    assert_eq!(
+        command_names(&commands[0]),
+        ["start", "subscribe", "prompt", "cancel", "close"]
+    );
+}
+
+#[test]
+fn fiber_session_send_resumes_an_idle_exited_fiber_with_a_prompt() {
+    let dir = PathBuf::from(format!(
+        "/tmp/fx-{}-{}",
+        std::process::id(),
+        NEXT_ENV.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let fiber_home = dir.join("fh");
+    std::fs::create_dir(&fiber_home).unwrap();
+    let e = Env { dir, fiber_home };
+    let brief = e.dir.join("brief.txt");
+    let inbox = e.dir.join("inbox");
+    std::fs::write(&brief, "Reply with DONE.").unwrap();
+    std::fs::create_dir(&inbox).unwrap();
+    let fake = e.fake_hub(1, move |_, session_id, conn| {
+        accept_start(conn, session_id);
+        subscribe_fresh(conn, session_id);
+        let first_prompt = conn.recv();
+        assert_eq!(first_prompt["command"], "prompt");
+        conn.accept(&first_prompt, json!({}));
+        conn.send(event(
+            "turn_started",
+            session_id,
+            1,
+            json!({"turn_id":"t1","input":[{"command_id":first_prompt["id"],"type":"message"}]}),
+        ));
+        conn.send(event(
+            "turn_completed",
+            session_id,
+            2,
+            json!({"turn_id":"t1","outcome":"completed"}),
+        ));
+        conn.send(event("fiber_exited", session_id, 3, json!({"exit_code":0})));
+        let resumed_prompt = conn.recv();
+        assert_eq!(resumed_prompt["command"], "prompt");
+        assert_eq!(
+            resumed_prompt["args"]["content"][0]["text"],
+            "resume after idle exit"
+        );
+        conn.accept(&resumed_prompt, json!({}));
+        conn.send(event(
+            "stream_reopened",
+            session_id,
+            4,
+            json!({"last_seq":3}),
+        ));
+        conn.send(event(
+            "turn_started",
+            session_id,
+            5,
+            json!({"turn_id":"t2","input":[{"command_id":resumed_prompt["id"],"type":"message"}]}),
+        ));
+        conn.send(event(
+            "turn_completed",
+            session_id,
+            6,
+            json!({"turn_id":"t2","outcome":"completed"}),
+        ));
+        let close = conn.recv();
+        assert_eq!(close["command"], "close");
+        conn.accept(&close, json!({}));
+        conn.send(event("fiber_exited", session_id, 7, json!({"exit_code":0})));
+    });
+    let start = e.delegate(
+        &[
+            "session",
+            "start",
+            "--model",
+            MODEL,
+            "--brief",
+            brief.to_str().unwrap(),
+            "--inbox",
+            inbox.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let state: Value = serde_json::from_slice(&start.stdout).unwrap();
+    let id = state["session"]["id"].as_str().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let logs = e.delegate(&["session", "logs", id, "--json"], None);
+        let logs: Value = serde_json::from_slice(&logs.stdout).unwrap();
+        if logs["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line["kind"] == "session.exited" && line["reason"] == "idle")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "idle exit was not logged: {logs:#}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let sent = e.delegate(
+        &["session", "send", id, "resume after idle exit", "--json"],
+        None,
+    );
+    assert!(
+        sent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    let value: Value = serde_json::from_slice(&sent.stdout).unwrap();
+    assert_eq!(value["disposition"], "started", "{value:#}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = e.delegate(&["session", "status", id, "--json"], None);
+        let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+        if status["session"]["status"] == "idle" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "resumed turn did not complete: {status:#}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let stopped = e.delegate(&["session", "stop", id, "--json"], None);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let commands = fake.finish();
+    assert_eq!(
+        command_names(&commands[0]),
+        ["start", "subscribe", "prompt", "prompt", "close"]
+    );
+}
+
+#[test]
+fn fiber_session_stop_after_idle_exit_sends_no_hub_command() {
+    let dir = PathBuf::from(format!(
+        "/tmp/fx-{}-{}",
+        std::process::id(),
+        NEXT_ENV.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let fiber_home = dir.join("fh");
+    std::fs::create_dir(&fiber_home).unwrap();
+    let e = Env { dir, fiber_home };
+    let brief = e.dir.join("brief.txt");
+    let inbox = e.dir.join("inbox");
+    std::fs::write(&brief, "Reply with DONE.").unwrap();
+    std::fs::create_dir(&inbox).unwrap();
+    let fake = e.fake_hub(1, move |_, session_id, conn| {
+        accept_start(conn, session_id);
+        subscribe_fresh(conn, session_id);
+        let prompt = conn.recv();
+        assert_eq!(prompt["command"], "prompt");
+        conn.accept(&prompt, json!({}));
+        conn.send(event(
+            "turn_started",
+            session_id,
+            1,
+            json!({"turn_id":"t1","input":[{"command_id":prompt["id"],"type":"message"}]}),
+        ));
+        conn.send(event(
+            "turn_completed",
+            session_id,
+            2,
+            json!({"turn_id":"t1","outcome":"completed"}),
+        ));
+        conn.send(event("fiber_exited", session_id, 3, json!({"exit_code":0})));
+        conn.expect_eof();
+    });
+    let start = e.delegate(
+        &[
+            "session",
+            "start",
+            "--model",
+            MODEL,
+            "--brief",
+            brief.to_str().unwrap(),
+            "--inbox",
+            inbox.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let state: Value = serde_json::from_slice(&start.stdout).unwrap();
+    let id = state["session"]["id"].as_str().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = e.delegate(&["session", "status", id, "--json"], None);
+        let value: Value = serde_json::from_slice(&status.stdout).unwrap();
+        if value["session"]["status"] == "idle" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session did not become idle: {value:#}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let logs = e.delegate(&["session", "logs", id, "--json"], None);
+        let logs: Value = serde_json::from_slice(&logs.stdout).unwrap();
+        if logs["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line["kind"] == "session.exited" && line["reason"] == "idle")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "idle exit was not logged: {logs:#}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let stopped = e.delegate(&["session", "stop", id, "--json"], None);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let commands = fake.finish();
+    let names = command_names(&commands[0]);
+    assert_eq!(names, ["start", "subscribe", "prompt"]);
 }
 
 #[test]

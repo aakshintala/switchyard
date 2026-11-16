@@ -361,6 +361,9 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
     let bin = match kind {
         HostKind::Muse => config.muse_bin.clone(),
         HostKind::Pi => crate::backends::pi::resolve_bin(None),
+        HostKind::Fiber => std::env::current_exe()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "delegate".to_string()),
     };
     let mut command = match crate::util::captured_command(&bin) {
         Ok(command) => command,
@@ -382,6 +385,9 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
                 .strip_prefix("muse/")
                 .unwrap_or(&initial.model);
             command.args(msp::host_argv(model_id));
+        }
+        HostKind::Fiber => {
+            command.args(["session", "__fiber-host", "--model", &initial.model]);
         }
         HostKind::Pi => {
             let pi_dir = config.paths.dir(id).join("pi");
@@ -435,7 +441,7 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
             );
         }
     };
-    if kind == HostKind::Pi {
+    if matches!(kind, HostKind::Pi | HostKind::Fiber) {
         record_spawned_start(&config.paths.host_spawn_file(id), child.id());
     }
 
@@ -775,7 +781,7 @@ fn call_within(
 ) -> Result<Value, CallFailure> {
     let id = shared.next_request_id.fetch_add(1, Ordering::SeqCst);
     let line = match shared.kind {
-        HostKind::Muse => msp::request(id, method, params),
+        HostKind::Muse | HostKind::Fiber => msp::request(id, method, params),
         HostKind::Pi => match lock(&shared.wire).encode(id, method, &params) {
             Ok(line) => line,
             Err(message) => return Err(CallFailure::Failed(message)),
@@ -958,7 +964,7 @@ fn handle_host_line(shared: &Arc<Shared>, line: &str) {
     // One pi line carries a batch of events and responses; apply them in
     // order before reading the next line.
     let incoming = match shared.kind {
-        HostKind::Muse => vec![msp::parse_line(line)],
+        HostKind::Muse | HostKind::Fiber => vec![msp::parse_line(line)],
         HostKind::Pi => lock(&shared.wire).parse(line),
     };
     for item in incoming {
@@ -974,7 +980,7 @@ fn handle_host_line(shared: &Arc<Shared>, line: &str) {
                     return;
                 }
                 let refusal = match shared.kind {
-                    HostKind::Muse => msp::refusal(&id),
+                    HostKind::Muse | HostKind::Fiber => msp::refusal(&id),
                     HostKind::Pi => pi::refusal(&id),
                 };
                 let _ = shared.writer.send(WriterMessage::Write {
@@ -1092,7 +1098,15 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
     let status_change = matches!(&event, HostEvent::StatusChanged { .. });
     let old_times = (before.updated_at, before.last_progress_at);
     if update_store(shared, |state| {
-        let lines = state::apply_event(state, &event, now_ms());
+        let mut lines = state::apply_event(state, &event, now_ms());
+        if matches!(event, HostEvent::TurnCompleted { .. })
+            && let Ok(raw) = serde_json::from_str::<Value>(raw_line)
+            && let Some(questions) = raw.get("params").and_then(|params| params.get("questions"))
+            && let Some(line) = lines.last_mut()
+            && let Some(object) = line.as_object_mut()
+        {
+            object.insert("questions".into(), questions.clone());
+        }
         if should_note_idle && state.status == Status::Idle && !state.pending_steers.is_empty() {
             // Keep the completing turn busy until replay_pending_steers makes
             // the decision while holding admission. No turn is active yet.
@@ -1455,6 +1469,10 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
         return error_reply("failed", "could not write session state");
     }
     match call(shared, "turn/steer", params) {
+        Ok(result) if msp::ack_disposition(&result) == Disposition::Started => {
+            drop(admission);
+            json!({"ok":true,"disposition":"started","commandId":command_id})
+        }
         Ok(_) => {
             drop(admission);
             let resolution =

@@ -413,14 +413,20 @@ impl Out {
         self.pending.retain(|command| command.id != id);
     }
 
-    fn resend_pending(&mut self, prompt_seen: Option<&str>) -> bool {
+    fn resend_pending(&mut self, prompt_seen: Option<&str>, session_mode: bool) -> bool {
         let mut lines = Vec::with_capacity(self.pending.len());
         for command in &mut self.pending {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&command.line) else {
                 continue;
             };
             let name = value.get("command").and_then(|name| name.as_str());
-            if !matches!(name, Some("prompt") | Some("close") | Some("add_directory")) {
+            if session_mode && matches!(name, Some("close") | Some("add_directory")) {
+                continue;
+            }
+            if !matches!(
+                name,
+                Some("prompt") | Some("steer") | Some("close") | Some("add_directory")
+            ) {
                 continue;
             }
             if name == Some("prompt") && prompt_seen == Some(command.id.as_str()) {
@@ -1018,7 +1024,7 @@ fn subscribe_summary_command(id: &str, session_id: &str) -> String {
     .to_string()
 }
 
-fn prompt_command(id: &str, session_id: &str, prompt: &str) -> String {
+pub fn prompt_command(id: &str, session_id: &str, prompt: &str) -> String {
     serde_json::json!({
         "id": id,
         "command": "prompt",
@@ -1026,6 +1032,20 @@ fn prompt_command(id: &str, session_id: &str, prompt: &str) -> String {
         "args": {"content": [{"type": "text", "text": prompt}]},
     })
     .to_string()
+}
+
+pub fn steer_command(id: &str, session_id: &str, prompt: &str) -> String {
+    serde_json::json!({
+        "id": id,
+        "command": "steer",
+        "session_id": session_id,
+        "args": {"content": [{"type": "text", "text": prompt}]},
+    })
+    .to_string()
+}
+
+pub fn cancel_command(id: &str, session_id: &str) -> String {
+    serde_json::json!({"id":id,"command":"cancel","session_id":session_id}).to_string()
 }
 
 fn add_directory_command(id: &str, session_id: &str, path: &str) -> String {
@@ -1430,7 +1450,7 @@ impl HubConn {
                                             break;
                                         }
                                     };
-                                    if !inspect_replay {
+                                    if !inspect_replay || rest.mode == RestMode::Session {
                                         replay.push(raw.clone());
                                     }
                                     if inspect_replay && terminal.is_none() {
@@ -1442,7 +1462,35 @@ impl HubConn {
                                             prompt_was_seen = true;
                                             rest.turn_started = true;
                                         }
+                                        let forward_session_line = rest.mode == RestMode::Session
+                                            && (value
+                                                .get("seq")
+                                                .and_then(serde_json::Value::as_u64)
+                                                .is_some_and(|seq| {
+                                                    rest.highest_seq
+                                                        .is_none_or(|highest| seq > highest)
+                                                })
+                                                || kind == "command_rejected"
+                                                    && value
+                                                        .get("payload")
+                                                        .and_then(|payload| {
+                                                            payload.get("command_id")
+                                                        })
+                                                        .and_then(serde_json::Value::as_str)
+                                                        .is_some_and(|id| {
+                                                            known_ids(rest, &shared)
+                                                                .pending_ids
+                                                                .iter()
+                                                                .any(|pending| pending == id)
+                                                        }));
                                         let step = rest.handle_live(&raw, &shared);
+                                        if forward_session_line
+                                            && let Some(tx) = &rest.session_lines
+                                        {
+                                            let _ = tx.send(HubSessionLine::Line(
+                                                String::from_utf8_lossy(&raw).into_owned(),
+                                            ));
+                                        }
                                         match step {
                                             Step::Continue => {}
                                             Step::CloseOnce => close_after_replay = true,
@@ -1502,13 +1550,44 @@ impl HubConn {
                         lock(&shared.out).forget_pending(id);
                     }
 
+                    if rest.mode == RestMode::Session {
+                        let mut applied = Vec::new();
+                        for raw in &replay {
+                            let Ok((kind, value)) = parse_line(raw) else {
+                                continue;
+                            };
+                            let payload = value.get("payload");
+                            if kind == "steering_applied"
+                                && let Some(id) = payload
+                                    .and_then(|payload| payload.get("command_id"))
+                                    .and_then(serde_json::Value::as_str)
+                            {
+                                applied.push(id.to_string());
+                            }
+                            if kind == "turn_started"
+                                && let Some(items) = payload
+                                    .and_then(|payload| payload.get("input"))
+                                    .and_then(serde_json::Value::as_array)
+                            {
+                                applied.extend(items.iter().filter_map(|item| {
+                                    item.get("command_id")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_string)
+                                }));
+                            }
+                        }
+                        let mut out = lock(&shared.out);
+                        for id in applied {
+                            out.forget_pending(&id);
+                        }
+                    }
                     let resent = {
                         let mut out = lock(&shared.out);
                         out.subscribed = true;
                         if terminal.is_some() {
                             true
                         } else {
-                            out.resend_pending(suppressed_prompt)
+                            out.resend_pending(suppressed_prompt, rest.mode == RestMode::Session)
                         }
                     };
                     if !resent {
@@ -1695,10 +1774,230 @@ fn resume_fold_end(kind: &str, value: &serde_json::Value, last_seq: u64) -> bool
     kind == "session_started" || value.get("seq").and_then(|seq| seq.as_u64()) == Some(last_seq)
 }
 
-/// One supervised turn through the hub: connect, start or resume, subscribe
-/// at `full`, send one `prompt`, read to `turn_completed`, `close`, then read
-/// `fiber_exited` as the verdict. There is no `bin` field: nothing here spawns
-/// anything.
+/// A supervised session stream over the hub: start, subscribe at `full`,
+/// forward commands and events until the bridge closes the session. The child
+/// process speaks MSP to the delegate supervisor; this API owns the hub link.
+pub enum HubSessionLine {
+    Ready(String),
+    Line(String),
+    Lost(String),
+}
+
+pub struct HubSession {
+    commands: std::sync::mpsc::Sender<String>,
+    lines: std::sync::mpsc::Receiver<HubSessionLine>,
+}
+
+impl HubSession {
+    #[cfg(test)]
+    pub(crate) fn from_channels(
+        commands: std::sync::mpsc::Sender<String>,
+        lines: std::sync::mpsc::Receiver<HubSessionLine>,
+    ) -> Self {
+        Self { commands, lines }
+    }
+
+    pub fn send(&self, command: serde_json::Value) -> Result<String, String> {
+        let id = command
+            .get("id")
+            .and_then(|id| id.as_str())
+            .ok_or_else(|| "hub command needs an id".to_string())?
+            .to_string();
+        self.commands
+            .send(command.to_string())
+            .map_err(|_| "Fiber hub session stopped".to_string())?;
+        Ok(id)
+    }
+
+    pub fn try_recv(&self) -> Option<HubSessionLine> {
+        self.lines.try_recv().ok()
+    }
+
+    pub fn recv(&self, timeout: Duration) -> Result<HubSessionLine, String> {
+        self.lines
+            .recv_timeout(timeout)
+            .map_err(|error| error.to_string())
+    }
+}
+
+pub fn spawn_session(model: String, cwd: String, socket: PathBuf) -> HubSession {
+    let (command_tx, command_rx) = std::sync::mpsc::channel::<String>();
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<HubSessionLine>();
+    std::thread::spawn(move || session_loop(model, cwd, socket, command_rx, line_tx));
+    HubSession {
+        commands: command_tx,
+        lines: line_rx,
+    }
+}
+
+fn session_loop(
+    model: String,
+    cwd: String,
+    socket: PathBuf,
+    commands: std::sync::mpsc::Receiver<String>,
+    lines: std::sync::mpsc::Sender<HubSessionLine>,
+) {
+    let bounds = Bounds::default();
+    let shared = Arc::new(Shared::new(bounds.write_deadline));
+    let mut conn = match connect(&socket, &bounds, Arc::clone(&shared)) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let _ = lines.send(HubSessionLine::Lost(error));
+            return;
+        }
+    };
+    let on = |_: Event| {};
+    let mut rest = Rest::new(&on, &bounds);
+    rest.mode = RestMode::Session;
+    rest.session_lines = Some(lines.clone());
+    let mut known = known_ids(&rest, &shared);
+    let start_id = new_command_id();
+    if !lock(&shared.out).send_checked(&start_command_with_overrides(
+        &start_id,
+        &cwd,
+        super::model_reference(&model),
+        &[],
+    )) {
+        let _ = lines.send(HubSessionLine::Lost("could not send hub start".into()));
+        return;
+    }
+    rest.start_id = start_id.clone();
+    let session_id = match conn.await_ack(
+        &start_id,
+        &mut known,
+        &mut rest,
+        &shared,
+        ack_deadline(&shared, &bounds, "start"),
+        false,
+        |_| None,
+    ) {
+        WaitOutcome::Ack(Ack::Accepted { result }) => match start_session(&result) {
+            Ok(id) => id,
+            Err(error) => {
+                let _ = lines.send(HubSessionLine::Lost(error));
+                return;
+            }
+        },
+        WaitOutcome::Ack(Ack::Rejected { code, message }) => {
+            let _ = lines.send(HubSessionLine::Lost(format!(
+                "hub rejected start: {code}: {message}"
+            )));
+            return;
+        }
+        _ => {
+            let _ = lines.send(HubSessionLine::Lost("hub start failed".into()));
+            return;
+        }
+    };
+    rest.session_id = Some(session_id.clone());
+    lock(&shared.out).session_id = Some(session_id.clone());
+    let sub_id = new_command_id();
+    if !lock(&shared.out).send_checked(&subscribe_command(&sub_id, &session_id)) {
+        let _ = lines.send(HubSessionLine::Lost(
+            "could not subscribe to Fiber session".into(),
+        ));
+        return;
+    }
+    rest.sub_id = sub_id.clone();
+    match conn.await_ack_reconnecting(
+        &sub_id,
+        &mut known,
+        &mut rest,
+        &shared,
+        ack_deadline(&shared, &bounds, "subscribe"),
+        false,
+        &socket,
+        &bounds,
+        |_| None,
+    ) {
+        WaitOutcome::Ack(Ack::Accepted { result }) => {
+            rest.last_seq = last_seq_of(&result);
+            lock(&shared.out).subscribed = true;
+        }
+        _ => {
+            let _ = lines.send(HubSessionLine::Lost(
+                "Fiber session subscribe failed".into(),
+            ));
+            return;
+        }
+    }
+    let _ = lines.send(HubSessionLine::Ready(session_id));
+    loop {
+        loop {
+            match commands.try_recv() {
+                Ok(command) => {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&command) else {
+                        continue;
+                    };
+                    let Some(id) = value.get("id").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if value.get("command").and_then(serde_json::Value::as_str) == Some("close") {
+                        rest.closed = true;
+                    }
+                    match lock(&shared.out).send_session_checked(id, &command) {
+                        SendResult::Sent => {}
+                        _ => {
+                            let _ = lines
+                                .send(HubSessionLine::Lost("could not send Fiber command".into()));
+                            return;
+                        }
+                    }
+                    rest.prompt_id = id.to_string();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+            }
+        }
+        match conn.next_line(bounds.poll_slice) {
+            Next::Tick => {}
+            Next::Lost => match conn.reconnect(&socket, &bounds, &mut rest, &mut known) {
+                Ok(_) => continue,
+                Err(error) => {
+                    let _ = lines.send(HubSessionLine::Lost(error));
+                    return;
+                }
+            },
+            Next::Line(raw) => {
+                let step = rest.handle_live(&raw, &shared);
+                let parsed = serde_json::from_slice::<serde_json::Value>(&raw).ok();
+                if let Some(value) = parsed.as_ref()
+                    && value.get("kind").and_then(serde_json::Value::as_str) == Some("fiber_exited")
+                {
+                    let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
+                    let bad_exit = payload.get("error").is_some()
+                        || payload
+                            .get("exit_code")
+                            .and_then(serde_json::Value::as_i64)
+                            .is_some_and(|code| code != 0);
+                    if bad_exit && !rest.closed {
+                        let reason = payload
+                            .get("error")
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "Fiber exited with a nonzero status".into());
+                        let _ = lines.send(HubSessionLine::Lost(reason));
+                        return;
+                    }
+                }
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                let _ = lines.send(HubSessionLine::Line(text));
+                if let Step::Fail(error) = step {
+                    let _ = lines.send(HubSessionLine::Lost(error));
+                    return;
+                }
+                if rest.closed
+                    && parsed.as_ref().is_some_and(|value| {
+                        value.get("kind").and_then(serde_json::Value::as_str)
+                            == Some("fiber_exited")
+                    })
+                {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct HubRequest {
     pub cwd: String,
@@ -2253,6 +2552,12 @@ fn ack_deadline(shared: &Shared, bounds: &Bounds, what: &'static str) -> AckWait
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestMode {
+    Turn,
+    Session,
+}
+
 /// The run's fold and gate state. The connection stays outside, so the ack
 /// handlers can borrow both without aliasing.
 struct Rest<'a> {
@@ -2278,6 +2583,8 @@ struct Rest<'a> {
     turn_start_deadline: Option<Instant>,
     turn_wait_deadline: Option<Instant>,
     stream_closed_deadline: Option<Instant>,
+    mode: RestMode,
+    session_lines: Option<std::sync::mpsc::Sender<HubSessionLine>>,
 }
 
 impl<'a> Rest<'a> {
@@ -2305,6 +2612,8 @@ impl<'a> Rest<'a> {
             turn_start_deadline: None,
             turn_wait_deadline: None,
             stream_closed_deadline: None,
+            mode: RestMode::Turn,
+            session_lines: None,
         }
     }
 
@@ -2471,6 +2780,12 @@ impl<'a> Rest<'a> {
                 ))),
                 Some(cid) => {
                     let known = known_ids(self, shared);
+                    if self.mode == RestMode::Session
+                        && known.pending_ids.iter().any(|pending| pending == cid)
+                    {
+                        lock(&shared.out).forget_pending(cid);
+                        return Step::Continue;
+                    }
                     match note_answer("command_accepted", cid, &value, &known, shared) {
                         Answer::Ignore | Answer::Retried => Step::Continue,
                         Answer::Fail(text) => Step::Fail(text),
@@ -2492,6 +2807,12 @@ impl<'a> Rest<'a> {
                     ))),
                     Some(cid) => {
                         let known = known_ids(self, shared);
+                        if self.mode == RestMode::Session
+                            && known.pending_ids.iter().any(|pending| pending == cid)
+                        {
+                            lock(&shared.out).forget_pending(cid);
+                            return Step::Continue;
+                        }
                         match note_answer("command_rejected", cid, &value, &known, shared) {
                             Answer::Ignore | Answer::Retried => Step::Continue,
                             Answer::Fail(text) => Step::Fail(text),
@@ -2536,6 +2857,12 @@ impl<'a> Rest<'a> {
                 }
             }
             "turn_completed" => {
+                if self.mode == RestMode::Session {
+                    self.record_turn_outcome(&value);
+                    self.fold(raw);
+                    self.turn_started = false;
+                    return Step::Continue;
+                }
                 if !self.turn_started {
                     // Before our turn: fold only when the gate admits, never
                     // flags and never a close.
@@ -2548,7 +2875,13 @@ impl<'a> Rest<'a> {
                 self.fold(raw);
                 Step::CloseOnce
             }
-            "fiber_exited" => self.on_exited(raw, &value),
+            "fiber_exited" => {
+                if self.mode == RestMode::Session {
+                    self.fold(raw);
+                    return Step::Continue;
+                }
+                self.on_exited(raw, &value)
+            }
             // The hub speaks first and once: a later `hub_hello` is a
             // reply kind with no table row, so it fails closed instead
             // of folding as an event (rule 12).
@@ -9530,6 +9863,175 @@ mod tests {
         assert_eq!(
             received_commands(&join_fake(&path, rx)),
             ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn session_mode_starts_and_forwards_a_prompt_turn() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, start) = recv_id(srv);
+            assert_eq!(start["command"], "start");
+            assert_eq!(start["args"]["supervised"], true);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id":"s_1"}),
+            ));
+            let (sub_id, sub) = recv_id(srv);
+            assert_eq!(sub["command"], "subscribe");
+            assert_eq!(sub["args"]["level"], "full");
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq":0})));
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            assert_eq!(prompt["args"]["content"][0]["text"], "go");
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            srv.send(&turn_started_ev(&prompt_id, 1));
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(
+            matches!(link.recv(Duration::from_secs(5)).unwrap(), HubSessionLine::Ready(id) if id == "s_1")
+        );
+        let prompt_id = "driver-command-1";
+        link.send(serde_json::json!({"id":prompt_id,"command":"prompt","session_id":"s_1","args":{"content":[{"type":"text","text":"go"}]}})).unwrap();
+        let mut saw_turn = false;
+        for _ in 0..4 {
+            if let HubSessionLine::Line(line) = link.recv(Duration::from_secs(5)).unwrap()
+                && serde_json::from_str::<serde_json::Value>(&line).unwrap()["kind"]
+                    == "turn_started"
+            {
+                saw_turn = true;
+                break;
+            }
+        }
+        assert!(saw_turn);
+        drop(link);
+        let _ = join_fake(&path, rx);
+    }
+
+    #[test]
+    fn session_turn_completed_keeps_the_connection_open_until_close_exit() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id":"s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq":0})));
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            srv.send(&turn_started_ev(&prompt_id, 1));
+            srv.send(&ev(
+                "turn_completed",
+                2,
+                serde_json::json!({"turn_id":"t1","outcome":"completed"}),
+            ));
+            let (close_id, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            srv.send(&accepted(&close_id, serde_json::json!({})));
+            srv.send(&ev("fiber_exited", 3, serde_json::json!({"exit_code":0})));
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(matches!(
+            link.recv(Duration::from_secs(5)).unwrap(),
+            HubSessionLine::Ready(_)
+        ));
+        link.send(serde_json::json!({"id":"prompt-1","command":"prompt","session_id":"s_1","args":{"content":[{"type":"text","text":"go"}]}})).unwrap();
+        let mut completed = false;
+        for _ in 0..5 {
+            if let HubSessionLine::Line(line) = link.recv(Duration::from_secs(5)).unwrap()
+                && serde_json::from_str::<serde_json::Value>(&line).unwrap()["kind"]
+                    == "turn_completed"
+            {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed);
+        link.send(serde_json::json!({"id":"close-1","command":"close","session_id":"s_1"}))
+            .unwrap();
+        let mut exited = false;
+        for _ in 0..5 {
+            if let HubSessionLine::Line(line) = link.recv(Duration::from_secs(5)).unwrap()
+                && serde_json::from_str::<serde_json::Value>(&line).unwrap()["kind"]
+                    == "fiber_exited"
+            {
+                exited = true;
+                break;
+            }
+        }
+        assert!(exited);
+        drop(link);
+        let received = join_fake(&path, rx);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn session_reconnect_replays_the_turn_start_that_names_the_prompt() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id":"s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq":0})));
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            srv.disconnect();
+            srv.accept_next();
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (re_sub_id, re_sub) = recv_id(srv);
+            assert_eq!(re_sub["command"], "subscribe");
+            srv.send(&accepted(&re_sub_id, serde_json::json!({"last_seq":1})));
+            srv.send(&turn_started_ev(&prompt_id, 1));
+            let (close_id, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            srv.send(&accepted(&close_id, serde_json::json!({})));
+            srv.send(&ev("fiber_exited", 2, serde_json::json!({"exit_code":0})));
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(matches!(
+            link.recv(Duration::from_secs(5)).unwrap(),
+            HubSessionLine::Ready(_)
+        ));
+        link.send(serde_json::json!({"id":"prompt-reconnect","command":"prompt","session_id":"s_1","args":{"content":[{"type":"text","text":"go"}]}})).unwrap();
+        let mut started = false;
+        for _ in 0..12 {
+            if let HubSessionLine::Line(line) = link.recv(Duration::from_secs(5)).unwrap()
+                && serde_json::from_str::<serde_json::Value>(&line).unwrap()["kind"]
+                    == "turn_started"
+            {
+                started = true;
+                break;
+            }
+        }
+        assert!(
+            started,
+            "replayed turn start was not forwarded to the bridge"
+        );
+        link.send(serde_json::json!({"id":"close-reconnect","command":"close","session_id":"s_1"}))
+            .unwrap();
+        for _ in 0..12 {
+            if let HubSessionLine::Line(line) = link.recv(Duration::from_secs(5)).unwrap()
+                && serde_json::from_str::<serde_json::Value>(&line).unwrap()["kind"]
+                    == "fiber_exited"
+            {
+                break;
+            }
+        }
+        drop(link);
+        let received = join_fake(&path, rx);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "subscribe", "close"]
         );
     }
 
