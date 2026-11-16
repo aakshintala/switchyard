@@ -49,6 +49,16 @@ impl Env {
     }
 
     fn command(&self, args: &[&str], stdin: Option<&str>, fiber_bin: bool) -> Output {
+        self.command_with_env(args, stdin, fiber_bin, &[])
+    }
+
+    fn command_with_env(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        fiber_bin: bool,
+        extra_env: &[(&str, &str)],
+    ) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
         cmd.args(model_ruling::args_with_model_ruling(args))
             .current_dir(&self.dir)
@@ -68,6 +78,7 @@ impl Env {
         } else {
             cmd.env_remove("FIBER_BIN");
         }
+        cmd.envs(extra_env.iter().copied());
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1325,4 +1336,353 @@ fn fiber_exited_error_maps_to_an_error_job() {
         command_names(&commands[0]),
         ["start", "subscribe", "prompt", "close"]
     );
+}
+
+/// A session test's directory sits under `/tmp`, so the hub socket path stays
+/// short enough to bind.
+fn session_env() -> (Env, PathBuf, PathBuf) {
+    let dir = PathBuf::from(format!(
+        "/tmp/fx-{}-{}",
+        std::process::id(),
+        NEXT_ENV.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let fiber_home = dir.join("fh");
+    std::fs::create_dir(&fiber_home).unwrap();
+    let e = Env { dir, fiber_home };
+    let brief = e.dir.join("brief.txt");
+    let inbox = e.dir.join("inbox");
+    std::fs::write(&brief, "Reply with DONE.").unwrap();
+    std::fs::create_dir(&inbox).unwrap();
+    (e, brief, inbox)
+}
+
+fn start_fiber_session(
+    e: &Env,
+    model: &str,
+    brief: &Path,
+    inbox: &Path,
+    extra_env: &[(&str, &str)],
+) -> Output {
+    e.command_with_env(
+        &[
+            "session",
+            "start",
+            "--model",
+            model,
+            "--brief",
+            brief.to_str().unwrap(),
+            "--inbox",
+            inbox.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+        true,
+        extra_env,
+    )
+}
+
+fn started_session_id(start: &Output) -> String {
+    assert!(
+        start.status.success(),
+        "exit {:?}\nstderr: {}\nstdout: {}",
+        start.status.code(),
+        String::from_utf8_lossy(&start.stderr),
+        String::from_utf8_lossy(&start.stdout)
+    );
+    let state: Value = serde_json::from_slice(&start.stdout).unwrap();
+    state["session"]["id"].as_str().unwrap().to_string()
+}
+
+/// A hub event about a turn: as in Fiber's envelope, `turn_id` sits beside
+/// `seq`, not in the payload.
+fn turn_event(kind: &str, session_id: &str, seq: u64, turn_id: &str, payload: Value) -> Value {
+    let mut value = event(kind, session_id, seq, payload);
+    value["turn_id"] = json!(turn_id);
+    value
+}
+
+fn session_state(e: &Env, id: &str) -> Value {
+    let out = e.delegate(&["session", "status", id, "--json"], None);
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    value["session"].clone()
+}
+
+fn session_log_lines(e: &Env, id: &str) -> Vec<Value> {
+    let out = e.delegate(&["session", "logs", id, "--json"], None);
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    value["lines"].as_array().unwrap().clone()
+}
+
+fn wait_for_status(e: &Env, id: &str, status: &str, within: Duration) -> Value {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let state = session_state(e, id);
+        if state["status"] == status {
+            return state;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session did not become {status}: {state:#}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn wait_for_note(inbox: &Path, note: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let notes: Vec<String> = std::fs::read_dir(inbox)
+            .unwrap()
+            .filter_map(|entry| std::fs::read_to_string(entry.unwrap().path()).ok())
+            .collect();
+        if notes.iter().any(|text| text == note) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "inbox has no {note:?}: {notes:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+struct OneTurn {
+    id: String,
+    watched: Value,
+    lines: Vec<Value>,
+}
+
+/// Runs a session whose first turn, `t1`, ends with `turn_events`, watches it
+/// to idle, waits for the idle inbox note, then stops it.
+fn one_fiber_turn(turn_events: fn(&str) -> Vec<Value>) -> OneTurn {
+    let (e, brief, inbox) = session_env();
+    let fake = e.fake_hub(1, move |_, session_id, conn| {
+        accept_start(conn, session_id);
+        subscribe_fresh(conn, session_id);
+        let prompt = conn.recv();
+        assert_eq!(prompt["command"], "prompt");
+        conn.accept(&prompt, json!({}));
+        conn.send(turn_event(
+            "turn_started",
+            session_id,
+            1,
+            "t1",
+            json!({"input":[{"command_id":prompt["id"],"content":[{"type":"text","text":"Reply with DONE."}],"source":"driver","type":"message"}]}),
+        ));
+        for line in turn_events(session_id) {
+            conn.send(line);
+        }
+        let close = conn.recv();
+        assert_eq!(close["command"], "close");
+        conn.accept(&close, json!({}));
+        conn.send(event("fiber_exited", session_id, 99, json!({"exit_code":0})));
+    });
+    let id = started_session_id(&start_fiber_session(&e, MODEL, &brief, &inbox, &[]));
+    wait_for_status(&e, &id, "idle", Duration::from_secs(10));
+    let watch = e.delegate(&["session", "watch", &id, "--json"], None);
+    assert_eq!(
+        watch.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&watch.stderr)
+    );
+    let watched: Value = serde_json::from_slice(&watch.stdout).unwrap();
+    wait_for_note(&inbox, &format!("[session {id} idle]\n"));
+    let lines = session_log_lines(&e, &id);
+    let stopped = e.delegate(&["session", "stop", &id, "--json"], None);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let commands = fake.finish();
+    assert_eq!(
+        command_names(&commands[0]),
+        ["start", "subscribe", "prompt", "close"]
+    );
+    OneTurn { id, watched, lines }
+}
+
+fn text_part(session_id: &str, seq: u64, action_id: &str, text: &str) -> Value {
+    let mut value = turn_event(
+        "text_completed",
+        session_id,
+        seq,
+        "t1",
+        json!({"text": text}),
+    );
+    value["action_id"] = json!(action_id);
+    value
+}
+
+#[test]
+fn fiber_session_watch_returns_zero_at_idle_and_notes_the_inbox() {
+    let turn = one_fiber_turn(|session_id| {
+        vec![
+            text_part(session_id, 2, "a_1", "DONE"),
+            turn_event(
+                "turn_completed",
+                session_id,
+                3,
+                "t1",
+                json!({"outcome":"completed"}),
+            ),
+        ]
+    });
+    assert_eq!(turn.watched["ok"], true, "{:#}", turn.watched);
+    assert_eq!(turn.watched["session"]["status"], "idle");
+    assert_eq!(turn.watched["session"]["id"], turn.id.as_str());
+    assert_eq!(turn.watched["session"]["lastTurn"]["turnId"], "t1");
+}
+
+#[test]
+fn fiber_session_failed_turn_ends_failed() {
+    let turn = one_fiber_turn(|session_id| {
+        vec![turn_event(
+            "turn_completed",
+            session_id,
+            2,
+            "t1",
+            json!({"outcome":"failed","error":{"code":"provider_error","message":"the model call failed"}}),
+        )]
+    });
+    let last_turn = &turn.watched["session"]["lastTurn"];
+    assert_eq!(last_turn["turnId"], "t1", "{last_turn:#}");
+    assert_eq!(last_turn["terminal"], "failed", "{last_turn:#}");
+}
+
+#[test]
+fn fiber_session_supervised_questions_ride_on_the_turn_completed_line() {
+    let turn = one_fiber_turn(|session_id| {
+        vec![turn_event(
+            "turn_completed",
+            session_id,
+            2,
+            "t1",
+            json!({"outcome":"completed","questions":[{"header":"Branch","question":"Which branch should the fix land on?","options":[{"label":"main (Recommended)"},{"label":"release"}]}]}),
+        )]
+    });
+    let last_turn = &turn.watched["session"]["lastTurn"];
+    assert_eq!(last_turn["terminal"], "completed", "{last_turn:#}");
+    let completed = turn
+        .lines
+        .iter()
+        .find(|line| line["kind"] == "turn.completed")
+        .expect("no turn.completed line");
+    assert_eq!(completed["turnId"], "t1", "{completed:#}");
+    assert_eq!(
+        completed["questions"][0]["question"], "Which branch should the fix land on?",
+        "{completed:#}"
+    );
+    assert_eq!(
+        completed["questions"][0]["options"][0]["label"],
+        "main (Recommended)"
+    );
+}
+
+#[test]
+fn fiber_session_reconnect_exhaustion_marks_the_session_dead() {
+    let (e, brief, inbox) = session_env();
+    let fake = e.fake_hub(1, move |_, session_id, conn| {
+        accept_start(conn, session_id);
+        subscribe_fresh(conn, session_id);
+        let prompt = conn.recv();
+        assert_eq!(prompt["command"], "prompt");
+        conn.accept(&prompt, json!({}));
+        conn.send(turn_event(
+            "turn_started",
+            session_id,
+            1,
+            "t1",
+            json!({"input":[{"command_id":prompt["id"],"type":"message"}]}),
+        ));
+        // The scenario returns: the connection drops and the hub's listener
+        // goes with it, so every reconnect attempt is refused.
+    });
+    let id = started_session_id(&start_fiber_session(&e, MODEL, &brief, &inbox, &[]));
+    let state = wait_for_status(&e, &id, "dead", Duration::from_secs(20));
+    assert_eq!(state["dead"]["reason"], "hostExited", "{state:#}");
+    assert_eq!(state["dead"]["exitCode"], 1, "{state:#}");
+    wait_for_note(&inbox, &format!("[session {id} dead]\n"));
+    let watch = e.delegate(&["session", "watch", &id, "--json"], None);
+    assert_eq!(watch.status.code(), Some(4));
+    let commands = fake.finish();
+    assert_eq!(
+        command_names(&commands[0]),
+        ["start", "subscribe", "prompt"]
+    );
+}
+
+#[test]
+fn fiber_session_start_refuses_a_harness_model_without_the_fiber_prefix() {
+    let (e, brief, inbox) = session_env();
+    let out = start_fiber_session(&e, "codex/gpt-6-luna", &brief, &inbox, &[]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["ok"], false, "{value:#}");
+    assert_eq!(value["error"]["code"], "usage", "{value:#}");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--model must use"),
+        "{value:#}"
+    );
+    assert!(!e.fiber_home.join("run").join("hub").exists());
+}
+
+#[test]
+fn fiber_session_start_accepts_both_lane_model_fiber_rows() {
+    for (model, reference) in [
+        ("fiber/codex/gpt-6-luna:medium", "codex/gpt-6-luna:medium"),
+        (
+            "fiber/opencode-go/muse-spark-1.3-contributor",
+            "opencode-go/muse-spark-1.3-contributor",
+        ),
+    ] {
+        let (e, brief, inbox) = session_env();
+        let fake = e.fake_hub(1, move |_, session_id, conn| {
+            let start = conn.recv();
+            assert_eq!(start["command"], "start", "{start}");
+            assert_eq!(start["args"]["model"], reference, "{start}");
+            conn.accept(&start, json!({"session_id": session_id}));
+            subscribe_fresh(conn, session_id);
+            let prompt = conn.recv();
+            assert_eq!(prompt["command"], "prompt");
+            conn.accept(&prompt, json!({}));
+            conn.send(turn_event(
+                "turn_started",
+                session_id,
+                1,
+                "t1",
+                json!({"input":[{"command_id":prompt["id"],"type":"message"}]}),
+            ));
+            conn.send(turn_event(
+                "turn_completed",
+                session_id,
+                2,
+                "t1",
+                json!({"outcome":"completed"}),
+            ));
+            let close = conn.recv();
+            assert_eq!(close["command"], "close");
+            conn.accept(&close, json!({}));
+            conn.send(event("fiber_exited", session_id, 3, json!({"exit_code":0})));
+        });
+        let id = started_session_id(&start_fiber_session(&e, model, &brief, &inbox, &[]));
+        assert_eq!(session_state(&e, &id)["model"], model);
+        wait_for_status(&e, &id, "idle", Duration::from_secs(10));
+        let stopped = e.delegate(&["session", "stop", &id, "--json"], None);
+        assert!(
+            stopped.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stopped.stderr)
+        );
+        let commands = fake.finish();
+        assert_eq!(
+            command_names(&commands[0]),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
 }
