@@ -131,7 +131,7 @@ def write_report(text, inbox, today):
     return 0
 
 
-def publish(scratch, inbox, today, source):
+def publish(scratch, inbox, today, source, concerns_path=None):
     scratch = Path(scratch)
     try:
         if not scratch.is_file():
@@ -142,8 +142,14 @@ def publish(scratch, inbox, today, source):
     if not text.strip():
         fail("scratch report is empty")
     rows, skipped = validate_report(text, today, source)
-    if rows == 0 and skipped == 0:
+    if rows == 0 and skipped == 0 and concerns_path is None:
         return 0
+    if concerns_path is not None:
+        try:
+            concerns = Path(concerns_path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            fail("cannot read delegate concerns")
+        text = f"{text.rstrip()}\n\n## concerns\n{concerns.rstrip()}\n"
     return write_report(text, inbox, today)
 
 
@@ -166,11 +172,11 @@ def publish_failure(inbox, today, source, status=""):
 
 
 def main(argv):
-    if len(argv) == 6 and argv[1] == "publish":
-        return publish(argv[2], argv[3], argv[4], argv[5])
+    if len(argv) in (6, 7) and argv[1] == "publish":
+        return publish(argv[2], argv[3], argv[4], argv[5], argv[6] if len(argv) == 7 else None)
     if len(argv) in (5, 6) and argv[1] == "failure":
         return publish_failure(argv[2], argv[3], argv[4], argv[5] if len(argv) == 6 else "")
-    fail("usage: model-deprecations.py publish SCRATCH INBOX YYYY-MM-DD SOURCE")
+    fail("usage: model-deprecations.py publish SCRATCH INBOX YYYY-MM-DD SOURCE [CONCERNS]")
 
 
 if __name__ == "__main__":
