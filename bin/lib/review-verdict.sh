@@ -110,6 +110,13 @@ finding_section_heading() {
   heading="$(printf '%s' "$line" | sed -E -e 's/^#+[[:space:]]*//' -e 's/:[[:space:]]*$//')"
   case "$heading" in
     Fixed|Open|New|"Not judged") printf '%s' "$heading" ;;
+    # The "at <ref>" form counts only as a heading (a # line or a trailing
+    # colon), so prose such as "Fixed at HEAD the P2 is still open." is not one.
+    "Fixed at "*|"Not judged at "*)
+      case "$line" in
+        \#*|*:) printf '%s' "${heading%% at *}" ;;
+        *) return 1 ;;
+      esac ;;
     *) return 1 ;;
   esac
 }
@@ -138,7 +145,7 @@ review_incomplete_rows() {
 }
 
 parse_p3_verify_findings() {
-  local encoded="$1" output="$2" decoded="${2}.comment" line heading section="" count=0 decoded_ok=1 valid=1 result=1
+  local encoded="$1" output="$2" decoded="${2}.comment" line raw_line heading section="" count=0 decoded_ok=1 valid=1 result=1
   if ! printf '%s' "$encoded" | base64 -D >"$decoded" 2>/dev/null; then
     if ! printf '%s' "$encoded" | base64 -d >"$decoded" 2>/dev/null; then
       decoded_ok=0
@@ -146,15 +153,19 @@ parse_p3_verify_findings() {
   fi
   if [ "$decoded_ok" = 1 ]; then
     : >"$output"
-    while IFS= read -r line || [ -n "$line" ]; do
-      # A finding is a line that starts with a priority token once markup and any
-      # list marker are gone; prose that mentions a fixed P1 or P2 is not one.
-      # Fixed and not-judged sections can contain priority rows that are closed,
-      # so exclude them before classifying open findings.
-      line="$(normalize_finding_line "$line")"
+    while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+      # Closed sections end at prose, but may contain blank lines, list items,
+      # and bare priority rows. Keep the raw line to distinguish list markers.
+      line="$(normalize_finding_line "$raw_line")"
       if heading="$(finding_section_heading "$line")"; then
         section="$heading"
         continue
+      fi
+      if { [ "$section" = Fixed ] || [ "$section" = "Not judged" ]; } \
+        && [ -n "$(printf '%s' "$raw_line" | tr -d '[:space:]')" ] \
+        && ! printf '%s' "$raw_line" | grep -Eq '^[[:space:]]*(-|[+*]|[0-9]+[.)])[[:space:]]' \
+        && ! [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then
+        section=""
       fi
       if finding_row_is_closed "$section" "$line"; then continue; fi
       if [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then

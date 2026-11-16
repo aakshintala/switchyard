@@ -927,6 +927,42 @@ grep -qF 'P3 first open finding' "$ST/comment.txt" && grep -qF 'P3 second open f
   "$(grep -n '^gh pr merge' "$ST/gh.log" | head -n 1 | cut -d: -f1)" ] \
   || fail "P3 issues are linked before the merge"
 
+
+# Fixed-at-revision sections retain their list, then prose reopens bare findings.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:121,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\n\nFixed at HEAD:\n- P2 a.rs:37 (x): fixed text\n- P3 b.rs:290 (y): fixed text\n- Tests: passed\n\nRuling note: deferred.\n\nP3 c.rs:27 — open one — fix\nP3 e.rs:12 — open two — fix\nP3 f.rs:4 — open three — fix")}
+]' >"$ST/review-comments"
+ship; expect 0 "Fixed at HEAD with prose-separated bare P3s merges"
+[ "$(jq 'length' "$ST/created-issues")" = 3 ] || fail "three open P3 issues filed: [$(cat "$ST/created-issues")]"
+! jq -e '[.[].body] | join("\\n") | contains("a.rs:37") or contains("b.rs:290")' "$ST/created-issues" >/dev/null \
+  || fail "closed findings are not filed: [$(cat "$ST/created-issues")]"
+
+# A prose line after Fixed reopens bare priority rows, including blocking P2s.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:122,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed:\n- P3 b.rs:2: fixed\nRuling note: deferred.\nP2 d.rs:1 — open — fix")}
+]' >"$ST/review-comments"
+ship; expect 5 "bare P2 after prose following Fixed refuses merge"; expect_refused REVIEW; no_merge "bare P2 after Fixed prose"
+
+# A fixed-only section is not a valid non-empty open-P3 result.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:123,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed at HEAD:\n- P2 a.rs:37: fixed")}
+]' >"$ST/review-comments"
+ship; expect 5 "Fixed at HEAD without open findings refuses merge"; expect_refused REVIEW; no_merge "fixed-only verify"
+
+# Prose that starts with "Fixed at" is not a heading, so the bare P2 after it stays open.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:124,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nP3 c.rs:27 — open one — fix\nFixed at HEAD the P2 at d.rs:1 is still open.\nP2 d.rs:1 — open — fix")}
+]' >"$ST/review-comments"
+ship; expect 5 "Fixed at prose is not a heading and keeps a bare P2 open"; expect_refused REVIEW; no_merge "Fixed at prose"
+
 # The P3 issue body and its PR link both redact host paths.
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
