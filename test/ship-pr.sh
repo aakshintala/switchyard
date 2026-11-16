@@ -963,6 +963,60 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
 ]' >"$ST/review-comments"
 ship; expect 5 "Fixed at prose is not a heading and keeps a bare P2 open"; expect_refused REVIEW; no_merge "Fixed at prose"
 
+# A bare P2 ends a closed section, even when later open P3s would otherwise pass.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:125,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed:\n- P3 a.rs:1 (fixed): done\nP2 new issue after closed section\nOpen:\nP3 c.rs:3 — open finding — fix")}
+]' >"$ST/review-comments"
+ship; expect 5 "bare P2 after a fixed row refuses despite later open P3"; expect_refused REVIEW; no_merge "bare P2 after Fixed"
+
+# An indented continuation directly under a fixed list item is not prose.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:126,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed:\n- P3 a.rs:1 (fixed): first fixed row\n  Wrapped continuation text\n  second wrapped line\n- P3 b.rs:2 (fixed): later fixed row\nOpen:\nP3 c.rs:3 — open finding — fix")}
+]' >"$ST/review-comments"
+ship; expect 0 "wrapped continuation keeps later fixed bullets closed"
+[ "$(jq 'length' "$ST/created-issues")" = 1 ] || fail "only the open P3 is filed after a wrapped continuation: [$(cat "$ST/created-issues")]"
+! jq -e '.[].body | contains("b.rs:2")' "$ST/created-issues" >/dev/null \
+  || fail "later fixed P3 is not filed after a wrapped continuation"
+
+# An indented priority row under a fixed bullet is not a continuation, so the P2 stays open.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:130,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed:\n- P3 a.rs:1 (fixed): done\n  P2 b.rs:2 still broken")}
+]' >"$ST/review-comments"
+ship; expect 5 "indented P2 under a fixed bullet refuses"; expect_refused REVIEW; no_merge "indented P2 under Fixed"
+
+# A colon does not turn extra prose into a Fixed-at-revision heading.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:127,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed at HEAD, but these remain open:\nP2 new issue after malformed heading\nOpen:\nP3 c.rs:3 — open finding — fix")}
+]' >"$ST/review-comments"
+ship; expect 5 "Fixed at HEAD with extra prose does not close a bare P2"; expect_refused REVIEW; no_merge "malformed Fixed-at heading"
+
+# A bare P1 under Not judged also reopens the section and blocks the merge.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:128,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\n### Not judged\nP1 new issue under not judged\nOpen:\nP3 c.rs:3 — open finding — fix")}
+]' >"$ST/review-comments"
+ship; expect 5 "bare P1 under Not judged refuses despite later open P3"; expect_refused REVIEW; no_merge "bare P1 under Not judged"
+
+# Fixed and Not judged headings remain tolerated by the parser for posted comments.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:129,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\nFixed:\n- P3 a.rs:1 (fixed): done\nNot judged:\n- P3 b.rs:2 (not judged): deferred\nOpen:\nP3 c.rs:3 — open finding — fix")}
+]' >"$ST/review-comments"
+ship; expect 0 "Fixed and Not judged headings remain parser-compatible"
+[ "$(jq 'length' "$ST/created-issues")" = 1 ] || fail "only the open P3 is filed when closed headings are tolerated: [$(cat "$ST/created-issues")]"
+! jq -e '[.[].body] | join("\\n") | contains("a.rs:1") or contains("b.rs:2")' "$ST/created-issues" >/dev/null \
+  || fail "closed Fixed and Not judged rows are not filed"
+
 # The P3 issue body and its PR link both redact host paths.
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"

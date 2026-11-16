@@ -110,20 +110,29 @@ finding_section_heading() {
   heading="$(printf '%s' "$line" | sed -E -e 's/^#+[[:space:]]*//' -e 's/:[[:space:]]*$//')"
   case "$heading" in
     Fixed|Open|New|"Not judged") printf '%s' "$heading" ;;
-    # The "at <ref>" form counts only as a heading (a # line or a trailing
-    # colon), so prose such as "Fixed at HEAD the P2 is still open." is not one.
+    # The revision form is a single ref token, optionally in a heading or
+    # followed by a colon; additional words are prose, even when colon-ended.
     "Fixed at "*|"Not judged at "*)
-      case "$line" in
-        \#*|*:) printf '%s' "${heading%% at *}" ;;
-        *) return 1 ;;
-      esac ;;
+      if [[ "$heading" =~ ^(Fixed|Not\ judged)\ at\ [^[:space:]]+$ ]]; then
+        case "$line" in
+          \#*|*:) printf '%s' "${heading%% at *}" ;;
+          *) return 1 ;;
+        esac
+      else
+        return 1
+      fi ;;
     *) return 1 ;;
   esac
 }
 
+section_is_closed() {
+  local section="$1"
+  [ "$section" = Fixed ] || [ "$section" = "Not judged" ]
+}
+
 finding_row_is_closed() {
   local section="$1" line="$2"
-  [ "$section" = Fixed ] || [ "$section" = "Not judged" ] || [[ "$line" == *": fixed." ]]
+  section_is_closed "$section" || [[ "$line" == *": fixed." ]]
 }
 
 # review_incomplete_rows FILE: populate the bare P0-P3 rows and whether an
@@ -145,7 +154,7 @@ review_incomplete_rows() {
 }
 
 parse_p3_verify_findings() {
-  local encoded="$1" output="$2" decoded="${2}.comment" line raw_line heading section="" count=0 decoded_ok=1 valid=1 result=1
+  local encoded="$1" output="$2" decoded="${2}.comment" line raw_line heading section="" count=0 decoded_ok=1 valid=1 result=1 previous_list_item=0 current_list_item wrapped_continuation
   if ! printf '%s' "$encoded" | base64 -D >"$decoded" 2>/dev/null; then
     if ! printf '%s' "$encoded" | base64 -d >"$decoded" 2>/dev/null; then
       decoded_ok=0
@@ -154,20 +163,37 @@ parse_p3_verify_findings() {
   if [ "$decoded_ok" = 1 ]; then
     : >"$output"
     while IFS= read -r raw_line || [ -n "$raw_line" ]; do
-      # Closed sections end at prose, but may contain blank lines, list items,
-      # and bare priority rows. Keep the raw line to distinguish list markers.
+      # A closed section ends at prose. Blank lines and list items preserve it,
+      # as does an indented non-marker continuation directly under a list item.
       line="$(normalize_finding_line "$raw_line")"
       if heading="$(finding_section_heading "$line")"; then
         section="$heading"
+        previous_list_item=0
         continue
       fi
-      if { [ "$section" = Fixed ] || [ "$section" = "Not judged" ]; } \
-        && [ -n "$(printf '%s' "$raw_line" | tr -d '[:space:]')" ] \
-        && ! printf '%s' "$raw_line" | grep -Eq '^[[:space:]]*(-|[+*]|[0-9]+[.)])[[:space:]]' \
+      current_list_item=0
+      if printf '%s' "$raw_line" | grep -Eq '^[[:space:]]*(-|[+*]|[0-9]+[.)])[[:space:]]'; then
+        current_list_item=1
+      fi
+      wrapped_continuation=0
+      if [ "$previous_list_item" = 1 ] && [ "$current_list_item" = 0 ] \
+        && [[ "$raw_line" =~ ^[[:space:]]+[^[:space:]] ]] \
         && ! [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then
+        # An indented priority row is never a continuation: it ends the
+        # closed section and is read as a finding (fail closed).
+        wrapped_continuation=1
+      fi
+      if section_is_closed "$section" \
+        && [ -n "$(printf '%s' "$raw_line" | tr -d '[:space:]')" ] \
+        && [ "$current_list_item" = 0 ] \
+        && [ "$wrapped_continuation" = 0 ]; then
         section=""
       fi
-      if finding_row_is_closed "$section" "$line"; then continue; fi
+      if finding_row_is_closed "$section" "$line"; then
+        # A continuation line keeps the list item open for the next wrapped line.
+        previous_list_item=$((current_list_item | wrapped_continuation))
+        continue
+      fi
       if [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then
         if [[ "$line" =~ ^P3[[:space:]]+[^[:space:]] ]]; then
           printf '%s\n' "$line" >>"$output"
@@ -177,6 +203,7 @@ parse_p3_verify_findings() {
           break
         fi
       fi
+      previous_list_item="$current_list_item"
     done < <(verify_section_lines <"$decoded")
     [ "$valid" = 1 ] && [ "$count" -gt 0 ] && result=0
   fi
