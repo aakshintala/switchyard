@@ -7,6 +7,8 @@
 #   [--fix-model <id>] [--verify-model <id>] [--collect-verify <job id>]
 #   --prompt appends orchestrator context to a fresh fix job; --resume requires --prompt.
 #   --collect-fix watches the stored job in the open fix slot and records its round.
+#   An abnormal end (ASK, BLOCKED, ERROR, STALLED, CANCELLED) closes the slot without a round.
+#   --resume is how such a job continues.
 #   --collect-verify recollects the verify recorded for the latest tkt-fix round without adding a round.
 #   --fix-model overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model.
 set -euo pipefail
@@ -14,6 +16,8 @@ set -euo pipefail
 usage() {
   echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify | --collect-verify <job id> | --verify [--since <sha>] --collect-fix <job id> | --no-verify --collect-fix <job id>) [--findings <file>] [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
   echo "  --collect-fix <job id> recollects the stored job in the open fix slot and continues the normal round; it does not dispatch another job." >&2
+  echo "  An abnormal end (ASK, BLOCKED, ERROR, STALLED, CANCELLED) closes the slot without a round." >&2
+  echo "  --resume is how such a job continues." >&2
   echo "  --collect-verify <job id> recollects only the verify recorded for the latest tkt-fix round; it does not add a round." >&2
   echo "  --fix-model <id> overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model." >&2
   exit 2
@@ -62,6 +66,9 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+# shellcheck disable=SC1090
+. "$script_dir/lib/job-refusal.sh"
+tkt_refuse_inside_delegate tkt-fix
 verify_section_lib="$script_dir/lib/verify-section.sh"
 if [ ! -r "$verify_section_lib" ]; then echo "tkt-fix: cannot read shared lib: $verify_section_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -279,6 +286,25 @@ if [ -n "$collect_fix_job" ]; then
   stored_collect_job="$(t get "job.$slot" 2>/dev/null || true)"
   if [ "$collect_fix_job" != "$stored_collect_job" ]; then
     echo "tkt-fix: --collect-fix $collect_fix_job is not the job of open slot $slot (job.$slot=$stored_collect_job)" >&2
+    closed_owner="$(slot_owner "$collect_fix_job" 2>/dev/null || true)"
+    closed_slot_number="${closed_owner#fix}"
+    case "$closed_slot_number" in ''|*[!0-9]*) closed_slot_number="" ;; esac
+    if [ -n "$closed_slot_number" ] && [ "$closed_slot_number" -le "$fixslot" ]; then
+      collect_record="$(bash "$script_dir/job-record" "$collect_fix_job" 2>/dev/null || true)"
+      if [ -n "$collect_record" ] && [ -r "$collect_record" ]; then
+        collect_status="$(jq -r '.result.status // .status // ""' "$collect_record" 2>/dev/null || true)"
+        case "$collect_status" in
+          NEEDS_CONTEXT)
+            printf 'tkt-fix: job %s belongs to closed slot %s (NEEDS_CONTEXT); resume it with: tkt-fix %s --resume %s --prompt <answer file>\n' \
+              "$collect_fix_job" "$closed_owner" "$state" "$collect_fix_job" >&2
+            ;;
+          ASK|BLOCKED|ERROR|STALLED|CANCELLED)
+            printf 'Recovery: triage owning slot %s before deciding whether it may start a fresh job; the slot remains owned by %s.\n' \
+              "$closed_owner" "$collect_fix_job" >&2
+            ;;
+        esac
+      fi
+    fi
     exit 2
   fi
   # A hand-set job.fix<n> alone does not prove a dispatch passed ROUND-LIMIT.

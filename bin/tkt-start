@@ -98,6 +98,9 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+# shellcheck disable=SC1090
+. "$script_dir/lib/job-refusal.sh"
+tkt_refuse_inside_delegate tkt-start
 pool_has_bare_model() {
   local model="$1" pool="$script_dir/lib/pool.md" line remaining before after
   [ -r "$pool" ] || return 1

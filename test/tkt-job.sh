@@ -1043,9 +1043,8 @@ setup_case self-watch-id
 reset_stub
 bash "$TKT_STATE" "$S" set job.lane stub-1 || fail "set self-watched job"
 bash "$TKT_STATE" "$S" set job.lane.prompt wrong-hash || fail "set mismatched prompt hash"
-DELEGATE_JOB_ID=stub-1
-DELEGATE_JOB_CHAIN=parent
-export DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
+DELEGATE_JOB_CHAIN="stub-1 parent"
+export DELEGATE_JOB_CHAIN
 run_job --slot lane --brief "$T/missing-brief.md"
 [ "$RC" -eq 2 ] || fail "self-watch id exits 2 (rc=$RC)"
 grep -Fq 'tkt-job: refusing to watch stub-1: it is the job this process runs inside (DELEGATE_JOB_ID/DELEGATE_JOB_CHAIN); report to your orchestrator instead' "$CDIR/stderr.txt" || fail "self-watch id names the orchestrator: $(cat "$CDIR/stderr.txt")"
@@ -1056,9 +1055,8 @@ grep -Fq 'tkt-job: refusing to watch stub-1: it is the job this process runs ins
 setup_case self-watch-chain
 reset_stub
 bash "$TKT_STATE" "$S" set job.lane A || fail "set chain job"
-DELEGATE_JOB_ID=outside
 DELEGATE_JOB_CHAIN="A B"
-export DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
+export DELEGATE_JOB_CHAIN
 run_job --slot lane
 [ "$RC" -eq 2 ] || fail "self-watch chain exits 2 (rc=$RC)"
 grep -Fq 'tkt-job: refusing to watch A:' "$CDIR/stderr.txt" || fail "self-watch chain refuses exact member A"
@@ -1068,9 +1066,8 @@ grep -Fq 'tkt-job: refusing to watch A:' "$CDIR/stderr.txt" || fail "self-watch 
 setup_case other-job
 reset_stub
 make_record stub-1 DONE 0 1 2 0
-DELEGATE_JOB_ID=some-parent
 DELEGATE_JOB_CHAIN="root some-parent"
-export DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
+export DELEGATE_JOB_CHAIN
 run_job --slot lane --brief "$T/brief.md"
 [ "$RC" -eq 0 ] || fail "a different job id dispatches and watches (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q '^run|' "$T/stub.log" || fail "a different job id dispatches"
@@ -1079,9 +1076,8 @@ grep -q '^watch|stub-1$' "$T/stub.log" || fail "a different job id watches the d
 # --- --resume refuses to resume a job in its own process chain ----------------
 setup_case self-resume
 reset_stub
-DELEGATE_JOB_ID=self-resume
-DELEGATE_JOB_CHAIN=parent
-export DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
+DELEGATE_JOB_CHAIN="parent self-resume"
+export DELEGATE_JOB_CHAIN
 run_job --slot lane --resume self-resume --prompt "$T/resume-prompt.md"
 [ "$RC" -eq 2 ] || fail "self-resume exits 2 (rc=$RC)"
 grep -Fq 'tkt-job: refusing to resume self-resume: it is the job this process runs inside (DELEGATE_JOB_ID/DELEGATE_JOB_CHAIN); report to your orchestrator instead' "$CDIR/stderr.txt" || fail "self-resume names the orchestrator: $(cat "$CDIR/stderr.txt")"
@@ -1098,9 +1094,8 @@ original_env64="$(printf 'FOO=dispatch' | jq -Rrs '@base64')"
 original_cmd64="$(printf 'echo inherited' | jq -Rrs '@base64')"
 bash "$TKT_STATE" "$S" journal "tkt-job gate slot=lane job=old-9 cmd64=$original_cmd64 env64=$original_env64" || fail "journal inherited gate"
 bash "$TKT_STATE" "$S" set env 'FOO=changed' || fail "change env before resume"
-DELEGATE_JOB_ID=some-parent
 DELEGATE_JOB_CHAIN="root some-parent"
-export DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
+export DELEGATE_JOB_CHAIN
 run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md"
 [ "$RC" -eq 0 ] || fail "resume exits 0"
 expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=1 gate=PASS log=*" "resume"

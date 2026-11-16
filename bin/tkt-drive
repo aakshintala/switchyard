@@ -11,11 +11,6 @@ usage() {
 [ $# -eq 1 ] || usage
 state="$1"
 
-if [ -n "${DELEGATE_JOB_ID:-}" ]; then
-  echo "tkt-drive: refusing to run inside delegate job $DELEGATE_JOB_ID: a lane never runs the orchestrator's tkt-* tools; report to your orchestrator instead; if this is a top-level session, DELEGATE_JOB_ID leaked from its launcher (#1748): report that to switchyard" >&2
-  exit 2
-fi
-
 script_path="$0"
 case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
 while [ -L "$script_path" ]; do
@@ -24,6 +19,9 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+# shellcheck disable=SC1090
+. "$script_dir/lib/job-refusal.sh"
+tkt_refuse_inside_delegate tkt-drive
 tkt_state="$script_dir/tkt-state"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tokens_lib="$script_dir/lib/plan-tokens.sh"
