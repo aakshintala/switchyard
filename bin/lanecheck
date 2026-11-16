@@ -2053,7 +2053,7 @@ for ticket, report in reported.items():
     try:
         pr_result = subprocess.run(
             ["gh", "pr", "view", pr, "--repo", repo, "--json", "state,mergedAt"],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
         pr_data = json.loads(pr_result.stdout) if pr_result.returncode == 0 else {}
     except Exception:
         pr_data = {}
