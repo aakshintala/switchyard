@@ -420,7 +420,7 @@ impl Out {
                 continue;
             };
             let name = value.get("command").and_then(|name| name.as_str());
-            if session_mode && matches!(name, Some("close") | Some("add_directory")) {
+            if session_mode && name == Some("add_directory") {
                 continue;
             }
             if !matches!(
@@ -2087,9 +2087,7 @@ fn spawn_turn_with(req: HubRequest, socket: PathBuf, hooks: Hooks) -> HubRun {
     }
 }
 
-/// Drive one supervised turn to a verdict. The client sends `prompt` itself
-/// so it knows the command id C, never answers an approval, and ends the
-/// session with `close`, reading `fiber_exited` as the verdict.
+/// One supervised turn through the hub: connect, start or resume, subscribe at `full`, send one `prompt`, read to `turn_completed`, `close`, then read `fiber_exited` as the verdict. There is no `bin` field: nothing here spawns anything.
 pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResult {
     let run = spawn_turn(req.clone(), socket.to_path_buf());
     (run.drive)(on)
@@ -9906,6 +9904,56 @@ mod tests {
         assert!(saw_turn);
         drop(link);
         let _ = join_fake(&path, rx);
+    }
+
+    #[test]
+    fn session_reconnect_resends_close_with_the_same_id_until_fiber_exits() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id":"s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq":0})));
+            let (close_id, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            srv.disconnect();
+            srv.accept_next();
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (re_sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&re_sub_id, serde_json::json!({"last_seq":0})));
+            let (resent_id, resent) = recv_id(srv);
+            assert_eq!(resent["command"], "close");
+            assert_eq!(resent_id, close_id);
+            srv.send(&accepted(&resent_id, serde_json::json!({})));
+            srv.send(&ev("fiber_exited", 1, serde_json::json!({"exit_code":0})));
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(matches!(
+            link.recv(Duration::from_secs(5)).unwrap(),
+            HubSessionLine::Ready(_)
+        ));
+        link.send(serde_json::json!({"id":"close-reconnect","command":"close","session_id":"s_1"}))
+            .unwrap();
+        let mut exited = false;
+        for _ in 0..12 {
+            if let HubSessionLine::Line(line) = link.recv(Duration::from_secs(5)).unwrap()
+                && serde_json::from_str::<serde_json::Value>(&line).unwrap()["kind"]
+                    == "fiber_exited"
+            {
+                exited = true;
+                break;
+            }
+        }
+        assert!(exited, "close did not end the session after reconnect");
+        drop(link);
+        let commands = join_fake(&path, rx);
+        assert_eq!(
+            received_commands(&commands),
+            ["start", "subscribe", "close", "subscribe", "close"]
+        );
     }
 
     #[test]
