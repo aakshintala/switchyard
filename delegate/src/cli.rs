@@ -37,7 +37,7 @@ pub(crate) const USAGE: &str =
        delegate doctor
        delegate version
        delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)
-       delegate session start --model muse/MODEL|PROVIDER/MODEL[:LEVEL] [--model-ruling URL] --brief FILE --inbox DIR [--json]
+       delegate session start --model muse/MODEL|fiber/PROVIDER/MODEL[:LEVEL]|PROVIDER/MODEL[:LEVEL] [--model-ruling URL] --brief FILE --inbox DIR [--json]
        delegate session status <id-or-prefix> [--json]
        delegate session send <id-or-prefix> TEXT|- [--json]
        delegate session logs <id-or-prefix> [--follow] [--json]

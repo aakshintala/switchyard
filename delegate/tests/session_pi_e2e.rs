@@ -411,7 +411,7 @@ fn start_launches_pi_with_the_brief_as_a_system_prompt() {
     );
     let id = session["id"].as_str().unwrap().to_string();
     assert_eq!(session["activeTurnId"], "pi-turn-1");
-    assert!(session["museSessionId"].is_null(), "{session}");
+    assert!(session["hostSessionId"].is_null(), "{session}");
 
     let pi_dir = h.root().join(&id).join("pi");
     let brief_path = h.root().join(&id).join("brief.txt");

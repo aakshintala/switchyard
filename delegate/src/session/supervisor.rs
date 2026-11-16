@@ -65,6 +65,9 @@ pub const MAX_TEXT: usize = 8 * 1024 * 1024;
 pub const MAX_LINE: usize = 6 * MAX_TEXT + 1024;
 const ACCEPT_POLL: Duration = Duration::from_millis(25);
 const KILL_REAP_WAIT: Duration = Duration::from_secs(2);
+/// The Fiber bridge's time past its own waits to send `close` with `now`
+/// and exit once Fiber has.
+const FIBER_EXIT_MARGIN: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct SupervisorConfig {
@@ -361,6 +364,9 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
     let bin = match kind {
         HostKind::Muse => config.muse_bin.clone(),
         HostKind::Pi => crate::backends::pi::resolve_bin(None),
+        HostKind::Fiber => std::env::current_exe()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "delegate".to_string()),
     };
     let mut command = match crate::util::captured_command(&bin) {
         Ok(command) => command,
@@ -382,6 +388,9 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
                 .strip_prefix("muse/")
                 .unwrap_or(&initial.model);
             command.args(msp::host_argv(model_id));
+        }
+        HostKind::Fiber => {
+            command.args(["session", "__fiber-host", "--model", &initial.model]);
         }
         HostKind::Pi => {
             let pi_dir = config.paths.dir(id).join("pi");
@@ -435,7 +444,7 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
             );
         }
     };
-    if kind == HostKind::Pi {
+    if matches!(kind, HostKind::Pi | HostKind::Fiber) {
         record_spawned_start(&config.paths.host_spawn_file(id), child.id());
     }
 
@@ -697,7 +706,7 @@ fn start_host(shared: &Arc<Shared>, initial: &State, brief: &str) -> Result<(), 
             "session could not start its first turn".into(),
         ));
     }
-    let session_id = shared.store.snapshot().muse_session_id.unwrap_or_default();
+    let session_id = shared.store.snapshot().host_session_id.unwrap_or_default();
     call(
         shared,
         "turn/start",
@@ -775,7 +784,7 @@ fn call_within(
 ) -> Result<Value, CallFailure> {
     let id = shared.next_request_id.fetch_add(1, Ordering::SeqCst);
     let line = match shared.kind {
-        HostKind::Muse => msp::request(id, method, params),
+        HostKind::Muse | HostKind::Fiber => msp::request(id, method, params),
         HostKind::Pi => match lock(&shared.wire).encode(id, method, &params) {
             Ok(line) => line,
             Err(message) => return Err(CallFailure::Failed(message)),
@@ -958,7 +967,7 @@ fn handle_host_line(shared: &Arc<Shared>, line: &str) {
     // One pi line carries a batch of events and responses; apply them in
     // order before reading the next line.
     let incoming = match shared.kind {
-        HostKind::Muse => vec![msp::parse_line(line)],
+        HostKind::Muse | HostKind::Fiber => vec![msp::parse_line(line)],
         HostKind::Pi => lock(&shared.wire).parse(line),
     };
     for item in incoming {
@@ -974,7 +983,7 @@ fn handle_host_line(shared: &Arc<Shared>, line: &str) {
                     return;
                 }
                 let refusal = match shared.kind {
-                    HostKind::Muse => msp::refusal(&id),
+                    HostKind::Muse | HostKind::Fiber => msp::refusal(&id),
                     HostKind::Pi => pi::refusal(&id),
                 };
                 let _ = shared.writer.send(WriterMessage::Write {
@@ -1012,7 +1021,7 @@ fn handle_response(shared: &Arc<Shared>, id: i64, result: Result<Value, RpcError
     {
         let session_id = session_id.to_string();
         if update_store(shared, |state| {
-            state.muse_session_id = Some(session_id);
+            state.host_session_id = Some(session_id);
             Vec::new()
         })
         .is_err()
@@ -1092,7 +1101,15 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
     let status_change = matches!(&event, HostEvent::StatusChanged { .. });
     let old_times = (before.updated_at, before.last_progress_at);
     if update_store(shared, |state| {
-        let lines = state::apply_event(state, &event, now_ms());
+        let mut lines = state::apply_event(state, &event, now_ms());
+        if matches!(event, HostEvent::TurnCompleted { .. })
+            && let Ok(raw) = serde_json::from_str::<Value>(raw_line)
+            && let Some(questions) = raw.get("params").and_then(|params| params.get("questions"))
+            && let Some(line) = lines.last_mut()
+            && let Some(object) = line.as_object_mut()
+        {
+            object.insert("questions".into(), questions.clone());
+        }
         if should_note_idle && state.status == Status::Idle && !state.pending_steers.is_empty() {
             // Keep the completing turn busy until replay_pending_steers makes
             // the decision while holding admission. No turn is active yet.
@@ -1437,7 +1454,7 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
         shared
             .store
             .snapshot()
-            .muse_session_id
+            .host_session_id
             .as_deref()
             .unwrap_or_default(),
         &turn_id,
@@ -1455,6 +1472,10 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
         return error_reply("failed", "could not write session state");
     }
     match call(shared, "turn/steer", params) {
+        Ok(result) if steer_ack_started_a_turn(shared.kind, &result) => {
+            drop(admission);
+            json!({"ok":true,"disposition":"started","commandId":command_id})
+        }
         Ok(_) => {
             drop(admission);
             let resolution =
@@ -1509,8 +1530,15 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
     }
 }
 
+/// The Fiber bridge answers a steer that Fiber took as the next turn's
+/// prompt with `started`, once that turn has begun. No other host's steer
+/// ack means that, so theirs wait for the steer to resolve.
+fn steer_ack_started_a_turn(kind: HostKind, result: &Value) -> bool {
+    kind == HostKind::Fiber && msp::ack_disposition(result) == Disposition::Started
+}
+
 fn start_turn(shared: &Arc<Shared>, text: &str) -> Value {
-    let session_id = shared.store.snapshot().muse_session_id.unwrap_or_default();
+    let session_id = shared.store.snapshot().host_session_id.unwrap_or_default();
     match call(
         shared,
         "turn/start",
@@ -1600,7 +1628,7 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
             // the cancelled completion instead of running after the abort.
             let _ = call(shared, "queue/clear", json!({}));
         }
-        let session_id = current.muse_session_id.unwrap_or_default();
+        let session_id = current.host_session_id.unwrap_or_default();
         let params = msp::turn_interrupt_params(&session_id, turn_id.as_deref(), now_ms());
         let _ = call(shared, "turn/interrupt", params);
     }
@@ -1645,11 +1673,8 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
     );
     if shared.store.snapshot().status != Status::Dead {
         close_host_stdin(shared);
-        if shared
-            .host
-            .wait_for_exit(shared.config.stop_grace)
-            .is_none()
-        {
+        let exit_wait = host_exit_wait(shared.kind, shared.config.stop_grace);
+        if shared.host.wait_for_exit(exit_wait).is_none() {
             shared.host.signal_group(libc::SIGTERM);
             if shared.host.wait_for_exit(shared.config.term_wait).is_none() {
                 shared.host.signal_group(libc::SIGKILL);
@@ -1787,6 +1812,18 @@ fn timeout_host(shared: &Shared, method: &str, message: &str) {
     );
 }
 
+/// How long a stop waits for the host to exit once its stdin is closed.
+/// The Fiber bridge waits the same grace for Fiber to exit, then sends
+/// `close` with `now` and waits `CLOSE_NOW_WAIT`. It gets both waits, and a
+/// margin for its own exit, before any signal cuts it short.
+fn host_exit_wait(kind: HostKind, stop_grace: Duration) -> Duration {
+    if kind == HostKind::Fiber {
+        stop_grace + crate::session::fiber::CLOSE_NOW_WAIT + FIBER_EXIT_MARGIN
+    } else {
+        stop_grace
+    }
+}
+
 fn terminate_host(host: &HostControl, term_wait: Duration) {
     host.signal_group(libc::SIGTERM);
     if host.wait_for_exit(term_wait).is_none() {
@@ -1897,6 +1934,8 @@ fn write_note_or_log(
     {
         fatal_write.store(true, Ordering::SeqCst);
     }
+    // Test-only: unset, this is one `env::var_os` call and nothing else.
+    super::signal_test_readiness("DELEGATE_SESSION_TEST_NOTE_WRITTEN");
 }
 
 fn update_store(
@@ -2115,6 +2154,30 @@ fn error_reply(code: &str, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_fiber_steer_ack_of_started_skips_the_steer_wait() {
+        let started = json!({"disposition":"started"});
+        assert!(steer_ack_started_a_turn(HostKind::Fiber, &started));
+        assert!(!steer_ack_started_a_turn(HostKind::Muse, &started));
+        assert!(!steer_ack_started_a_turn(HostKind::Pi, &started));
+        assert!(!steer_ack_started_a_turn(
+            HostKind::Fiber,
+            &json!({"disposition":"steered"})
+        ));
+    }
+
+    #[test]
+    fn a_fiber_stop_waits_out_the_bridge_close_and_close_now() {
+        let grace = Duration::from_millis(300);
+        let wait = host_exit_wait(HostKind::Fiber, grace);
+        assert!(
+            wait > grace + crate::session::fiber::CLOSE_NOW_WAIT,
+            "{wait:?}"
+        );
+        assert_eq!(host_exit_wait(HostKind::Muse, grace), grace);
+        assert_eq!(host_exit_wait(HostKind::Pi, grace), grace);
+    }
 
     #[test]
     fn expired_steer_resolution_is_not_reported_as_steered() {
