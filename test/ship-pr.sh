@@ -2607,7 +2607,7 @@ expect 0 "GraphQL 502 followed by an in-progress merge"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "in-progress merge eventually reports MERGED: [$OUT]"
 [ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 2 ] || fail "Merge already in progress does not trigger another merge call"
 grep -q 'waiting for the in-progress merge' <<<"$ERR" || fail "in-progress merge waiting line: [$ERR]"
-grep -q $'^gh pr\\tview\\t7\\t--repo\\tO/N\\t--json\\tstate,mergeCommit' "$ST/gh.log" || fail "in-progress path re-reads PR state: [$(cat "$ST/gh.log")]"
+grep -qF 'gh pr view 7 --repo O/N --json state,mergeCommit' "$ST/gh.log" || fail "in-progress path re-reads PR state: [$(cat "$ST/gh.log")]"
 
 setup
 printf 'Pull request cannot be merged: review required.' >"$ST/merge-fail-once"
