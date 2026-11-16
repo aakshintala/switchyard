@@ -48,4 +48,4 @@ source: model-deprecations <git short sha>
 - vendor: short reason
 ```
 
-Use one section per vendor with reported changes. Include the table header and separator in each vendor section. Always include `## skipped` at the end, even when no pages were skipped. For a `deprecated` row, the vendor cell must contain the retirement date and source URL. For `retired` and `new` rows, the vendor cell must contain the source URL. Do not invent models.dev values; use `-`.
+Use one section per vendor with reported changes. Vendor headings must be exactly one of `## anthropic`, `## openai`, `## gemini`, `## openrouter`, `## databricks`, all lowercase. Under `## skipped`, `- vendor: reason` lines must use those same lowercase ids. Include the table header and separator in each vendor section. Always include `## skipped` at the end, even when no pages were skipped. For a `deprecated` row, the vendor cell must contain the retirement date and source URL. For `retired` and `new` rows, the vendor cell must contain the source URL. Do not invent models.dev values; use `-`.
