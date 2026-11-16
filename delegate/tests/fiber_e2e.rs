@@ -1815,6 +1815,63 @@ fn fiber_session_stop_sends_close_now_when_fiber_does_not_exit_within_the_grace(
     );
 }
 
+/// With no supervisor, the bridge's stdin closing is its stop: it sends
+/// `close`, then `close` with `now` when Fiber does not exit in the grace.
+#[test]
+fn fiber_host_stdin_eof_closes_then_closes_now_without_a_supervisor() {
+    let (e, _brief, _inbox) = session_env();
+    let fake = e.fake_hub(1, move |_, session_id, conn| {
+        accept_start(conn, session_id);
+        subscribe_fresh(conn, session_id);
+        let close = conn.recv();
+        assert_eq!(close["command"], "close", "{close}");
+        assert_eq!(close["session_id"], session_id, "{close}");
+        assert!(close["args"]["now"].is_null(), "{close}");
+        conn.accept(&close, json!({}));
+        // No fiber_exited inside the grace.
+        let close_now = conn.recv();
+        assert_eq!(close_now["command"], "close", "{close_now}");
+        assert_eq!(close_now["args"]["now"], true, "{close_now}");
+        assert_ne!(close_now["id"], close["id"], "{close_now}");
+        conn.accept(&close_now, json!({}));
+        conn.send(event("fiber_exited", session_id, 1, json!({"exit_code":0})));
+    });
+    let requests = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"session/start","params":{"workspaceRoot":e.dir}}),
+    ]
+    .map(|request| format!("{request}\n"))
+    .concat();
+    let out = e.command_with_env(
+        &["session", "__fiber-host", "--model", MODEL],
+        Some(&requests),
+        true,
+        &[("DELEGATE_SESSION_GRACE_MS", "300")],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let replies: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(replies[1]["id"], 2, "{replies:?}");
+    assert_eq!(
+        replies[1]["result"]["session"]["sessionId"],
+        fake.session_id(),
+        "{replies:?}"
+    );
+    let commands = fake.finish();
+    assert_eq!(
+        command_names(&commands[0]),
+        ["start", "subscribe", "close", "close"]
+    );
+}
+
 /// A durable action line: the envelope carries `turn_id` and `action_id`
 /// (docs/events.md, "The envelope" and "Actions").
 fn action_event(kind: &str, session_id: &str, seq: u64, action_id: &str, payload: Value) -> Value {
