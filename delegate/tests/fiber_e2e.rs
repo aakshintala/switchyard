@@ -1528,16 +1528,15 @@ fn text_part(session_id: &str, seq: u64, action_id: &str, text: &str) -> Value {
 #[test]
 fn fiber_session_watch_returns_zero_at_idle_and_notes_the_inbox() {
     let turn = one_fiber_turn(|session_id| {
-        vec![
-            text_part(session_id, 2, "a_1", "DONE"),
-            turn_event(
-                "turn_completed",
-                session_id,
-                3,
-                "t1",
-                json!({"outcome":"completed"}),
-            ),
-        ]
+        let mut lines = reply(session_id, 2, "a_1", &["DONE"], "completed");
+        lines.push(turn_event(
+            "turn_completed",
+            session_id,
+            5,
+            "t1",
+            json!({"outcome":"completed"}),
+        ));
+        lines
     });
     assert_eq!(turn.watched["ok"], true, "{:#}", turn.watched);
     assert_eq!(turn.watched["session"]["status"], "idle");
@@ -1716,22 +1715,28 @@ fn fiber_session_start_accepts_both_lane_model_fiber_rows() {
 #[test]
 fn fiber_session_completed_turn_logs_the_last_message_with_its_status_line() {
     let turn = one_fiber_turn(|session_id| {
-        vec![
-            text_part(session_id, 2, "a_1", "Checked the failing test."),
-            text_part(
-                session_id,
-                3,
-                "a_2",
-                "The test passes now.\n\nSTATUS: DONE_WITH_CONCERNS",
-            ),
-            turn_event(
-                "turn_completed",
-                session_id,
-                4,
-                "t1",
-                json!({"outcome":"completed"}),
-            ),
-        ]
+        let mut lines = reply(
+            session_id,
+            2,
+            "a_1",
+            &["Checked the failing test."],
+            "completed",
+        );
+        lines.extend(reply(
+            session_id,
+            5,
+            "a_2",
+            &["The test passes now.\n\nSTATUS: DONE_WITH_CONCERNS"],
+            "completed",
+        ));
+        lines.push(turn_event(
+            "turn_completed",
+            session_id,
+            8,
+            "t1",
+            json!({"outcome":"completed"}),
+        ));
+        lines
     });
     let last_turn = &turn.watched["session"]["lastTurn"];
     assert_eq!(last_turn["terminal"], "completed", "{last_turn:#}");
@@ -1917,5 +1922,67 @@ fn fiber_session_logs_tool_calls_usage_and_the_prompt_from_fibers_event_kinds() 
             .as_str()
             .is_some_and(|text| text.starts_with("Reply with DONE.")),
         "{user:#}"
+    );
+}
+
+/// One reply: `assistant_message_started`, its text parts, then
+/// `assistant_message_completed`, all under the reply's `action_id`
+/// (docs/events.md, "text_completed").
+fn reply(session_id: &str, seq: u64, action_id: &str, parts: &[&str], outcome: &str) -> Vec<Value> {
+    let mut lines = vec![action_event(
+        "assistant_message_started",
+        session_id,
+        seq,
+        action_id,
+        json!({}),
+    )];
+    for (n, part) in parts.iter().enumerate() {
+        lines.push(text_part(session_id, seq + 1 + n as u64, action_id, part));
+    }
+    let mut completed = json!({"outcome": outcome});
+    if outcome == "failed" {
+        completed["error"] = json!({"code":"provider_error","message":"stream reset"});
+    }
+    lines.push(action_event(
+        "assistant_message_completed",
+        session_id,
+        seq + 1 + parts.len() as u64,
+        action_id,
+        completed,
+    ));
+    lines
+}
+
+#[test]
+fn fiber_session_logs_one_message_per_reply_and_none_for_a_failed_call() {
+    let turn = one_fiber_turn(|session_id| {
+        let mut lines = reply(session_id, 2, "a_1", &["Partial th"], "failed");
+        lines.extend(reply(
+            session_id,
+            5,
+            "a_2",
+            &["The test passes now.", "", "\n\nSTATUS: DONE"],
+            "completed",
+        ));
+        lines.push(turn_event(
+            "turn_completed",
+            session_id,
+            11,
+            "t1",
+            json!({"outcome":"completed"}),
+        ));
+        lines
+    });
+    let messages: Vec<&Value> = turn
+        .lines
+        .iter()
+        .filter(|line| line["kind"] == "message")
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:#?}");
+    assert_eq!(messages[0]["turnId"], "t1", "{:#}", messages[0]);
+    assert_eq!(
+        messages[0]["text"], "The test passes now.\n\nSTATUS: DONE",
+        "{:#}",
+        messages[0]
     );
 }

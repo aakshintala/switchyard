@@ -406,11 +406,13 @@ fn await_exit(
 }
 
 /// Maps Fiber hub events (docs/events.md) to MSP notifications. It keeps the
-/// little state the mapping needs: each tool call's name, which only
-/// `tool_call_requested` carries, and each model call's tokens, which MSP
-/// reports as session totals.
+/// little state the mapping needs: each open reply's text, each tool call's
+/// name, which only `tool_call_requested` carries, and each model call's
+/// tokens, which MSP reports as session totals.
 #[derive(Default)]
 struct EventMap {
+    /// The text parts of each open reply, joined in order, by `action_id`.
+    replies: HashMap<String, String>,
     tool_names: HashMap<String, String>,
     /// Prompt and output tokens per `generation_id`, the latest line's.
     usage: HashMap<String, (u64, u64)>,
@@ -450,17 +452,44 @@ impl EventMap {
                 }
                 notes
             }
-            "turn_completed" => vec![(
-                "turn/completed",
-                json!({"turnId":turn_id,"terminal":match p.get("outcome").and_then(Value::as_str).unwrap_or(""){"completed"=>"completed","interrupted"=>"cancelled",_=>"failed"},"error":msp_error(p.get("error")),"questions":p.get("questions")}),
-            )],
+            "turn_completed" => {
+                // A reply its turn ended without completing never became
+                // durable (docs/events.md, "text_completed").
+                self.replies.clear();
+                vec![(
+                    "turn/completed",
+                    json!({"turnId":turn_id,"terminal":match p.get("outcome").and_then(Value::as_str).unwrap_or(""){"completed"=>"completed","interrupted"=>"cancelled",_=>"failed"},"error":msp_error(p.get("error")),"questions":p.get("questions")}),
+                )]
+            }
             "steering_applied" => vec![user_message(turn_id, &p)],
-            // One text part of the assistant's reply. A part the provider sent
-            // with only opaque data has empty text and is no message.
-            "text_completed" if p.get("text").and_then(Value::as_str) != Some("") => vec![(
-                "item/completed",
-                json!({"item":{"kind":"agentMessage","turnId":turn_id,"text":p.get("text")}}),
-            )],
+            // A reply is its `assistant_message_started`, its text parts and
+            // its `assistant_message_completed`, all under its `action_id`.
+            // It is one message: its parts joined in order, as `fiber_exited`
+            // joins the final one. A failed model call is retried as a new
+            // action, so its text is no message; nor is a reply with none.
+            "assistant_message_started" => {
+                self.replies.insert(action_id.into(), String::new());
+                Vec::new()
+            }
+            "text_completed" => {
+                let part = p.get("text").and_then(Value::as_str).unwrap_or("");
+                self.replies
+                    .entry(action_id.into())
+                    .or_default()
+                    .push_str(part);
+                Vec::new()
+            }
+            "assistant_message_completed" => {
+                let text = self.replies.remove(action_id).unwrap_or_default();
+                if p.get("outcome").and_then(Value::as_str) != Some("completed") || text.is_empty()
+                {
+                    return Vec::new();
+                }
+                vec![(
+                    "item/completed",
+                    json!({"item":{"kind":"agentMessage","turnId":turn_id,"text":text}}),
+                )]
+            }
             // A tool call is its own action: its lines share its `action_id`,
             // and only `tool_call_requested` names the tool.
             "tool_call_requested" => {
@@ -712,22 +741,42 @@ mod tests {
     }
 
     #[test]
-    fn text_parts_become_agent_messages_and_an_empty_part_is_none() {
+    fn a_reply_becomes_one_agent_message_and_an_empty_reply_is_none() {
+        let line = |kind: &str, payload: Value| json!({"kind":kind,"turn_id":"t","action_id":"a","payload":payload});
+        let mut events = EventMap::default();
         let mut out = Vec::new();
-        EventMap::default().emit(
+        for event in [
+            line("assistant_message_started", json!({})),
+            line("text_completed", json!({"text":"Done."})),
+            line("text_completed", json!({"text":""})),
+            line("text_completed", json!({"text":"\n\nSTATUS: DONE"})),
+        ] {
+            events.emit(&mut out, &event);
+        }
+        assert!(out.is_empty(), "no message before the reply completes");
+        events.emit(
             &mut out,
-            &json!({"kind":"text_completed","turn_id":"t","payload":{"text":"STATUS: DONE"}}),
+            &line(
+                "assistant_message_completed",
+                json!({"outcome":"completed"}),
+            ),
         );
-        let line: Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(line["method"], "item/completed");
-        assert_eq!(line["params"]["item"]["kind"], "agentMessage");
-        assert_eq!(line["params"]["item"]["turnId"], "t");
-        assert_eq!(line["params"]["item"]["text"], "STATUS: DONE");
+        let message: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(message["method"], "item/completed");
+        assert_eq!(message["params"]["item"]["kind"], "agentMessage");
+        assert_eq!(message["params"]["item"]["turnId"], "t");
+        assert_eq!(message["params"]["item"]["text"], "Done.\n\nSTATUS: DONE");
         let mut out = Vec::new();
-        EventMap::default().emit(
-            &mut out,
-            &json!({"kind":"text_completed","turn_id":"t","payload":{"text":""}}),
-        );
+        for event in [
+            line("assistant_message_started", json!({})),
+            line("text_completed", json!({"text":""})),
+            line(
+                "assistant_message_completed",
+                json!({"outcome":"completed"}),
+            ),
+        ] {
+            events.emit(&mut out, &event);
+        }
         assert!(out.is_empty());
     }
 
