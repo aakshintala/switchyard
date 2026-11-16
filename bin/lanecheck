@@ -1686,6 +1686,43 @@ def state_path_for(ticket, args=""):
     return os.path.abspath(os.path.join(R, "fiber-" + ticket + ".state"))
 
 
+def state_path_from_args(args):
+    for token in process_tokens(args):
+        if token.endswith(".state"):
+            return os.path.abspath(token)
+    return None
+
+
+def state_job_ids(ticket):
+    values = state_values_for(state_path_for(ticket))
+    return {value.strip() for key, value in values.items()
+            if re.fullmatch(r"job\.[^.]+", key) and value.strip()}
+
+
+def job_belongs_to_ticket(job, ticket):
+    args = job.get("args", "")
+    watch = re.search(r"\bdelegate\s+watch\s+([A-Za-z0-9-]+)", args)
+    if watch:
+        return watch.group(1) in state_job_ids(ticket)
+    state_path = state_path_from_args(args)
+    if state_path:
+        return state_values_for(state_path).get("issue") == ticket
+    return str(job.get("ticket", "")) == ticket
+
+
+def job_reference(job, ticket, store):
+    args = job.get("args", "")
+    ticket_jobs = state_job_ids(ticket)
+    watch = re.search(r"\bdelegate\s+watch\s+([A-Za-z0-9-]+)", args)
+    if watch and watch.group(1) in ticket_jobs:
+        return watch.group(1)
+    if not ticket_jobs:
+        return None
+    started = [(job_started_at_ms(job_id, store) or -1, job_id)
+               for job_id in ticket_jobs]
+    return max(started)[1]
+
+
 def job_started_at_ms(job_id, store):
     try:
         if store == "mac" or LOCAL_BOX == "1":
@@ -1819,6 +1856,16 @@ def turn_details(lines, turn_id, ended_at):
             statuses, user_messages, assistant_messages)
 
 
+def archive_ids(content, path):
+    ids = set(re.findall(r"\b(?:(?:ADMIT|RULING)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*|WAKE)\b",
+                         content + " " + os.path.basename(path)))
+    # Flywheel rulings use the `RULING FW<n>` header rather than the
+    # `RULING-...` token format used by other answer archives. Read only the
+    # header so references to earlier FW rulings do not become answers.
+    ids.update(re.findall(r"(?im)^\s*RULING\s+(FW[0-9]+)\b", content))
+    return ids
+
+
 def missed_answers(ticket, start_ms, end_ms, user_messages, assistant_messages, inbox_reports):
     if start_ms is None or end_ms is None:
         return []
@@ -1831,12 +1878,7 @@ def missed_answers(ticket, start_ms, end_ms, user_messages, assistant_messages, 
             content = open(path, errors="replace", newline="").read()
         except OSError:
             continue
-        ids = set(re.findall(r"\b(?:(?:ADMIT|RULING)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*|WAKE)\b",
-                             content + " " + os.path.basename(path)))
-        # Flywheel rulings use the `RULING FW<n>` header rather than the
-        # `RULING-...` token format used by other answer archives. Read only
-        # the header so references to earlier FW rulings do not become answers.
-        ids.update(re.findall(r"(?im)^\s*RULING\s+(FW[0-9]+)\b", content))
+        ids = archive_ids(content, path)
         for answer_id in sorted(ids):
             delivered = [at for at, text in user_messages
                          if at is not None and start_ms <= at <= end_ms and answer_id in text]
@@ -1854,6 +1896,27 @@ def missed_answers(ticket, start_ms, end_ms, user_messages, assistant_messages, 
             if not acknowledged:
                 pending_answers.append((delivered_at, answer_id, path, content))
     return sorted(pending_answers, key=lambda answer: (answer[0], answer[1]))
+
+
+def hold_timestamp(ticket, rep, assistant_messages, lane_started):
+    held_at = []
+    fresh_report = bool(rep and (lane_started is None or rep[0] >= lane_started - 60))
+    if fresh_report and re.match(r"^\s*STATUS\s*:\s*HOLD\b", rep[1], re.I):
+        held_at.append(rep[0])
+    ack_sources = [rep[5]] if fresh_report and len(rep) > 5 else []
+    if assistant_messages:
+        message_at, message_text = assistant_messages[-1]
+        if (lane_started is None or message_at is None
+                or message_at >= (lane_started - 60) * 1000):
+            ack_sources.append(message_text)
+    acked = set()
+    for source in ack_sources:
+        acked.update(re.findall(r"(?im)^\s*ACK\s+(\S+)\s*$", source))
+    if acked:
+        for when, path, text in ruling_archives.get(ticket, []):
+            if acked.intersection(archive_ids(text, path)) and re.search(r"\bhold\b", text, re.I):
+                held_at.append(when)
+    return max(held_at) if held_at else None
 
 
 mac_processes, mac_ps_ok = read_processes(os.path.join(tmp, "mac-procs.txt"),
@@ -1993,34 +2056,53 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         processes, ps_ok = process_hosts[store]
         roots = root_pids(processes, (jid, sess), explicit_roots)
         tree_known = ps_ok and any(pid in processes for pid in roots)
-        current_jobs = descendant_jobs(processes, roots) if tree_known else []
+        current_jobs = []
+        if tree_known:
+            for job in descendant_jobs(processes, roots):
+                if state_path_from_args(job["args"]):
+                    if not job_belongs_to_ticket(job, n):
+                        continue
+                else:
+                    job["ticket"] = n
+                current_jobs.append(job)
         current_ids = {f"{job['pid']}:{job['cmd']}" for job in current_jobs}
         # A lane job whose parent changed since launch (backgrounded, then
         # re-parented when the turn ended) falls out of the descendant walk
         # but still names its ticket, which is how ABANDONED finds it (#1465).
-        # Track it by the same pid:command identity; PPID is not in the key.
+        # Track it by the exact state owner, never by any ticket number that
+        # happens to occur elsewhere in the process arguments.
         for pid, row in processes.items():
             command = job_command(row["args"])
+            candidate = {"args": row["args"]}
             if (command and f"{pid}:{command}" not in current_ids
-                    and n in re.findall(r"\b\d{3,5}\b", row["args"])):
+                    and job_belongs_to_ticket(candidate, n)):
                 current_jobs.append({"pid": pid, "cmd": command, "args": row["args"],
-                                     "elapsed": row["elapsed"]})
+                                     "elapsed": row["elapsed"], "ticket": n})
                 current_ids.add(f"{pid}:{command}")
         # A job already tracked for this lane stays running while its pid
-        # still runs the same command, wherever its parent is now.
+        # still runs the same command, wherever its parent is now. Older
+        # wake-state rows are checked too, so a previous cross-ticket match
+        # cannot turn into a finished-job wake after the process exits.
         for job in lane_record["running"]:
+            if not job_belongs_to_ticket(job, n):
+                continue
             row = processes.get(job.get("pid"))
             identity = f"{job.get('pid')}:{job.get('cmd')}"
             if (row and identity not in current_ids
                     and job_command(row["args"]) == job.get("cmd")):
                 current_jobs.append({"pid": row["pid"], "cmd": job["cmd"],
-                                     "args": row["args"], "elapsed": row["elapsed"]})
+                                     "args": row["args"], "elapsed": row["elapsed"],
+                                     "ticket": n})
                 current_ids.add(identity)
         current_jobs.sort(key=lambda job: (job["elapsed"], job["pid"]))
         if ps_ok:
-            finished = lane_record["finished"]
+            finished = [job for job in lane_record["finished"]
+                        if job_belongs_to_ticket(job, n)]
+            lane_record["finished"] = finished
             finished_ids = {f"{job.get('pid')}:{job.get('cmd')}" for job in finished}
             for job in lane_record["running"]:
+                if not job_belongs_to_ticket(job, n):
+                    continue
                 identity = f"{job.get('pid')}:{job.get('cmd')}"
                 if identity not in current_ids and identity not in finished_ids:
                     completed_job = dict(job)
@@ -2031,6 +2113,8 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
             lane_record["finished"] = [job for job in finished
                                        if f"{job.get('pid')}:{job.get('cmd')}" not in current_ids]
             lane_record["running"] = current_jobs
+        lane_record["finished"] = [job for job in lane_record["finished"]
+                                    if job_belongs_to_ticket(job, n)]
         finished_jobs = lane_record["finished"]
         turn_lines = None
         turn_started_ms = turn_ended_ms = None
@@ -2123,38 +2207,49 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                 and jobq[1] < lane_started - 60):
             jobq = None
         parked = n in waiting and (lane_started is None or waiting[n][1] >= lane_started - 60)
+        hold_at = hold_timestamp(n, rep, assistant_messages, lane_started)
+        held = hold_at is not None and ruled.get(n, 0.0) <= hold_at
         wake_done = False
-        if current_jobs and not parked and not jobq:
+        if held:
+            print(f"WAITING {n} hold")
+            wake_done = True
+        elif current_jobs and not parked and not jobq:
             job = current_jobs[0]
             print(f"WAITING {n} {host} {sess} {job['cmd']} {elapsed_label(job['elapsed'])}{blind}")
             wake_done = True
         elif not working and finished_jobs and deleg and not parked and not jobq:
             job = finished_jobs[0]
-            action_id = f"job:{job['pid']}:{job['cmd']}"
-            rc_text = job.get("rc") or "unknown"
-            reason = f"tracked {job['cmd']} finished (exit {rc_text})"
-            message = (f"WAKE (lanecheck): {job['cmd']} finished (exit {rc_text}). "
-                       "Read its output and continue from your brief. End with STATUS.")
-            result, count = send_action(lane_record, action_id, store, jid, message)
-            if result in ("sent", "failed"):
-                label = "WAKE" if result == "sent" else "WAKE-FAILED"
-                print(f"{label} {n} {host} {sess} — {reason} ({count}/2 this rolling hour)")
-                lane_record["finished"] = [saved for saved in lane_record["finished"]
-                                            if saved is not job]
-                save_wake_state()
+            job_id = job_reference(job, n, store)
+            if not job_id:
+                print(f"WAITING {n} {host} {sess} {job['cmd']} finished — "
+                      "no ticket-owned job id; no wake sent")
                 wake_done = True
-            elif result == "busy":
-                print(f"WAKE-DEFERRED {n} {host} {sess} — {reason}; action remains pending for the next lanecheck")
-                wake_done = True
-            elif result == "capped":
-                print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
-                      f"{reason}; wake cap reached ({count}/2 this rolling hour), "
-                      "so no message was sent")
-                wake_done = True
-            elif result == "unrecorded":
-                print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
-                      "could not record the wake cap, so no message was sent")
-                wake_done = True
+            else:
+                action_id = f"job:{job['pid']}:{job['cmd']}"
+                rc_text = job.get("rc") or "unknown"
+                reason = f"job {job_id} ({job['cmd']}) finished (exit {rc_text})"
+                message = (f"WAKE (lanecheck): ticket #{n}, {reason}. "
+                           f"Read job {job_id} output and continue from your brief. End with STATUS.")
+                result, count = send_action(lane_record, action_id, store, jid, message)
+                if result in ("sent", "failed"):
+                    label = "WAKE" if result == "sent" else "WAKE-FAILED"
+                    print(f"{label} {n} {host} {sess} — {reason} ({count}/2 this rolling hour)")
+                    lane_record["finished"] = [saved for saved in lane_record["finished"]
+                                                if saved is not job]
+                    save_wake_state()
+                    wake_done = True
+                elif result == "busy":
+                    print(f"WAKE-DEFERRED {n} {host} {sess} — {reason}; action remains pending for the next lanecheck")
+                    wake_done = True
+                elif result == "capped":
+                    print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                          f"{reason}; wake cap reached ({count}/2 this rolling hour), "
+                          "so no message was sent")
+                    wake_done = True
+                elif result == "unrecorded":
+                    print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                          "could not record the wake cap, so no message was sent")
+                    wake_done = True
         elif (not working and deleg and not parked and not jobq and not current_jobs
               and not finished_jobs and n not in pending and turn_lines is not None
               and tree_known and terminal == "completed" and last_turn_id):
@@ -2165,7 +2260,9 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                 _, answer_id, answer_path, answer_text = answers_to_resend[0]
                 action_id = "answer:" + os.path.basename(answer_path)
                 reason = f"missed steer {answer_id}"
-                result, count = send_action(lane_record, action_id, store, jid, answer_text)
+                message = (f"WAKE (lanecheck): ticket #{n}, ruling path {answer_path} "
+                           f"({reason}).\n\n{answer_text}")
+                result, count = send_action(lane_record, action_id, store, jid, message)
                 if result in ("sent", "failed"):
                     label = "WAKE" if result == "sent" else "WAKE-FAILED"
                     print(f"{label} {n} {host} {sess} — {reason} ({count}/2 this rolling hour)")
@@ -2186,7 +2283,8 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                 action_id = "silent:" + str(last_turn_id)
                 state_path = state_path_for(n)
                 reason = f"silent idle turn {last_turn_id}"
-                message = ("WAKE (lanecheck): your last turn ended with no STATUS line and no job running. "
+                message = (f"WAKE (lanecheck): ticket #{n}, session log turn {last_turn_id} "
+                           "ended with no STATUS line and no job running. "
                            f"Read {state_path} and your journal, take the next step your brief names, "
                            "and end every turn with a STATUS line. Never background a wait: run tkt-* "
                            "and delegate watch in the foreground.")
