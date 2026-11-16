@@ -17,6 +17,7 @@ cat >"$T/stub/ssh" <<'EOF'
 case " $* " in
   *"claude agents --json"*) cat "$STUBD/cagents" 2>/dev/null || echo '[]';;
   *"delegate session list --json"*) cat "$STUBD/dsess" 2>/dev/null || echo '{"ok":true,"sessions":[]}';;
+  *"delegate session stop "*) printf '%s\n' "$*" >>"$STUBD/stop-commands"; echo '{"ok":true}';;
   *"delegate session logs"*) cat "$STUBD/dlogs" 2>/dev/null || echo '{"ok":true,"lines":[]}';;
   *"delegate session send"*)
     if [ -f "$STUBD/send-busy" ]; then
@@ -61,7 +62,15 @@ case " $* " in
   *) exec /bin/ps "$@";;
 esac
 EOF
-for stub in gh file-claim inbox-watchers boxstale; do
+cat >"$T/stub/gh" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  cat "$STUBD/pr-view-${3:-}" 2>/dev/null || exit 1
+  exit 0
+fi
+exit 0
+EOF
+for stub in file-claim inbox-watchers boxstale; do
   cat >"$T/stub/$stub" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -99,7 +108,7 @@ lane() {
 set_session() {
   local sid="$1" ticket="$2" turn="$3" terminal="$4" ended="$5"
   cat >"$T/dsess" <<EOF
-{"ok":true,"sessions":[{"id":"$sid","status":"idle","turnCount":4,"hostPid":100,"supervisorPid":90,"lastTurn":{"turnId":"$turn","terminal":"$terminal","endedAt":$ended}}]}
+{"ok":true,"sessions":[{"id":"$sid","status":"idle","activeTurnId":null,"turnCount":4,"hostPid":100,"supervisorPid":90,"lastTurn":{"turnId":"$turn","terminal":"$terminal","endedAt":$ended}}]}
 EOF
 }
 set_logs() {
@@ -841,6 +850,45 @@ if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fq 'gh-ci wait pid 101 finis
   ok finished-owned-gh-ci-wait-without-id-still-wakes
 else
   fail "finished-owned-gh-ci-wait-without-id-still-wakes (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# A final RETIRE report plus a merged PR retires through lanecheck's existing
+# roster/stop path and never wakes the finished session. Without a merged PR,
+# the same report is not terminal and the idle session still gets its wake.
+r=$(newrun retire-merged-report)
+lane "$r" 8101 fiber-8101-build sid-8101
+printf 'repo=example/switchyard\nissue=8101\npr=81\n' >"$r/fiber-8101.state"
+printf 'RETIRE issue=8101\n' >"$r/fiber-8101-report.md"
+printf '{"state":"MERGED","mergedAt":"2026-11-15T00:00:00Z"}\n' >"$T/pr-view-81"
+set_session sid-8101 8101 turn-retire-merged completed 8100000
+set_logs turn-retire-merged 8000000 8100000 'The ship is complete.'
+set_processes
+: >"$T/stop-commands"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 8100); lrc=$?
+if [ "$lrc" -eq 0 ] && [ ! -s "$T/send-commands" ] \
+   && awk -F '\t' '$2 == "8101" { found=1 } END { exit !found }' "$r/roster-done" \
+   && grep -Fq 'delegate session stop sid-8101' "$T/stop-commands"; then
+  ok merged-retire-report-stops-without-wake
+else
+  fail "merged-retire-report-stops-without-wake (rc=$lrc out=$out retired=$(cat "$r/roster-done") stops=$(cat "$T/stop-commands") sends=$(cat "$T/send-commands"))"
+fi
+
+r=$(newrun retire-unmerged-report)
+lane "$r" 8102 fiber-8102-build sid-8102
+printf 'repo=example/switchyard\nissue=8102\npr=82\n' >"$r/fiber-8102.state"
+printf 'RETIRE issue=8102\n' >"$r/fiber-8102-report.md"
+printf '{"state":"OPEN","mergedAt":null}\n' >"$T/pr-view-82"
+set_session sid-8102 8102 turn-retire-unmerged completed 8200000
+set_logs turn-retire-unmerged 8100000 8200000 'The ship is complete.'
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 8200); lrc=$?
+if [ "$lrc" -eq 0 ] && [ "$(grep -c 'delegate session send' "$T/send-commands" || true)" -eq 1 ] \
+   && printf '%s\n' "$out" | grep -q '^WAKE 8102 '; then
+  ok unmerged-retire-report-still-wakes
+else
+  fail "unmerged-retire-report-still-wakes (rc=$lrc out=$out sends=$(cat "$T/send-commands"))"
 fi
 
 exit "$rc"
