@@ -115,6 +115,8 @@ chmod +x "$T/stub/gh" "$T/stub/ssh" "$T/stub/claude" "$T/stub/delegate" \
 cp "$T/stub/owner-ask" "$HOME/.local/bin/owner-ask"
 chmod +x "$HOME/.local/bin/owner-ask"
 export STUBD=$T PATH=$T/stub:$PATH
+mkdir -p "$T/jobs"
+export DELEGATE_JOBS_DIR=$T/jobs
 : > "$T/claim-rows"
 export BOX_SSH=$T/stub/ssh FW_DELEGATE=$T/stub/delegate \
   FW_FILE_CLAIM=$T/stub/file-claim FW_INBOX_WATCHERS=$T/stub/inbox-watchers \
@@ -148,6 +150,36 @@ future() { # print an ISO UTC timestamp N minutes from now, portably
 import datetime, sys
 stamp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=int(sys.argv[1]))
 print(stamp.strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+write_delegate_record() { # id start time in epoch milliseconds; synthetic, real-shaped job record
+  python3 - "$DELEGATE_JOBS_DIR/$1.json" "$1" "$2" <<'PY'
+import json, sys
+path, job_id, started = sys.argv[1:]
+started = int(started)
+record = {
+    "caller": "tkt-job",
+    "callerCommand": "tkt-job --slot fix1",
+    "callerCwd": "/repo",
+    "callerPid": 101,
+    "endedAtMs": started + 1000,
+    "result": {
+        "backend": "muse", "changeSet": {}, "costEstimated": False,
+        "costUsd": 0, "durationMs": 1000, "jobId": job_id,
+        "model": "muse/test", "sessionId": "fixture-session",
+        "status": "DONE", "text": "", "usage": {}
+    },
+    "resume": {
+        "addDirs": [], "backend": "muse", "cwd": "/repo", "gate": None,
+        "idleMs": 1000, "model": "muse/test", "sessionId": "fixture-session",
+        "toolIdleMs": 1000, "wallMs": 1000
+    },
+    "startedAtMs": started,
+    "status": "DONE",
+    "supervisorPid": 100
+}
+with open(path, "w") as f:
+    json.dump(record, f)
 PY
 }
 
@@ -1116,6 +1148,91 @@ ruling() { # ruling <run> <ticket> <n> [age in minutes, default 1]
   printf 'RULING-%s-%s\n' "$2" "$3" > "$f"
   age_file "$f" "${4:-1}"
 }
+epoch_stamp() {
+  python3 - "$1" <<'PY'
+import datetime, sys
+print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+churn_lane() { # ticket lane backed by a local delegate record store
+  printf '2020-01-01T00:00:00Z\t%s\tmac\tfiber-%s-build\t?\n' "$1" "$1" >>"$2/roster"
+  printf '[{"name":"fiber-%s-build","status":"idle"}]' "$1" >"$T/cagents"
+}
+churn_state() { # run ticket plan-verdict epoch rule-ok epoch
+  local run="$1" ticket="$2" plan_at="$3" rule_at="$4" state="$1/fiber-$2.state"
+  printf 'repo=example/switchyard\nissue=%s\nplan_verdict=ok\nplan_verdict_at=%s\n' \
+    "$ticket" "$(epoch_stamp "$plan_at")" >"$state"
+  printf '%s tkt-plan rule-ok by=surveyor ruling=RULING-%s-1 comment=1\n' \
+    "$(epoch_stamp "$rule_at")" "$ticket" >"${state%.state}.journal"
+}
+churn_job() { # run ticket slot id start epoch
+  local run="$1" ticket="$2" slot="$3" id="$4" started="$5" state="$1/fiber-$2.state"
+  printf 'job.%s=%s\n' "$slot" "$id" >>"$state"
+  write_delegate_record "$id" "$((started * 1000))"
+}
+churn_rulings() { # run ticket count archive epoch
+  local run="$1" ticket="$2" count="$3" started="$4" n path
+  mkdir -p "$run/rulings"
+  for ((n = 1; n <= count; n++)); do
+    path="$run/rulings/ruling-$ticket-$n.md"
+    printf 'RULING-%s-%s: continue.\n' "$ticket" "$n" >"$path"
+    python3 - "$path" "$started" <<'PY'
+import os, sys
+stamp = int(sys.argv[2])
+os.utime(sys.argv[1], (stamp, stamp))
+PY
+  done
+}
+run_churn() {
+  FW_RUN="$1" FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1
+}
+
+# Churn is an independent, read-only signal: either threshold fires alone.
+r=$(newrun churn-fix); churn_lane 1942 "$r"; churn_state "$r" 1942 1000 500
+for i in $(seq 1 9); do churn_job "$r" 1942 "fix$i" "job-1942-$i" 1001; done
+churn_job "$r" 1942 repair job-1942-repair 1001
+cp "$r/fiber-1942.state" "$T/churn-1942.state.before"
+cp "$r/fiber-1942.journal" "$T/churn-1942.journal.before"
+out=$(run_churn "$r"); grc=$?
+if [ "$grc" -eq 0 ] \
+  && printf '%s\n' "$out" | grep -Fqx 'CHURN 1942 fix=10 rulings=0 — hold after current step; flywheel and surveyor DECISION: finish, split or redo.' \
+  && cmp -s "$r/fiber-1942.state" "$T/churn-1942.state.before" \
+  && cmp -s "$r/fiber-1942.journal" "$T/churn-1942.journal.before" \
+  && ! printf '%s\n' "$out" | grep -q '^WAKE'; then
+  ok churn-fix-threshold-and-remedy
+else
+  fail "churn-fix-threshold-and-remedy (rc=$grc; $out)"
+fi
+
+r=$(newrun churn-rulings); churn_lane 1944 "$r"; churn_state "$r" 1944 500 1000
+churn_rulings "$r" 1944 15 1001
+out=$(run_churn "$r"); grc=$?
+if [ "$grc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx 'CHURN 1944 fix=0 rulings=15 — hold after current step; flywheel and surveyor DECISION: finish, split or redo.'; then
+  ok churn-ruling-threshold-alone
+else
+  fail "churn-ruling-threshold-alone (rc=$grc; $out)"
+fi
+
+r=$(newrun churn-below); churn_lane 1945 "$r"; churn_state "$r" 1945 500 1000
+for i in $(seq 1 9); do churn_job "$r" 1945 "fix$i" "job-1945-$i" 1001; done
+churn_rulings "$r" 1945 14 1001
+out=$(run_churn "$r"); grc=$?
+if [ "$grc" -eq 0 ] && ! printf '%s\n' "$out" | grep -q '^CHURN 1945 '; then
+  ok churn-both-thresholds-below
+else
+  fail "churn-both-thresholds-below (rc=$grc; $out)"
+fi
+
+# Events after the earlier settle marker but before the later one do not count.
+r=$(newrun churn-latest-settle); churn_lane 1946 "$r"; churn_state "$r" 1946 1000 2000
+for i in $(seq 1 10); do churn_job "$r" 1946 "fix$i" "job-1946-$i" 1500; done
+churn_rulings "$r" 1946 15 1500
+out=$(run_churn "$r"); grc=$?
+if [ "$grc" -eq 0 ] && ! printf '%s\n' "$out" | grep -q '^CHURN 1946 '; then
+  ok churn-counts-from-later-rule-ok-or-plan-verdict
+else
+  fail "churn-counts-from-later-rule-ok-or-plan-verdict (rc=$grc; $out)"
+fi
 
 # At the plan-to-build handoff, both sessions use one ticket state file. The
 # pending tkt-build belongs to the newer live build session, not the plan that
