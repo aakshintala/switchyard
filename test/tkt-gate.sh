@@ -1337,6 +1337,45 @@ grep -q '^OUTSIDE-PLAN ' <<<"$OUT" && fail "named dependency is not outside-plan
 [ "$(bash "$TKT_STATE" "$S" list outside_plan)" = "" ] || fail "named dependency is not recorded outside-plan"
 [ -f "$T/gate-ran" ] || fail "named dependency runs the gate"
 
+# --- a dotted key names its first segment: serde.workspace is serde ---
+dotted_dependency_case() {
+  prepare_cargo_case "$1"
+  cat >"$CDIR/plan.md" <<EOF
+# Plan
+
+## Files
+
+- \`base.txt\`
+- \`Cargo.toml\`$2
+
+## Gate
+
+\`gate-ok\`
+EOF
+  cat >"$WT/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde.workspace = true
+serde.features = ["derive"]
+"quoted.name".version = "1"
+EOF
+  git -C "$WT" add -- Cargo.toml
+  git -C "$WT" commit -qm "add dotted dependencies"
+  push_branch
+  run_gate
+}
+dotted_dependency_case dotted-named-dependency ' (adds `serde` and `quoted.name`)'
+[ "$RC" -eq 0 ] || fail "named dotted dependencies exit 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "named dotted dependencies"
+dotted_dependency_case dotted-unnamed-dependency ' (adds `serde`)'
+[ "$RC" -eq 1 ] || fail "unnamed quoted dotted dependency exits 1"
+expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "unnamed quoted dotted dependency"
+expect_stop_list_path Cargo.toml
+
 # --- Tasks can name the crate for a covered manifest too ---
 prepare_cargo_case covered-task-named-dependency
 cat >"$CDIR/plan.md" <<'EOF'
