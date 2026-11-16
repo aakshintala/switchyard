@@ -1654,7 +1654,6 @@ cmd_collect() {
           case "$role:$norm" in
             standards:"VERDICT standards: CHANGES"*) changes_verdict="1";;
             spec:"VERDICT spec: CHANGES"*) changes_verdict="1";;
-            overbuild:"VERDICT: CHANGES"*) changes_verdict="1";;
           esac
           continue
         fi
