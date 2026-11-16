@@ -68,7 +68,13 @@ units="$("${BOX_SYSTEMCTL:-systemctl}" --user list-units --type=service --state=
 for unit in $units; do
   pid="$("${BOX_SYSTEMCTL:-systemctl}" --user show -p MainPID --value "$unit" 2>/dev/null)" || pid=
   case "$pid" in '' | 0 | *[!0-9]*) continue ;; esac
-  if ! tr '\0' '\n' <"$proc_root/$pid/environ" 2>/dev/null | grep -Fqx "TMPDIR=$lanes_tmp"; then
+  # The pid can exit after `systemctl show`, or its environ can be unreadable;
+  # that says nothing about TMPDIR, so name it without restart advice (#1977).
+  if ! environ="$(tr '\0' '\n' <"$proc_root/$pid/environ" 2>/dev/null)"; then
+    echo "box-setup: could not read the environment of $unit (pid $pid); skipped its TMPDIR check"
+    continue
+  fi
+  if ! grep -Fqx "TMPDIR=$lanes_tmp" <<<"$environ"; then
     echo "box-setup: warning: $unit (pid $pid) runs without TMPDIR=$lanes_tmp;" \
       "run 'systemctl --user restart $unit' when no Fiber jobs are running"
   fi
