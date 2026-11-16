@@ -173,6 +173,18 @@ ok 'hub without lanes TMPDIR: gives the restart and when to run it' \
   has_both "$out" "systemctl --user restart fiber-hub-stale.service" 'when no Fiber jobs are running'
 ok 'hub without lanes TMPDIR: never restarts anything itself' no_restart
 
+# A hub whose environ can't be read (#1977): the pid exited after `systemctl
+# show`, so its /proc entry is gone. Say so, and give no restart advice.
+fake_service fiber-hub-gone.service 303 LANG=C
+rm -rf "${PROC_ROOT:?}/303"
+run_setup
+ok 'hub with unreadable environ: setup exits successfully' test "$code" -eq 0
+ok 'hub with unreadable environ: says it could not read it' \
+  has "$out" 'could not read the environment of fiber-hub-gone.service (pid 303)'
+ok 'hub with unreadable environ: no restart advice for it' \
+  test "$(printf '%s\n' "$out" | grep -c 'restart fiber-hub-gone.service')" = 0
+ok 'hub with unreadable environ: only the stale hub warns' test "$(printf '%s\n' "$out" | grep -c 'warning')" = 1
+
 if [ "$rc" = 0 ]; then
   echo "box-setup: $n ok"
 else
