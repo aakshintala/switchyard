@@ -697,7 +697,7 @@ fn start_host(shared: &Arc<Shared>, initial: &State, brief: &str) -> Result<(), 
             "session could not start its first turn".into(),
         ));
     }
-    let session_id = shared.store.snapshot().muse_session_id.unwrap_or_default();
+    let session_id = shared.store.snapshot().host_session_id.unwrap_or_default();
     call(
         shared,
         "turn/start",
@@ -1012,7 +1012,7 @@ fn handle_response(shared: &Arc<Shared>, id: i64, result: Result<Value, RpcError
     {
         let session_id = session_id.to_string();
         if update_store(shared, |state| {
-            state.muse_session_id = Some(session_id);
+            state.host_session_id = Some(session_id);
             Vec::new()
         })
         .is_err()
@@ -1437,7 +1437,7 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
         shared
             .store
             .snapshot()
-            .muse_session_id
+            .host_session_id
             .as_deref()
             .unwrap_or_default(),
         &turn_id,
@@ -1510,7 +1510,7 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
 }
 
 fn start_turn(shared: &Arc<Shared>, text: &str) -> Value {
-    let session_id = shared.store.snapshot().muse_session_id.unwrap_or_default();
+    let session_id = shared.store.snapshot().host_session_id.unwrap_or_default();
     match call(
         shared,
         "turn/start",
@@ -1600,7 +1600,7 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
             // the cancelled completion instead of running after the abort.
             let _ = call(shared, "queue/clear", json!({}));
         }
-        let session_id = current.muse_session_id.unwrap_or_default();
+        let session_id = current.host_session_id.unwrap_or_default();
         let params = msp::turn_interrupt_params(&session_id, turn_id.as_deref(), now_ms());
         let _ = call(shared, "turn/interrupt", params);
     }
