@@ -1,6 +1,7 @@
 use crate::backends::fiber::hub::{self, HubSession, HubSessionLine};
 use crate::session::msp;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -48,6 +49,7 @@ pub fn main(args: &[String]) -> i32 {
         }
     });
     let mut idle_exited = false;
+    let mut events = EventMap::default();
     loop {
         if let Some(link) = session.as_ref() {
             while let Some(message) = link.try_recv() {
@@ -67,10 +69,10 @@ pub fn main(args: &[String]) -> i32 {
                                 if idle_exited {
                                     emit_idle_exit(&mut stdout);
                                 } else {
-                                    emit_event(&mut stdout, &event);
+                                    events.emit(&mut stdout, &event);
                                 }
                             } else {
-                                emit_event(&mut stdout, &event);
+                                events.emit(&mut stdout, &event);
                             }
                         }
                     }
@@ -153,6 +155,7 @@ pub fn main(args: &[String]) -> i32 {
                 match await_disposition(
                     link,
                     &mut stdout,
+                    &mut events,
                     &command_id,
                     id,
                     &mut running,
@@ -170,6 +173,7 @@ pub fn main(args: &[String]) -> i32 {
                             match await_disposition(
                                 link,
                                 &mut stdout,
+                                &mut events,
                                 &command_id,
                                 id,
                                 &mut running,
@@ -250,10 +254,10 @@ pub fn main(args: &[String]) -> i32 {
                     if idle_exited {
                         emit_idle_exit(&mut stdout);
                     } else {
-                        emit_event(&mut stdout, &event);
+                        events.emit(&mut stdout, &event);
                     }
                 } else {
-                    emit_event(&mut stdout, &event);
+                    events.emit(&mut stdout, &event);
                 }
             }
         }
@@ -261,10 +265,10 @@ pub fn main(args: &[String]) -> i32 {
             let close_id = msp::uuid7(now_ms());
             let raw = serde_json::json!({"id":close_id,"command":"close","session_id":session_id});
             let _ = link.send(raw);
-            if !await_exit(link, &mut stdout, &mut running, stop_grace()) {
+            if !await_exit(link, &mut stdout, &mut events, &mut running, stop_grace()) {
                 let now = msp::uuid7(now_ms());
                 let _ = link.send(serde_json::json!({"id":now,"command":"close","session_id":session_id,"args":{"now":true}}));
-                let _ = await_exit(link, &mut stdout, &mut running, CLOSE_NOW_WAIT);
+                let _ = await_exit(link, &mut stdout, &mut events, &mut running, CLOSE_NOW_WAIT);
             }
         }
     }
@@ -279,6 +283,7 @@ fn should_steer(method: &str, running: bool) -> bool {
 fn await_disposition(
     link: &HubSession,
     out: &mut impl Write,
+    events: &mut EventMap,
     command_id: &str,
     rpc_id: i64,
     running: &mut bool,
@@ -306,7 +311,7 @@ fn await_disposition(
                         .any(|i| i.get("command_id").and_then(Value::as_str) == Some(command_id))
                 });
             if found {
-                emit_event(out, &v);
+                events.emit(out, &v);
                 *running = true;
                 return Ok(("started".into(), envelope_turn_id(&v)));
             }
@@ -314,6 +319,9 @@ fn await_disposition(
         if matches!(kind, "steering_applied" | "steering_queue")
             && payload.get("command_id").and_then(Value::as_str) == Some(command_id)
         {
+            // An applied steer is the user message the supervisor drops its
+            // pending steer on; a queued one is not delivered yet.
+            events.emit(out, &v);
             return Ok(("steered".into(), envelope_turn_id(&v)));
         }
         if kind == "command_rejected"
@@ -337,7 +345,7 @@ fn await_disposition(
         if kind == "turn_completed" {
             *running = false;
         }
-        emit_event(out, &v);
+        events.emit(out, &v);
         let _ = (rpc_id, session_id, text);
     }
 }
@@ -362,6 +370,7 @@ fn stop_grace() -> Duration {
 fn await_exit(
     link: &HubSession,
     out: &mut impl Write,
+    events: &mut EventMap,
     running: &mut bool,
     grace: Duration,
 ) -> bool {
@@ -383,7 +392,7 @@ fn await_exit(
                 if v.get("kind").and_then(Value::as_str) == Some("turn_completed") {
                     *running = false;
                 }
-                emit_event(out, &v);
+                events.emit(out, &v);
             }
             Ok(HubSessionLine::Ready(_)) => continue,
             Ok(HubSessionLine::Lost(error)) => {
@@ -396,45 +405,130 @@ fn await_exit(
     }
 }
 
-fn emit_event(out: &mut impl Write, event: &Value) {
-    let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
-    let p = event.get("payload").cloned().unwrap_or(Value::Null);
-    // Fiber's envelope carries `turn_id`; the payload does not.
-    let turn_id = event.get("turn_id");
-    let (method, params) = match kind {
-        "turn_started" => ("turn/started", json!({"turnId":turn_id})),
-        "turn_completed" => (
-            "turn/completed",
-            json!({"turnId":turn_id,"terminal":match p.get("outcome").and_then(Value::as_str).unwrap_or(""){"completed"=>"completed","interrupted"=>"cancelled",_=>"failed"},"error":msp_error(p.get("error")),"questions":p.get("questions")}),
-        ),
-        "user_message" => (
-            "item/completed",
-            json!({"item":{"kind":"userMessage","turnId":turn_id,"text":p.get("text"),"commandId":p.get("command_id")}}),
-        ),
-        // One text part of the assistant's reply. A part the provider sent
-        // with only opaque data has empty text and is no message.
-        "text_completed" if p.get("text").and_then(Value::as_str) != Some("") => (
-            "item/completed",
-            json!({"item":{"kind":"agentMessage","turnId":turn_id,"text":p.get("text")}}),
-        ),
-        "tool_started" => (
-            "item/started",
-            json!({"item":{"kind":"toolCall","turnId":turn_id,"tool":p.get("tool"),"callId":p.get("call_id")}}),
-        ),
-        "tool_completed" => (
-            "item/completed",
-            json!({"item":{"kind":"toolCall","turnId":turn_id,"tool":p.get("tool"),"callId":p.get("call_id"),"status":p.get("status")}}),
-        ),
-        "token_usage" => ("session/tokenUsage", json!({"cumulative":p})),
-        "fiber_exited" => ("session/closed", json!({"reason":"stopped"})),
-        _ => return,
-    };
-    let _ = writeln!(
-        out,
-        "{}",
-        json!({"jsonrpc":"2.0","method":method,"params":params})
-    );
-    let _ = out.flush();
+/// Maps Fiber hub events (docs/events.md) to MSP notifications. It keeps the
+/// little state the mapping needs: each tool call's name, which only
+/// `tool_call_requested` carries, and each model call's tokens, which MSP
+/// reports as session totals.
+#[derive(Default)]
+struct EventMap {
+    tool_names: HashMap<String, String>,
+    /// Prompt and output tokens per `generation_id`, the latest line's.
+    usage: HashMap<String, (u64, u64)>,
+}
+
+impl EventMap {
+    fn emit(&mut self, out: &mut impl Write, event: &Value) {
+        for (method, params) in self.notifications(event) {
+            let _ = writeln!(
+                out,
+                "{}",
+                json!({"jsonrpc":"2.0","method":method,"params":params})
+            );
+        }
+        let _ = out.flush();
+    }
+
+    fn notifications(&mut self, event: &Value) -> Vec<(&'static str, Value)> {
+        let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
+        let p = event.get("payload").cloned().unwrap_or(Value::Null);
+        // Fiber's envelope carries `turn_id` and `action_id`; the payload does not.
+        let turn_id = event.get("turn_id");
+        let action_id = event.get("action_id").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            // The turn's input names the messages that started it.
+            "turn_started" => {
+                let mut notes = vec![("turn/started", json!({"turnId":turn_id}))];
+                for item in p
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if item.get("type").and_then(Value::as_str) == Some("message") {
+                        notes.push(user_message(turn_id, item));
+                    }
+                }
+                notes
+            }
+            "turn_completed" => vec![(
+                "turn/completed",
+                json!({"turnId":turn_id,"terminal":match p.get("outcome").and_then(Value::as_str).unwrap_or(""){"completed"=>"completed","interrupted"=>"cancelled",_=>"failed"},"error":msp_error(p.get("error")),"questions":p.get("questions")}),
+            )],
+            "steering_applied" => vec![user_message(turn_id, &p)],
+            // One text part of the assistant's reply. A part the provider sent
+            // with only opaque data has empty text and is no message.
+            "text_completed" if p.get("text").and_then(Value::as_str) != Some("") => vec![(
+                "item/completed",
+                json!({"item":{"kind":"agentMessage","turnId":turn_id,"text":p.get("text")}}),
+            )],
+            // A tool call is its own action: its lines share its `action_id`,
+            // and only `tool_call_requested` names the tool.
+            "tool_call_requested" => {
+                let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+                self.tool_names.insert(action_id.into(), name.into());
+                Vec::new()
+            }
+            "tool_call_started" => vec![(
+                "item/started",
+                json!({"item":{"kind":"toolCall","turnId":turn_id,"tool":self.tool_name(action_id),"callId":action_id}}),
+            )],
+            "tool_call_completed" => {
+                let tool = self.tool_names.remove(action_id).unwrap_or_default();
+                vec![(
+                    "item/completed",
+                    json!({"item":{"kind":"toolCall","turnId":turn_id,"tool":tool,"callId":action_id,"status":p.get("status")}}),
+                )]
+            }
+            "usage_recorded" => {
+                let Some(generation_id) = p.get("generation_id").and_then(Value::as_str) else {
+                    return Vec::new();
+                };
+                let tokens = p.get("tokens").unwrap_or(&Value::Null);
+                let count = |key: &str| tokens.get(key).and_then(Value::as_u64).unwrap_or(0);
+                let cache_write: u64 = tokens
+                    .get("cache_write")
+                    .and_then(Value::as_object)
+                    .map(|classes| classes.values().filter_map(Value::as_u64).sum())
+                    .unwrap_or(0);
+                let prompt = count("input")
+                    .saturating_add(count("cache_read"))
+                    .saturating_add(cache_write);
+                self.usage
+                    .insert(generation_id.into(), (prompt, count("output")));
+                let (prompt, output) = self.usage.values().fold((0u64, 0u64), |sum, call| {
+                    (sum.0.saturating_add(call.0), sum.1.saturating_add(call.1))
+                });
+                vec![(
+                    "session/tokenUsage",
+                    json!({"cumulative":{"promptTokens":prompt,"outputTokens":output,"totalTokens":prompt.saturating_add(output)}}),
+                )]
+            }
+            "fiber_exited" => vec![("session/closed", json!({"reason":"stopped"}))],
+            _ => Vec::new(),
+        }
+    }
+
+    fn tool_name(&self, action_id: &str) -> String {
+        self.tool_names.get(action_id).cloned().unwrap_or_default()
+    }
+}
+
+/// A message from a `turn_started` input item or a `steering_applied` line:
+/// its text parts, in order, and the `command_id` that sent it
+/// (docs/events.md, "Where a message came from").
+fn user_message(turn_id: Option<&Value>, message: &Value) -> (&'static str, Value) {
+    let text: String = message
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect();
+    (
+        "item/completed",
+        json!({"item":{"kind":"userMessage","turnId":turn_id,"text":text,"commandId":message.get("command_id")}}),
+    )
 }
 
 /// Fiber's `error` object is `{code, message}` (docs/events.md, "error");
@@ -497,8 +591,17 @@ mod tests {
             json!({"kind":"command_rejected","payload":{"command_id":"c1","code":"busy"}}),
         );
         let mut output = Vec::new();
-        let result =
-            await_disposition(&link, &mut output, "c1", 1, &mut false, false, "s1", "text");
+        let result = await_disposition(
+            &link,
+            &mut output,
+            &mut EventMap::default(),
+            "c1",
+            1,
+            &mut false,
+            false,
+            "s1",
+            "text",
+        );
         assert_eq!(result.unwrap().0, "retry-steer");
     }
 
@@ -508,7 +611,17 @@ mod tests {
             json!({"kind":"command_rejected","payload":{"command_id":"c1","code":"stale_request","message":"idle"}}),
         );
         let mut output = Vec::new();
-        let result = await_disposition(&link, &mut output, "c1", 1, &mut false, true, "s1", "text");
+        let result = await_disposition(
+            &link,
+            &mut output,
+            &mut EventMap::default(),
+            "c1",
+            1,
+            &mut false,
+            true,
+            "s1",
+            "text",
+        );
         assert!(result.unwrap_err().1.contains("stale_request"));
     }
 
@@ -518,14 +631,79 @@ mod tests {
             json!({"kind":"turn_started","turn_id":"t2","payload":{"input":[{"command_id":"c1"}]}}),
         );
         let mut output = Vec::new();
-        let result = await_disposition(&link, &mut output, "c1", 1, &mut false, true, "s1", "text");
+        let result = await_disposition(
+            &link,
+            &mut output,
+            &mut EventMap::default(),
+            "c1",
+            1,
+            &mut false,
+            true,
+            "s1",
+            "text",
+        );
         assert_eq!(result.unwrap(), ("started".into(), "t2".into()));
+    }
+
+    #[test]
+    fn an_applied_steer_is_logged_as_its_user_message_before_the_reply() {
+        let link = link_with_line(
+            json!({"kind":"steering_applied","turn_id":"t1","seq":4,"payload":{"content":[{"type":"text","text":"also run clippy"}],"source":"driver","command_id":"c1"}}),
+        );
+        let mut output = Vec::new();
+        let result = await_disposition(
+            &link,
+            &mut output,
+            &mut EventMap::default(),
+            "c1",
+            1,
+            &mut true,
+            true,
+            "s1",
+            "also run clippy",
+        );
+        assert_eq!(result.unwrap(), ("steered".into(), "t1".into()));
+        let line: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            line["params"]["item"],
+            json!({"kind":"userMessage","turnId":"t1","text":"also run clippy","commandId":"c1"})
+        );
+    }
+
+    #[test]
+    fn a_turn_started_by_a_steer_logs_the_steer_as_a_user_message() {
+        let link = link_with_line(
+            json!({"kind":"turn_started","turn_id":"t2","seq":9,"payload":{"input":[{"type":"message","command_id":"c1","content":[{"type":"text","text":"one more thing"}],"source":"driver"}]}}),
+        );
+        let mut output = Vec::new();
+        let result = await_disposition(
+            &link,
+            &mut output,
+            &mut EventMap::default(),
+            "c1",
+            1,
+            &mut false,
+            true,
+            "s1",
+            "one more thing",
+        );
+        assert_eq!(result.unwrap(), ("started".into(), "t2".into()));
+        let lines: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["method"], "turn/started");
+        assert_eq!(
+            lines[1]["params"]["item"],
+            json!({"kind":"userMessage","turnId":"t2","text":"one more thing","commandId":"c1"})
+        );
     }
 
     #[test]
     fn outcome_mapping_keeps_the_msp_terminal_vocabulary() {
         let mut out = Vec::new();
-        emit_event(
+        EventMap::default().emit(
             &mut out,
             &json!({"kind":"turn_completed","turn_id":"t","payload":{"outcome":"interrupted"}}),
         );
@@ -536,7 +714,7 @@ mod tests {
     #[test]
     fn text_parts_become_agent_messages_and_an_empty_part_is_none() {
         let mut out = Vec::new();
-        emit_event(
+        EventMap::default().emit(
             &mut out,
             &json!({"kind":"text_completed","turn_id":"t","payload":{"text":"STATUS: DONE"}}),
         );
@@ -546,7 +724,7 @@ mod tests {
         assert_eq!(line["params"]["item"]["turnId"], "t");
         assert_eq!(line["params"]["item"]["text"], "STATUS: DONE");
         let mut out = Vec::new();
-        emit_event(
+        EventMap::default().emit(
             &mut out,
             &json!({"kind":"text_completed","turn_id":"t","payload":{"text":""}}),
         );

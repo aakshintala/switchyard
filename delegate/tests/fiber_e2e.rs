@@ -527,9 +527,10 @@ fn fiber_session_start_and_stop_use_the_hub_bridge() {
         conn.send(turn_event("turn_started", session_id, 1, "t1", json!({"input":[{"command_id":prompt["id"],"content":[{"type":"text","text":"Reply with DONE."}],"source":"driver","type":"message"}]})));
         let steer = conn.recv();
         assert_eq!(steer["command"], "steer");
-        conn.send(turn_event("steering_applied", session_id, 2, "t1", json!({"command_id":steer["id"]})));
-        conn.send(turn_event("user_message", session_id, 3, "t1", json!({"text":"change text","command_id":steer["id"]})));
-        conn.send(turn_event("turn_completed", session_id, 4, "t1", json!({"outcome":"completed"})));
+        // docs/events.md, "steering_applied": the message as the turn
+        // received it, with the keys of "Where a message came from".
+        conn.send(turn_event("steering_applied", session_id, 2, "t1", json!({"content":[{"type":"text","text":"change text"}],"source":"driver","command_id":steer["id"]})));
+        conn.send(turn_event("turn_completed", session_id, 3, "t1", json!({"outcome":"completed"})));
         let mut stop_command = conn.recv();
         if stop_command["command"] == "cancel" {
             conn.accept(&stop_command, json!({}));
@@ -1806,5 +1807,115 @@ fn fiber_session_stop_sends_close_now_when_fiber_does_not_exit_within_the_grace(
     assert_eq!(
         command_names(&commands[0]),
         ["start", "subscribe", "prompt", "close", "close"]
+    );
+}
+
+/// A durable action line: the envelope carries `turn_id` and `action_id`
+/// (docs/events.md, "The envelope" and "Actions").
+fn action_event(kind: &str, session_id: &str, seq: u64, action_id: &str, payload: Value) -> Value {
+    let mut value = turn_event(kind, session_id, seq, "t1", payload);
+    value["action_id"] = json!(action_id);
+    value
+}
+
+fn usage_recorded(session_id: &str, seq: u64, generation_id: &str, tokens: Value) -> Value {
+    action_event(
+        "usage_recorded",
+        session_id,
+        seq,
+        "a_1",
+        json!({"generation_id":generation_id,"model":"synthetic/model-a","tokens":tokens,"input_bytes":2048,"cost":null}),
+    )
+}
+
+#[test]
+fn fiber_session_logs_tool_calls_usage_and_the_prompt_from_fibers_event_kinds() {
+    let turn = one_fiber_turn(|session_id| {
+        vec![
+            usage_recorded(
+                session_id,
+                2,
+                "gen-1",
+                json!({"input":10,"cache_read":0,"cache_write":{},"output":1}),
+            ),
+            // A late cost is a second line with the same generation_id,
+            // replacing the first (docs/events.md, "usage_recorded").
+            usage_recorded(
+                session_id,
+                3,
+                "gen-1",
+                json!({"input":100,"cache_read":20,"cache_write":{"5m":5},"output":7}),
+            ),
+            action_event(
+                "tool_call_requested",
+                session_id,
+                4,
+                "a_2",
+                json!({"name":"bash","arguments":{"command":"cargo test"},"provider_id":"call_x1"}),
+            ),
+            action_event(
+                "tool_call_started",
+                session_id,
+                5,
+                "a_2",
+                json!({"effects":["executes"],"reversible":false}),
+            ),
+            action_event(
+                "tool_call_completed",
+                session_id,
+                6,
+                "a_2",
+                json!({"status":"failed","error":{"code":"nonzero_exit","message":"exit 101"},"content":[{"type":"text","text":"1 failed"}]}),
+            ),
+            usage_recorded(
+                session_id,
+                7,
+                "gen-2",
+                json!({"input":3,"cache_read":200,"cache_write":{},"output":4}),
+            ),
+            turn_event(
+                "turn_completed",
+                session_id,
+                8,
+                "t1",
+                json!({"outcome":"completed"}),
+            ),
+        ]
+    });
+    let started = turn
+        .lines
+        .iter()
+        .find(|line| line["kind"] == "tool.started")
+        .expect("a tool.started log line");
+    assert_eq!(started["turnId"], "t1", "{started:#}");
+    assert_eq!(started["tool"], "bash", "{started:#}");
+    assert_eq!(started["callId"], "a_2", "{started:#}");
+    let completed = turn
+        .lines
+        .iter()
+        .find(|line| line["kind"] == "tool.completed")
+        .expect("a tool.completed log line");
+    assert_eq!(completed["tool"], "bash", "{completed:#}");
+    assert_eq!(completed["callId"], "a_2", "{completed:#}");
+    assert_eq!(completed["status"], "failed", "{completed:#}");
+    // Prompt tokens are input, cache reads and cache writes, as the pi host
+    // counts them; gen-1 counts once, at its latest line.
+    let usage = &turn.watched["session"]["usage"];
+    assert_eq!(
+        *usage,
+        json!({"promptTokens":125 + 203,"outputTokens":7 + 4,"totalTokens":125 + 203 + 7 + 4}),
+        "{usage:#}"
+    );
+    let user = turn
+        .lines
+        .iter()
+        .find(|line| line["kind"] == "user")
+        .expect("a user log line for the prompt");
+    assert_eq!(user["turnId"], "t1", "{user:#}");
+    assert!(
+        user["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("Reply with DONE.")),
+        "{user:#}"
     );
 }
