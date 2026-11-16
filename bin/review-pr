@@ -1636,6 +1636,7 @@ cmd_collect() {
       fi
     fi
     std_ok=""; spec_ok=""; ob_ok=""; fix_ok=""; role_bad=""
+    changes_verdict=""; blocking_finding=""
     if [ -n "$text" ]; then
       while IFS= read -r line; do
         norm="$(norm_line "$line")"
@@ -1650,6 +1651,11 @@ cmd_collect() {
             overbuild:*) ob_ok="1";;
             verify:*) fix_ok="1";;
           esac
+          case "$role:$norm" in
+            standards:"VERDICT standards: CHANGES"*) changes_verdict="1";;
+            spec:"VERDICT spec: CHANGES"*) changes_verdict="1";;
+            overbuild:"VERDICT: CHANGES"*) changes_verdict="1";;
+          esac
           continue
         fi
         if looks_like_verdict "$norm"; then
@@ -1660,13 +1666,22 @@ cmd_collect() {
         fi
         if finding_rows input <(printf '%s\n' "$line") >/dev/null 2>&1; then
           printf '%s\n' "$line" >>"$verdicts_f"
+          case "$line" in
+            P1\ *|P2\ *) blocking_finding="1";;
+          esac
         fi
       done <<<"$text"
+    fi
+    if [ "$role" != verify ] && [ -n "$changes_verdict" ] && [ -z "$blocking_finding" ]; then
+      printf 'BAD-VERDICT %s CHANGES without a P1 or P2 finding row\n' "$role" >>"$bad_f"
+      role_bad="1"
+      bad=$((bad + 1))
     fi
     # A reviewer with findings may end DONE_WITH_CONCERNS; its verdict still stands.
     if [ -n "$role_bad" ]; then
       # Keep BAD-VERDICT results available for a later parser or posting retry.
       cleanup_keep[${#cleanup_keep[@]}]="$sf"
+      kept_state[${#kept_state[@]}]="$sf"
     elif [ "$status" != "DONE" ] && [ "$status" != "DONE_WITH_CONCERNS" ]; then
       reason_suffix=""
       if [ "$status" = "ERROR" ]; then
