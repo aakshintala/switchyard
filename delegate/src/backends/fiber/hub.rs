@@ -1412,7 +1412,8 @@ impl HubConn {
                     rest.replay_until = last_seq_of(&result);
                     rest.ack = old_ack;
                     let replay_end = last_seq_of(&result);
-                    let inspect_replay = !rest.prompt_id.is_empty() || rest.turn_started;
+                    let inspect_replay =
+                        !rest.prompt_id.is_empty() || rest.turn_started || rest.forwarded;
                     let prompt = pending_prompt(&shared);
                     let mut replay = Vec::new();
                     let mut terminal = None;
@@ -1932,7 +1933,8 @@ fn session_loop(
                     let Some(id) = value.get("id").and_then(|v| v.as_str()) else {
                         continue;
                     };
-                    if value.get("command").and_then(serde_json::Value::as_str) == Some("close") {
+                    let name = value.get("command").and_then(serde_json::Value::as_str);
+                    if name == Some("close") {
                         rest.closed = true;
                     }
                     match lock(&shared.out).send_session_checked(id, &command) {
@@ -1943,7 +1945,12 @@ fn session_loop(
                             return;
                         }
                     }
-                    rest.prompt_id = id.to_string();
+                    // Only a `prompt` is the turn's prompt; `command_name` and
+                    // `is_own_turn_started` read `prompt_id` as that.
+                    if name == Some("prompt") {
+                        rest.prompt_id = id.to_string();
+                    }
+                    rest.forwarded = true;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
@@ -2589,6 +2596,9 @@ struct Rest<'a> {
     stream_closed_deadline: Option<Instant>,
     mode: RestMode,
     session_lines: Option<std::sync::mpsc::Sender<HubSessionLine>>,
+    /// Session mode has forwarded a command, so a reconnect inspects the
+    /// replay for it.
+    forwarded: bool,
 }
 
 impl<'a> Rest<'a> {
@@ -2618,6 +2628,7 @@ impl<'a> Rest<'a> {
             stream_closed_deadline: None,
             mode: RestMode::Turn,
             session_lines: None,
+            forwarded: false,
         }
     }
 
