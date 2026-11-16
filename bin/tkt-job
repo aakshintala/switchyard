@@ -119,6 +119,10 @@ fi
 # shellcheck disable=SC1090
 . "$namebase_lib"
 plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
+plan_tokens_lib="$script_dir/lib/plan-tokens.sh"
+if [ ! -r "$plan_tokens_lib" ]; then echo "tkt-job: cannot read shared lib: $plan_tokens_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$plan_tokens_lib"
 if [ ! -r "$plan_gate_lib" ]; then
   echo "tkt-job: cannot read shared lib: $plan_gate_lib" >&2
   exit 2
@@ -728,8 +732,24 @@ if [ "$reused" -eq 1 ]; then
 $digest" ;;
     *)
       if [ "$ec" -ne 0 ]; then
-        digest="hint: this job has finished; a rerun only re-watches it. This verdict is about ${head_after:-unknown}, you are on $twelve; clear the slot with: tkt-state $state set job.$slot ''; journal the reason and re-dispatch.
+        if [ "$slot" = lane ]; then
+          plan_for_hint="$(tkt get plan 2>/dev/null || true)"
+          hint_base=""
+          [ -z "$plan_for_hint" ] || hint_base="$(plan_base "$plan_for_hint" 2>/dev/null || true)"
+        else
+          hint_base=""
+        fi
+        push_only=0
+        case "$verdict" in
+          "NO-COMMITS "*" gate=PASS"*) [ "$slot" = lane ] && push_only=1 ;;
+        esac
+        if [ "$push_only" -eq 1 ] && [ -n "$hint_base" ] && [ "$(git -C "$worktree" rev-list --count "$hint_base..HEAD" 2>/dev/null || printf 0)" -gt 0 ]; then
+          digest="hint: this job has finished; a rerun only re-watches it. This verdict is about ${head_after:-unknown}, you are on $twelve; resume the push step with: tkt-job $state --slot $slot --resume $jobid --prompt <file> --gate-from-plan (the prompt asks only for the push step: push the branch and open the PR); journal the reason and continue.
 $digest"
+        else
+          digest="hint: this job has finished; a rerun only re-watches it. This verdict is about ${head_after:-unknown}, you are on $twelve; clear the slot with: tkt-state $state set job.$slot ''; journal the reason and re-dispatch.
+$digest"
+        fi
       fi
       ;;
   esac

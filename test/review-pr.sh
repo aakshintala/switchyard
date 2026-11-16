@@ -559,6 +559,7 @@ printf 'ci\tpass\n' >"$T/checks.txt"
 write_record standards DONE "VERDICT standards: APPROVE
 STATUS: DONE" 0
 write_record spec DONE "VERDICT spec: CHANGES
+P2 src/baseline.ts:1 — baseline behavior misses the requirement — correct it
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
@@ -577,6 +578,7 @@ printf 'ci\tpass\n' >"$T/checks.txt"
 write_record standards DONE "VERDICT standards: APPROVE
 STATUS: DONE" 0
 write_record spec DONE "VERDICT spec: CHANGES
+P2 src/baseline.ts:1 — baseline behavior misses the requirement — correct it
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
@@ -1359,6 +1361,55 @@ out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)"
 grep -q "^BAD-VERDICT overbuild VERDICT: REQUEST_CHANGES$" <<<"$out" || fail "bad verdict names role and line"
 grep -q UNFINISHED <<<"$out" && fail "bad verdict is never UNFINISHED"
 
+# --- case: CHANGES requires a P1/P2 finding; P3-only output is malformed
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: CHANGES
+P3 src/a.ts:1 — small issue — clean it up
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "P3-only CHANGES start exits 0"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" && fail "P3-only CHANGES collect refuses"
+grep -q '^BAD-VERDICT standards CHANGES without a P1 or P2 finding row$' <<<"$out" || fail "P3-only CHANGES is malformed"
+grep -q 'resume: delegate resume job-standards.*review-pr collect job-standards' <<<"$out" || fail "P3-only CHANGES prints rerun hint"
+
+# --- case: CHANGES with a P2 remains a recorded CHANGES verdict
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: CHANGES
+P2 src/a.ts:1 — broken behavior — fix it
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "P2 CHANGES start exits 0"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || fail "P2 CHANGES collect succeeds"
+grep -q '^VERDICT standards: CHANGES$' <<<"$out" || fail "P2 CHANGES verdict is recorded"
+grep -q '^P2 src/a.ts:1' <<<"$out" || fail "P2 finding is recorded"
+grep -q BAD-VERDICT <<<"$out" && fail "P2 CHANGES is not malformed"
+
+# --- case: overbuild CHANGES carries only P3 rows by design; it stays valid
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: CHANGES
+P3 src/a.ts:3 — yagni — cut helper — replace with inline
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "overbuild P3 CHANGES start exits 0"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || fail "overbuild P3-only CHANGES collect succeeds"
+grep -q '^VERDICT overbuild: CHANGES$' <<<"$out" || fail "overbuild P3 CHANGES verdict is recorded"
+grep -q BAD-VERDICT <<<"$out" && fail "overbuild P3-only CHANGES is not malformed"
+
 # --- case: an unknown job id is UNFINISHED; collect exits 1
 reset_state
 : >"$T/checks.txt"
@@ -1369,6 +1420,7 @@ grep -q "^UNFINISHED job-nope MISSING" <<<"$out" || fail "unknown id is UNFINISH
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record standards DONE "VERDICT standards: CHANGES
+P2 src/standard.ts:1 — standard issue — fix it
 STATUS: DONE" 0
 write_record spec DONE "VERDICT spec: APPROVE
 P2 rename the helper
