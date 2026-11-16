@@ -101,6 +101,14 @@
 #        within 120 s exits 1 naming the run.
 #        Prints `merged <squash sha>` on success. A `gh pr merge` error containing
 #        `GraphQL` retries once like `Base branch was modified`, sleeping 5 s first.
+#        On `Merge already in progress`, ship-pr does not merge again: it waits for
+#        up to 12 PR-state polls, then checks origin/main for a matching landed commit.
+#        After any failed merge call, it fetches origin/main and considers only commits
+#        gained since the pre-call main sha. A commit is accepted only when its subject
+#        ends `(#<pr>)` and its first-parent diff has the same stable patch-id as the
+#        pinned head's diff from its merge base with that pre-call main. If the PR stays
+#        open, ship-pr prints `merged <sha> (PR record not updated by GitHub)`, runs the
+#        normal post-merge steps, and names still-open Resolves issues for manual closure.
 #        ship-pr prints gh's merge output without any sentence that mentions
 #        `--auto` or `--admin`, keeping the rest of the line; it never relays gh's
 #        merge hints. If a failed merge reports `mergeStateStatus` BLOCKED, ship-pr
@@ -1217,6 +1225,73 @@ review_patch_id() {
   echo "${id:-none}"
 }
 
+# find_landed_commit compares only new origin/main commits with the patch that
+# was pinned for merge. The pre-merge main sha is captured immediately before
+# each gh call so unrelated or older commits cannot be mistaken for this PR.
+find_landed_commit() {
+  local pre_merge_main="$1" base expected commits commit subject candidate_patch
+  landed_sha=""
+  [ -n "$pre_merge_main" ] || return 1
+  fetch_retry origin +refs/heads/main:refs/remotes/origin/main || return 1
+  git -C "$worktree" merge-base --is-ancestor "$pre_merge_main" origin/main || return 1
+  base="$(git -C "$worktree" merge-base "$pre_merge_main" "$pin")" || return 1
+  expected="$(git -C "$worktree" diff "$base" "$pin" | git patch-id --stable | awk '{print $1}')" || return 1
+  [ -n "$expected" ] || return 1
+  commits="$(git -C "$worktree" rev-list --reverse "$pre_merge_main..origin/main")" || return 1
+  [ -n "$commits" ] || return 1
+  while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    subject="$(git -C "$worktree" show -s --format=%s "$commit")" || continue
+    case "$subject" in *"(#$pr)") ;; *) continue ;; esac
+    git -C "$worktree" rev-parse --verify -q "$commit^" >/dev/null || continue
+    candidate_patch="$(git -C "$worktree" diff "$commit^" "$commit" | git patch-id --stable | awk '{print $1}')" || continue
+    if [ "$candidate_patch" = "$expected" ]; then
+      landed_sha="$commit"
+      return 0
+    fi
+  done <<<"$commits"
+  return 1
+}
+
+# A matching main commit is a merge only if the PR record has not caught up.
+# If it did, use GitHub's merge sha and retain the normal success output.
+accept_landed_commit() {
+  local state merge_sha
+  IFS=$'\t' read -r state merge_sha < <(gh pr view "$pr" --repo "$repo" --json state,mergeCommit \
+    --jq '[.state, (.mergeCommit.oid // "-")] | @tsv' 2>/dev/null || true) || true
+  landed_pr_state="${state:-UNKNOWN}"
+  if [ "${state:-}" = "MERGED" ]; then
+    recorded_merge=1
+    recorded_merge_sha="${merge_sha:--}"
+  else
+    landed_without_record=1
+    landed_output_sha="$landed_sha"
+  fi
+}
+
+wait_for_in_progress_merge() {
+  local i wait_state wait_sha
+  say "Merge already in progress; waiting for the in-progress merge (up to 12 polls)"
+  for i in $(seq 1 12); do
+    IFS=$'\t' read -r wait_state wait_sha < <(gh pr view "$pr" --repo "$repo" --json state,mergeCommit \
+      --jq '[.state, (.mergeCommit.oid // "-")] | @tsv' 2>/dev/null || true) || true
+    if [ "${wait_state:-}" = "MERGED" ]; then
+      recorded_merge=1
+      recorded_merge_sha="${wait_sha:--}"
+      return 0
+    fi
+    [ "$i" -lt 12 ] && sleep "${SHIP_PR_INTERVAL:-5}"
+  done
+  return 1
+}
+
+merge_already_in_progress() {
+  case "$1" in
+    *"Merge already in progress"*|*"merge already in progress"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 
 reviewed_patch_id="$(review_patch_id "$reviewed")"
 review_result="$(review_verdict "$repo" "$pr" "$reviewed_patch_id")" \
@@ -1791,8 +1866,25 @@ while :; do
   merge_attempted=1
   merge_err=""
   merge_failed=""
+  recorded_merge="" recorded_merge_sha="" landed_without_record="" landed_output_sha="" landed_pr_state=""
+  fetch_retry origin +refs/heads/main:refs/remotes/origin/main \
+    || die_after_ready 1 "git fetch origin main failed"
+  pre_merge_main="$(git -C "$worktree" rev-parse origin/main)" \
+    || die_after_ready 1 "cannot read origin/main before merge"
   if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
     show_merge_failure "$merge_err"
+    if find_landed_commit "$pre_merge_main"; then
+      accept_landed_commit
+      break
+    fi
+    if merge_already_in_progress "$merge_err"; then
+      if ! wait_for_in_progress_merge && find_landed_commit "$pre_merge_main"; then
+        accept_landed_commit
+      elif [ -z "$recorded_merge" ] && [ -z "$landed_without_record" ]; then
+        die_after_ready 1 "gh pr merge failed"
+      fi
+      break
+    fi
     lost_race=""
     case "$merge_err" in
       *"the head branch is not up to date with the base branch"*)
@@ -1821,8 +1913,24 @@ while :; do
             *) say "base branch was modified during merge; retrying once after 5 s" ;;
           esac
           sleep 5
+          fetch_retry origin +refs/heads/main:refs/remotes/origin/main \
+            || die_after_ready 1 "git fetch origin main failed"
+          pre_merge_main="$(git -C "$worktree" rev-parse origin/main)" \
+            || die_after_ready 1 "cannot read origin/main before merge"
           if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
             show_merge_failure "$merge_err"
+            if find_landed_commit "$pre_merge_main"; then
+              accept_landed_commit
+              break
+            fi
+            if merge_already_in_progress "$merge_err"; then
+              if ! wait_for_in_progress_merge && find_landed_commit "$pre_merge_main"; then
+                accept_landed_commit
+              elif [ -z "$recorded_merge" ] && [ -z "$landed_without_record" ]; then
+                die_after_ready 1 "gh pr merge failed"
+              fi
+              break
+            fi
             lost_race2=""
             case "$merge_err" in
               *"the head branch is not up to date with the base branch"*)
@@ -1858,18 +1966,55 @@ while :; do
   fi
   break
 done
-merged="" sha=""
-for i in $(seq 1 12); do
-  IFS=$'\t' read -r state sha < <(gh pr view "$pr" --repo "$repo" --json state,mergeCommit \
-    --jq '[.state, (.mergeCommit.oid // "-")] | @tsv' 2>/dev/null || true) || true
-  if [ "${state:-}" = "MERGED" ]; then merged=1; break; fi
-  [ "$i" -lt 12 ] && sleep "${SHIP_PR_INTERVAL:-5}"
-done
+merged="${recorded_merge:-}" sha="${recorded_merge_sha:-}"
+if [ -n "$landed_without_record" ]; then
+  merged=1
+  sha="$landed_output_sha"
+fi
+if [ -z "$merged" ]; then
+  for i in $(seq 1 12); do
+    IFS=$'\t' read -r state sha < <(gh pr view "$pr" --repo "$repo" --json state,mergeCommit \
+      --jq '[.state, (.mergeCommit.oid // "-")] | @tsv' 2>/dev/null || true) || true
+    if [ "${state:-}" = "MERGED" ]; then merged=1; break; fi
+    [ "$i" -lt 12 ] && sleep "${SHIP_PR_INTERVAL:-5}"
+  done
+fi
 [ -n "$merged" ] || { [ -n "$merge_failed" ] && die 1 "gh pr merge failed"; die 1 "merge status could not be confirmed after 12 polls; worktree left in place"; }
 
 if [ "$repo" = "aakshintala/switchyard" ]; then fast_forward_agents; fi
 
 if [ "$known_acceptance_used" = 1 ]; then post_known_flake_comments; fi
+
+report_open_resolves_issues() {
+  local issue issue_state open_issues="" unreadable=""
+  local -a seen=()
+  while IFS= read -r issue; do
+    [ -n "$issue" ] || continue
+    case " ${seen[*]-} " in *" $issue "*) continue ;; esac
+    seen+=("$issue")
+    if ! issue_state="$(gh issue view "$issue" --repo "$repo" --json state --jq '.state' 2>/dev/null)"; then
+      unreadable="$unreadable #$issue"
+    elif [ "$issue_state" = "OPEN" ]; then
+      open_issues="$open_issues #$issue"
+    fi
+  done < <(grep -Eio '^[[:space:]]*([-*][[:space:]]*)?resolves[[:space:]]+#[0-9]+([[:space:]]*,[[:space:]]*#[0-9]+)*' <<<"$body_text" \
+    | grep -Eo '[0-9]+' || true)
+  if [ -n "$open_issues" ]; then
+    case "$landed_pr_state" in
+      OPEN) say "PR #$pr is still open; Resolves issues still open:${open_issues}; close them manually" ;;
+      UNKNOWN) say "could not confirm whether PR #$pr is still open; Resolves issues still open:${open_issues}; check them manually" ;;
+      *) say "PR #$pr is $landed_pr_state; Resolves issues still open:${open_issues}; close them manually if needed" ;;
+    esac
+  else
+    case "$landed_pr_state" in
+      OPEN) say "PR #$pr is still open; no open Resolves issues were found" ;;
+      UNKNOWN) say "could not confirm whether PR #$pr is still open; no open Resolves issues were found" ;;
+      *) say "PR #$pr is $landed_pr_state; no open Resolves issues were found" ;;
+    esac
+  fi
+  [ -z "$unreadable" ] || say "could not check the state of Resolves issues:${unreadable}"
+}
+if [ -n "$landed_without_record" ]; then report_open_resolves_issues; fi
 
 # Step 9: clean up from the common git dir, never from inside the worktree being removed.
 common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)"
@@ -1912,4 +2057,8 @@ if ! del_out="$(git --git-dir="$common" push origin --delete "$branch" 2>&1)"; t
 fi
 
 # Step 10
-echo "merged $sha"
+if [ -n "$landed_without_record" ]; then
+  echo "merged $sha (PR record not updated by GitHub)"
+else
+  echo "merged $sha"
+fi
