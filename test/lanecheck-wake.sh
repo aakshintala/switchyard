@@ -764,6 +764,46 @@ else
   fail "finished-older-job-wakes-with-its-own-id (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
+# An open fix slot without its job ID must not borrow a unique other slot ID.
+r=$(newrun fixopen-without-job-id)
+lane "$r" 6302 fiber-6302-build sid-6302
+printf 'repo=example/switchyard\nissue=6302\nfixopen=2\njob.preflight=job-preflight-6302\n' >"$r/fiber-6302.state"
+set_session sid-6302 6302 turn-fixopen-missing completed 3000000
+set_logs turn-fixopen-missing 2900000 3000000 'STATUS: DONE'
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-6302.state\n' "$r" >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+set_processes
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 3001); lrc=$?
+if [ "$lrc" -eq 0 ] && grep -Fq "ticket #6302, tkt-fix pid 101 (state $r/fiber-6302.state) finished (exit unknown)" "$T/last-send" \
+   && ! grep -Fq 'job job-preflight-6302' "$T/last-send"; then
+  ok fixopen-without-job-id-does-not-borrow-other-slot
+else
+  fail "fixopen-without-job-id-does-not-borrow-other-slot (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# A still-running fix process picks up its own ID after tkt-fix writes the slot.
+r=$(newrun fixopen-job-id-arrives-later)
+lane "$r" 6303 fiber-6303-build sid-6303
+printf 'repo=example/switchyard\nissue=6303\nfixopen=2\njob.preflight=job-preflight-6303\n' >"$r/fiber-6303.state"
+set_session sid-6303 6303 turn-fixopen-later completed 3000000
+set_logs turn-fixopen-later 2900000 3000000 'STATUS: DONE'
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 100 00:12 bash /repo/bin/tkt-fix %s/fiber-6303.state\n' "$r" >"$T/box-procs"
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 3000)
+printf 'repo=example/switchyard\nissue=6303\nfixopen=2\njob.preflight=job-preflight-6303\njob.fix2=job-fix2-6303\n' >"$r/fiber-6303.state"
+out=$(run_lanecheck "$r" 3001)
+set_processes
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 3002); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fq 'job job-fix2-6303 (tkt-fix) finished' \
+   && grep -Fq 'ticket #6303, job job-fix2-6303 (tkt-fix)' "$T/last-send"; then
+  ok running-fix-picks-up-later-slot-job-id
+else
+  fail "running-fix-picks-up-later-slot-job-id (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
 # An owned finished job without a unique ID wakes with process attribution.
 r=$(newrun owned-job-without-id)
 lane "$r" 6200 fiber-6200-build sid-6200

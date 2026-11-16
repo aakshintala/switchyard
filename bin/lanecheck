@@ -1726,9 +1726,7 @@ def job_id_for_process(job, ticket):
     if command == "tkt-fix":
         slot = values.get("fixopen", "")
         if slot.isdigit() and int(slot) > 0:
-            job_id = values.get("job.fix" + slot, "").strip()
-            if job_id:
-                return job_id
+            return values.get("job.fix" + slot, "").strip() or None
     state_ids = {value.strip() for key, value in values.items()
                  if re.fullmatch(r"job\.[^.]+", key) and value.strip()}
     return next(iter(state_ids)) if len(state_ids) == 1 else None
@@ -2118,9 +2116,8 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         }
         for job in current_jobs:
             previous = previously_running.get(f"{job.get('pid')}:{job.get('cmd')}")
-            if previous is not None:
-                if previous.get("job_id"):
-                    job["job_id"] = previous["job_id"]
+            if previous is not None and previous.get("job_id"):
+                job["job_id"] = previous["job_id"]
             else:
                 job_id = job_id_for_process(job, n)
                 if job_id:
