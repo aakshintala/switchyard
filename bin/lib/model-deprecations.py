@@ -45,18 +45,18 @@ def validate_report(text, today, source):
         fail("missing or misplaced skipped section")
     skipped_at = skipped_sections[0]
     row_count = 0
-    seen_vendors = set()
+    seen_vendors = {}
     current_vendor = None
     header_seen = False
     separator_seen = False
 
-    for line in lines[2:skipped_at]:
+    for line_at, line in enumerate(lines[2:skipped_at], start=2):
         if line.startswith("## "):
             current_vendor = line[3:].strip()
             vendor_id = current_vendor.casefold()
             if vendor_id not in VENDORS or vendor_id in seen_vendors:
                 fail("invalid vendor section")
-            seen_vendors.add(vendor_id)
+            seen_vendors[vendor_id] = line_at
             header_seen = False
             separator_seen = False
             continue
@@ -89,8 +89,7 @@ def validate_report(text, today, source):
                 fail("deprecated row has no retirement date")
             validate_date(retirement.group(0))
         row_count += 1
-    for vendor in seen_vendors:
-        section_at = next(index for index in sections if lines[index][3:].strip().casefold() == vendor)
+    for section_at in seen_vendors.values():
         section_end = next((index for index in sections if index > section_at), skipped_at)
         section_lines = lines[section_at + 1 : section_end]
         if "| model | kind | field | vendor | models.dev |" not in section_lines:
@@ -154,9 +153,8 @@ def publish(scratch, inbox, today, source, concerns_path=None):
     return write_report(text, inbox, today)
 
 
-def publish_failure(inbox, today, source, status="", reason="model produced no report"):
-    if reason != "model produced no report":
-        reason = f"report validation failed: {reason}"
+def publish_failure(inbox, today, source, status="", reason=None):
+    reason = f"report validation failed: {reason}" if reason is not None else "model produced no report"
     if status:
         if not re.fullmatch(r"[A-Z][A-Z_]*", status):
             fail("invalid delegate job status")
@@ -177,7 +175,7 @@ def main(argv):
     if len(argv) in (6, 7) and argv[1] == "publish":
         return publish(argv[2], argv[3], argv[4], argv[5], argv[6] if len(argv) == 7 else None)
     if len(argv) in (5, 6, 7) and argv[1] == "failure":
-        return publish_failure(argv[2], argv[3], argv[4], argv[5] if len(argv) >= 6 else "", argv[6] if len(argv) == 7 else "model produced no report")
+        return publish_failure(argv[2], argv[3], argv[4], argv[5] if len(argv) >= 6 else "", argv[6] if len(argv) == 7 else None)
     fail("usage: model-deprecations.py publish SCRATCH INBOX YYYY-MM-DD SOURCE [CONCERNS]")
 
 
