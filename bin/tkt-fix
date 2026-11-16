@@ -1207,6 +1207,10 @@ else
     aborted_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
     [ -z "$aborted_head" ] || record_round_head "$aborted_head"
     if [ "$jrc" -eq 1 ]; then # an abnormal end closes the slot without a round
+      # ...except a failed gate rerun on a collected fix: that judges the round.
+      if [[ "$gate_retry_note" == gateRetry=exit=[1-9]* ]]; then
+        round=$((round + 1)); t set round "$round"; stamp_verdict_at t
+      fi
       close_slot "$knum"
       shead="$(t get head 2>/dev/null || true)"
       whead="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
@@ -1256,14 +1260,10 @@ else
 fi
 if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
 if [ "$grc" -eq 1 ]; then
-  if [ "$retry_collect_gate" -eq 1 ]; then
-    close_slot "$knum"
-  else
-    case "$(head -n 1 "$tmp/gate.out")" in
-      "TKT tkt-gate STOP-LIST "*) close_slot "$knum" ;;
-      *) round=$((round + 1)); t set round "$round"; stamp_verdict_at t; close_slot "$knum" ;;
-    esac
-  fi
+  case "$(head -n 1 "$tmp/gate.out")" in
+    "TKT tkt-gate STOP-LIST "*) close_slot "$knum" ;;
+    *) round=$((round + 1)); t set round "$round"; stamp_verdict_at t; close_slot "$knum" ;;
+  esac
 fi
 if [ "$grc" -ne 0 ]; then
   if [ "$no_commits" -eq 1 ]; then printf 'no commits\n' >>"$tmp/gate.out"; fi

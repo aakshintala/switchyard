@@ -794,8 +794,13 @@ $(tail -n 10 <<<"$gate_tail")"
     digest="$digest
 gateRetry=pending reason=$retry_gate_reason"
   elif [ "$retry_gate_attempted" -eq 1 ]; then
+    # A STOP-LIST red is not the lane's round; tkt-fix counts only exit=<n>.
+    case "$(head -n 1 "$retry_gate_output" 2>/dev/null)" in
+      "TKT tkt-gate STOP-LIST "*) retry_gate_word=stop-list ;;
+      *) retry_gate_word="exit=$retry_gate_rc" ;;
+    esac
     digest="$digest
-gateRetry=exit=$retry_gate_rc log=$retry_gate_log"
+gateRetry=$retry_gate_word log=$retry_gate_log"
   fi
   if [ -n "$concerns" ]; then
     digest="$digest

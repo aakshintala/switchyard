@@ -118,6 +118,7 @@ if [ "\$watch_only" -eq 1 ] && [[ " \$* " == *" --expect-commits "* ]]; then
     gate_rc=0
     "\${TKT_BIN:-$T/bin}/tkt-gate" "\$state" --expect-head "\$head_after" >/dev/null || gate_rc=\$?
     if [ "\$gate_rc" = 0 ]; then echo "TKT tkt-job CONCERNS id=\$jobid gate=PASS log=x"; else echo "TKT tkt-job GATE-FAIL rc=\$gate_rc gatelog=x log=x"; fi
+    echo "gateRetry=exit=\$gate_rc log=x"
     exit 1
   fi
   if [ "\$job_status" = DONE ] && [ "\$commits" = 0 ]; then
@@ -2489,6 +2490,36 @@ grep -Fq "tkt-gate|$S --expect-head $OPEN_HEAD" "$T/calls.log" || fail "pushed o
 [ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-529)" = "$PUSH_BEFORE" ] || fail "pushed open-slot collect changed the pushed head"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OPEN_HEAD" ] || fail "pushed open-slot collect changed state head"
 [ "$(grep -c '^job|' "$T/calls.log")" = 1 ] || fail "pushed open-slot collect dispatched another fix job"
+
+# #4646's shape with a failing rerun: round=1, fix2 pushed. The rerun gate
+# judges the round, so a red rerun counts it (1 -> 2) and stops.
+setup_case collect-fix-open-slot-pushed-fail
+fixture_commit fix.txt "fix 2 committed" "fix: open pushed fix slot"
+OPEN_HEAD="$(git -C "$WT" rev-parse HEAD)"
+OPEN_FINDINGS="$CDIR/fix-round-2-findings.md"
+cp "$CDIR/findings.md" "$OPEN_FINDINGS"
+drop_state_key reviewed
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 2 >/dev/null
+bash "$TKT_STATE" "$S" set fixopen 2 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+bash "$TKT_STATE" "$S" set head "$OPEN_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.2.start "$OLD" >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.2.findings "$OPEN_FINDINGS" >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.2.head "$OPEN_HEAD" >/dev/null
+mkdir -p "$TMPDIR/delegate-jobs"
+jq -n --arg before "$OLD" --arg after "$OPEN_HEAD" --arg cwd "$WT" \
+  '{status:"DONE_WITH_CONCERNS",result:{status:"DONE_WITH_CONCERNS",text:"gate failed",gateResult:{command:"bash gate.sh",exitCode:1,passed:false,outputPath:"gate.log",outputTail:"test failed"},changeSet:{headBefore:$before,headAfter:$after,newCommits:[$after],uncommittedFiles:[],filesChanged:["fix.txt"],diffstat:"1 file changed",dirtyAfter:false},concerns:null},resume:{cwd:$cwd,gate:"bash gate.sh"}}' \
+  >"$TMPDIR/delegate-jobs/j2.json" || fail "write pushed failing-rerun job record"
+git -C "$WT" push -q origin tkt-529
+git -C "$WT" fetch -q origin tkt-529
+printf 'fail' >"$T/collect-gate-mode"
+: >"$T/calls.log"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --since "$OLD" --collect-fix j2 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "failing rerun collect exited $run_rc, want 1: $out $(cat "$T/stderr")"
+grep -Fq "tkt-gate|$S --expect-head $OPEN_HEAD" "$T/calls.log" || fail "failing rerun collect did not rerun the full gate: $(cat "$T/calls.log")"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "failing rerun collect did not count the round (want 1 -> 2)"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = 0 ] || fail "failing rerun collect left fixopen set"
 
 # NEEDS_CONTEXT closes its slot without a round; collect refuses it and names resume.
 if want collect-fix-needs-context; then run_collect_fix_needs_context; fi
