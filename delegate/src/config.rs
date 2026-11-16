@@ -456,6 +456,7 @@ mod tests {
             "fiber/codex/gpt-6-luna:xhigh",
             "claude-haiku-5-5",
             "opencode-go/muse-spark-1.3-contributor",
+            "fiber/opencode-go/muse-spark-1.3-contributor",
         ]
         .into_iter()
         .collect();
@@ -627,6 +628,10 @@ mod tests {
             ("fiber/codex/gpt-6-luna:xhigh", vec!["standard", "strong"]),
             (
                 "opencode-go/muse-spark-1.3-contributor",
+                vec!["standard", "strong"],
+            ),
+            (
+                "fiber/opencode-go/muse-spark-1.3-contributor",
                 vec!["standard", "strong"],
             ),
             (
