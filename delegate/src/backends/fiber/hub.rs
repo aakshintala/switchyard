@@ -2188,38 +2188,57 @@ fn drive_turn(
     // after observing this, so the turn bounds are already fixed when the
     // clock jumps instead of being raced by it.
     pause!(shared, Point::AfterPromptAck);
-    // Read to the verdict, which stops the run at once.
+    read_pump(
+        &mut conn,
+        &mut rest,
+        socket,
+        &req.bounds,
+        &mut known,
+        &shared,
+    )
+}
+
+/// Read live hub lines until the current `Rest` mode ends the pump. In turn
+/// mode, that is the verdict, which stops the run at once.
+fn read_pump(
+    conn: &mut HubConn,
+    rest: &mut Rest<'_>,
+    socket: &Path,
+    bounds: &Bounds,
+    known: &mut KnownIds,
+    shared: &Shared,
+) -> BackendResult {
     loop {
         pause!(shared, Point::BeforeRead);
         match conn.next_line(rest.bounds.poll_slice) {
             Next::Tick => {
-                if let Some(stop) = rest.check(&shared, now(&shared))
-                    && let Some(done) = apply_step(&mut conn, &mut rest, stop)
+                if let Some(stop) = rest.check(shared, now(shared))
+                    && let Some(done) = apply_step(conn, rest, stop)
                 {
                     return done;
                 }
             }
-            Next::Lost => match conn.reconnect(socket, &req.bounds, &mut rest, &mut known) {
+            Next::Lost => match conn.reconnect(socket, bounds, rest, known) {
                 Ok(reconnected) => {
                     if let Some(result) = reconnected.terminal {
-                        return apply_step(&mut conn, &mut rest, Step::End(result))
+                        return apply_step(conn, rest, Step::End(result))
                             .expect("reconnected terminal ends the run");
                     }
                     continue;
                 }
-                Err(text) => return fail_with_cleanup(&mut conn, &mut rest, text),
+                Err(text) => return fail_with_cleanup(conn, rest, text),
             },
             Next::Line(raw) => {
                 pause!(shared, Point::AfterLine);
-                let step = rest.handle_live(&raw, &shared);
+                let step = rest.handle_live(&raw, shared);
                 // The line first, then the stop and bound checks (R3).
                 let step = match step {
                     Step::Continue | Step::CloseOnce => {
-                        rest.check(&shared, now(&shared)).unwrap_or(step)
+                        rest.check(shared, now(shared)).unwrap_or(step)
                     }
                     end_or_fail => end_or_fail,
                 };
-                if let Some(done) = apply_step(&mut conn, &mut rest, step) {
+                if let Some(done) = apply_step(conn, rest, step) {
                     return done;
                 }
             }
