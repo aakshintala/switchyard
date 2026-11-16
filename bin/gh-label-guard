@@ -123,41 +123,7 @@ def guarded_labels(args):
     # scanned letter by letter, the first value shorthand taking the rest of
     # the token or the next token. An unknown flag is a boolean, and a value
     # flag with no following token is ignored.
-    positionals = []
-    flags = []
-    options_done = False
-    i = 0
-    while i < len(args):
-        token = args[i]
-        if options_done:
-            positionals.append(token)
-        elif token == "--":
-            options_done = True
-        elif token.startswith("--"):
-            name, sep, inline = token[2:].partition("=")
-            if sep:
-                flags.append((name, inline))
-            elif name in VALUE_FLAGS and i + 1 < len(args):
-                flags.append((name, args[i + 1]))
-                i += 1
-        elif token.startswith("-") and len(token) > 1:
-            j = 1
-            while j < len(token):
-                letter = token[j]
-                if letter in VALUE_SHORTHANDS:
-                    if j + 1 < len(token):
-                        rest = token[j + 1:]
-                        if rest.startswith("="):
-                            rest = rest[1:]
-                        flags.append((letter, rest))
-                    elif i + 1 < len(args):
-                        flags.append((letter, args[i + 1]))
-                        i += 1
-                    break
-                j += 1
-        else:
-            positionals.append(token)
-        i += 1
+    positionals, flags = option_values(args, VALUE_FLAGS, VALUE_SHORTHANDS)
     if len(positionals) < 2:
         return False
     group, verb = positionals[0], positionals[1]

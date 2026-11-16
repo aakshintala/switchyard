@@ -68,20 +68,14 @@ lane() {
   RC="$rc"
 }
 
-# expect_refused ARGS...: the shim refused without calling the stub.
+# expect_refused EXPECTED_STDERR ARGS...: the shim refused without calling the stub.
 expect_refused() {
+  local expected_stderr="$1"
+  shift
   [ "$RC" = 1 ] || fail "refused [$*]: exit $RC, want 1"
   [ -z "$OUT" ] || fail "refused [$*]: stdout [$OUT], want empty"
-  [ "$ERR" = "$REFUSED" ] || fail "refused [$*]: stderr [$ERR]"
+  [ "$ERR" = "$expected_stderr" ] || fail "refused [$*]: stderr [$ERR], want [$expected_stderr]"
   [ ! -e "$T/calls" ] || fail "refused [$*]: the stub ran"
-}
-
-expect_home_refused() {
-  [ "$RC" = 1 ] || fail "home path refused [$*]: exit $RC, want 1"
-  [ -z "$OUT" ] || fail "home path refused [$*]: stdout [$OUT], want empty"
-  [ "$ERR" = "$HOME_REFUSED" ] ||
-    fail "home path refused [$*]: stderr [$ERR], want [$HOME_REFUSED]"
-  [ ! -e "$T/calls" ] || fail "home path refused [$*]: the stub ran"
 }
 
 # expect_passed ARGS...: the stub ran once with exactly these argv, and its
@@ -100,11 +94,11 @@ expect_passed() {
 # refused ARGS... / passed ARGS...: one table line per covered form.
 refused() {
   lane "$@"
-  expect_refused "$@"
+  expect_refused "$REFUSED" "$@"
 }
 home_refused() {
   lane "$@"
-  expect_home_refused "$@"
+  expect_refused "$HOME_REFUSED" "$@"
 }
 passed() {
   lane "$@"
