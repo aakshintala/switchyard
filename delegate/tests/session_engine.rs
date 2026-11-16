@@ -528,7 +528,7 @@ fn supervisor_starts_the_host_with_the_brief_and_expected_permissions() {
     });
 
     assert_eq!(current.turn_count, 1);
-    assert_eq!(current.muse_session_id.as_deref(), Some("fake-session"));
+    assert_eq!(current.host_session_id.as_deref(), Some("fake-session"));
     assert!(current.supervisor_pid.is_some());
     let host_pid = current.host_pid.unwrap();
     assert!(host_pid > 1);

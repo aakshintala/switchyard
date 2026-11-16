@@ -30,17 +30,42 @@ stale_block_is_replaced() {
 }
 
 # A systemctl stub records its args, so the test never reloads a real user manager.
+# It lists the units in $UNITS_FILE and answers MainPID from $PIDS_DIR/<unit>.
 SYSTEMCTL_LOG="$T/systemctl.log"
+UNITS_FILE="$T/units"
+PIDS_DIR="$T/pids"
+mkdir -p "$PIDS_DIR"
+: >"$UNITS_FILE"
 cat >"$T/systemctl" <<EOF
 #!/usr/bin/env bash
 printf '%s\\n' "\$*" >>"$SYSTEMCTL_LOG"
+case "\$*" in
+  *list-units*) cat "$UNITS_FILE" ;;
+  *'show -p MainPID --value '*) cat "$PIDS_DIR/\${*: -1}" 2>/dev/null || echo 0 ;;
+esac
 EOF
 chmod +x "$T/systemctl"
 
+# A synthetic /proc root; the test never reads the real /proc.
+PROC_ROOT="$T/proc"
+mkdir -p "$PROC_ROOT"
+
 run_setup() {
-  out="$(BOX_SYSTEMCTL="$T/systemctl" BOX_LANES_TMP="$LANES_TMP" HOME="$home" bash "$BIN" 2>&1)"
+  out="$(BOX_SETUP_PROC_ROOT="$PROC_ROOT" BOX_SYSTEMCTL="$T/systemctl" BOX_LANES_TMP="$LANES_TMP" HOME="$home" bash "$BIN" 2>&1)"
   code=$?
 }
+
+# fake_service <unit> <pid> <environ lines...>: a running unit whose process has that environment.
+fake_service() {
+  unit="$1" pid="$2"
+  shift 2
+  printf '%s loaded active running Fiber hub\n' "$unit" >>"$UNITS_FILE"
+  printf '%s\n' "$pid" >"$PIDS_DIR/$unit"
+  mkdir -p "$PROC_ROOT/$pid"
+  printf '%s\0' "$@" >"$PROC_ROOT/$pid/environ"
+}
+no_warning() { ! has "$1" 'warning'; }
+no_restart() { ! grep -q 'restart' "$SYSTEMCTL_LOG"; }
 
 write_expected_block() {
   cat >"$1" <<EOF
@@ -125,6 +150,28 @@ tail -n +4 "$T/stale-original" >>"$T/stale-expected"
 ok 'stale setup exits successfully' test "$code" -eq 0
 ok 'stale block is replaced while its tail is preserved' cmp -s "$T/stale-expected" "$home/.bashrc"
 ok 'stale value is absent and exactly one block remains' stale_block_is_replaced "$home/.bashrc"
+
+# A running Fiber hub (#1970): no hub is quiet, a hub with the lanes TMPDIR is
+# quiet, and a hub started before lanes.conf existed gets one restart warning.
+home="$T/services"
+mkdir -p "$home"
+run_setup
+ok 'no hub service: setup exits successfully' test "$code" -eq 0
+ok 'no hub service: no warning' no_warning "$out"
+
+fake_service fiber-hub-good.service 101 LANG=C "TMPDIR=$LANES_TMP"
+run_setup
+ok 'hub with lanes TMPDIR: setup exits successfully' test "$code" -eq 0
+ok 'hub with lanes TMPDIR: no warning' no_warning "$out"
+
+fake_service fiber-hub-stale.service 202 LANG=C TMPDIR=/tmp
+run_setup
+ok 'hub without lanes TMPDIR: setup exits successfully' test "$code" -eq 0
+ok 'hub without lanes TMPDIR: warns once, naming the unit' test "$(printf '%s\n' "$out" | grep -c 'warning')" = 1
+ok 'hub without lanes TMPDIR: names the stale unit and its pid' has "$out" 'fiber-hub-stale.service (pid 202)'
+ok 'hub without lanes TMPDIR: gives the restart and when to run it' \
+  has_both "$out" "systemctl --user restart fiber-hub-stale.service" 'when no Fiber jobs are running'
+ok 'hub without lanes TMPDIR: never restarts anything itself' no_restart
 
 if [ "$rc" = 0 ]; then
   echo "box-setup: $n ok"

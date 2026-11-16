@@ -77,6 +77,9 @@ pub enum HostEvent {
     SessionClosed {
         reason: String,
     },
+    SessionExited {
+        reason: String,
+    },
     Ignored,
 }
 
@@ -253,6 +256,9 @@ fn parse_event(method: &str, params: &Value) -> HostEvent {
         "session/closed" => text("reason")
             .map(|reason| HostEvent::SessionClosed { reason })
             .unwrap_or(HostEvent::Ignored),
+        "session/exited" => text("reason")
+            .map(|reason| HostEvent::SessionExited { reason })
+            .unwrap_or(HostEvent::Ignored),
         _ => HostEvent::Ignored,
     }
 }
@@ -311,6 +317,7 @@ pub fn log_line(event: &HostEvent) -> Option<Value> {
         }
         HostEvent::Allowance(value) => json!({"kind":"allowance","allowance":value}),
         HostEvent::SessionClosed { reason } => json!({"kind":"session.closed","reason":reason}),
+        HostEvent::SessionExited { reason } => json!({"kind":"session.exited","reason":reason}),
         HostEvent::Ignored => return None,
     })
 }

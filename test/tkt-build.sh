@@ -1006,9 +1006,35 @@ jq -n '{status:"DONE",result:{status:"DONE",gateResult:{passed:true,exitCode:0},
 touch "$T/empty-pr"
 DELEGATE_JOBS_DIR="$T/lane-records" run_build --from gate
 [ "$RC" -eq 2 ] || fail "prempty-resumed-lane-committed exits 2 (rc=$RC)"
-grep -Fq -- "--resume lane-resumable --prompt <file> --gate-from-plan; the prompt asks only for the push step (push the branch and open the PR)" <<<"$OUT" || fail "prempty-resumed-lane-committed: push-only hint"
+grep -Fq -- "--resume lane-resumable --prompt <file> --gate-from-plan; the prompt asks for one push-only action: push the branch and open the PR" <<<"$OUT" || fail "prempty-resumed-lane-committed: push-only hint"
 ! grep -Fq -- '--expect-commits' <<<"$OUT" || fail "prempty-resumed-lane-committed: omits expect-commits"
 grep -q "^gate|" "$T/calls.log" && fail "prempty-resumed-lane-committed: the gate never runs"
+
+# An absent Base is unknown, not evidence that the lane has commits to push.
+# Invoke the real repair_hint function directly: tkt-build's CLI rejects the
+# missing Base before it reaches the missing-PR hint, and that guard stays in place.
+setup_case prempty-resumed-lane-unknown-base
+bash "$TKT_STATE" "$S" set job.lane lane-resumable || fail "prempty-resumed-lane-unknown-base: set lane job"
+cat >"$CDIR/plan.md" <<'PLAN'
+## Files
+
+- `src/existing.c`
+PLAN
+bash "$TKT_STATE" "$S" set plan "$CDIR/plan.md" || fail "prempty-resumed-lane-unknown-base: set plan"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m committed-work
+mkdir -p "$T/lane-records"
+jq -n '{status:"DONE",result:{status:"DONE",gateResult:{passed:true,exitCode:0},changeSet:{newCommits:["deadbeef"]}}}' >"$T/lane-records/lane-resumable.json"
+unknown_base_hint="$(DELEGATE_JOBS_DIR="$T/lane-records" state="$S" bin_dir="$T/bin" worktree="$WT" plan="$CDIR/plan.md" BUILD="$BUILD" REAL_BIN="$REAL_BIN" TKT_STATE="$TKT_STATE" bash -c '
+  tkt() { "$TKT_STATE" "$state" "$@"; }
+  . "$REAL_BIN/lib/plan-tokens.sh"
+  base="$(plan_base "$plan")"
+  eval "$(awk '\''/^repair_hint\(\) \{$/ { in_function=1 } in_function { print } in_function && /^\}$/ { exit }'\'' "$BUILD")"
+  repair_hint pr
+')"
+grep -Fq -- '--expect-commits' <<<"$unknown_base_hint" || fail "prempty-resumed-lane-unknown-base: missing Base does not require expect-commits: $unknown_base_hint"
+! grep -Fq -- 'push-only action' <<<"$unknown_base_hint" || fail "prempty-resumed-lane-unknown-base: missing Base is not push-only"
+
+grep -q "^gate|" "$T/calls.log" && fail "prempty-resumed-lane-unknown-base: the gate never runs"
 
 setup_case prempty-resumed-lane-gate-failed
 bash "$TKT_STATE" "$S" set job.lane lane-resumable || fail "prempty-resumed-lane-gate-failed: set lane job"

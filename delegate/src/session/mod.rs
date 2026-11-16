@@ -1,3 +1,4 @@
+pub mod fiber;
 pub mod inbox;
 pub mod ipc;
 pub mod msp;
@@ -27,18 +28,21 @@ const START_POLL: u64 = 20;
 const WATCH_POLL: u64 = 50;
 const LOGS_POLL: u64 = 100;
 
-// The host a session runs on, selected by the model string alone: a
-// `muse/` prefix selects Muse, any other model string selects pi.
+// The host a session runs on, selected by the model prefix: `muse/` selects
+// Muse, `fiber/` selects the Fiber hub bridge, and other model strings select pi.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostKind {
     Muse,
     Pi,
+    Fiber,
 }
 
 impl HostKind {
     pub fn of(model: &str) -> HostKind {
         if model.starts_with("muse/") {
             HostKind::Muse
+        } else if model.starts_with("fiber/") {
+            HostKind::Fiber
         } else {
             HostKind::Pi
         }
@@ -48,6 +52,7 @@ impl HostKind {
         match self {
             HostKind::Muse => "muse",
             HostKind::Pi => "pi",
+            HostKind::Fiber => "fiber",
         }
     }
 }
@@ -62,6 +67,9 @@ struct SessionError {
 type Result<T> = std::result::Result<T, SessionError>;
 
 pub fn main(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("__fiber-host") {
+        return fiber::main(args.get(1..).unwrap_or_default());
+    }
     if args.first().map(String::as_str) == Some("__supervise") {
         if args.len() != 2 {
             eprintln!("session supervisor requires one id");
@@ -319,6 +327,10 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
             return Err(usage(
                 "--model takes no reasoning-effort suffix on a session (sessions run at Muse's default effort)",
             ));
+        }
+    } else if let Some(model_id) = model.strip_prefix("fiber/") {
+        if model_id.split('/').count() < 2 || pi::parse_model(model_id).is_err() {
+            return Err(usage("--model must use fiber/<provider>/<model>[:<level>]"));
         }
     } else {
         // A pi model names any other provider. A first segment that names a
@@ -1060,6 +1072,11 @@ mod tests {
         assert_eq!(HostKind::of("Muse/x"), HostKind::Pi);
         assert_eq!(HostKind::of("muse"), HostKind::Pi);
         assert_eq!(HostKind::of("openai/gpt-6-luna:high"), HostKind::Pi);
+        assert_eq!(
+            HostKind::of("fiber/codex/gpt-6-luna:medium"),
+            HostKind::Fiber
+        );
+        assert_eq!(HostKind::Fiber.label(), "fiber");
         assert_eq!(HostKind::Muse.label(), "muse");
         assert_eq!(HostKind::Pi.label(), "pi");
     }

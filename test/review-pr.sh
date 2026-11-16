@@ -3039,6 +3039,129 @@ grep -Fq 'review-pr: refusing --ruling 78: issue comment has no column-0 refutes
 [ ! -e "$T/state/calls.txt" ] && [ ! -e "$T/state/runs.txt" ] || \
   fail "no-refutes ruling refusal calls no delegate command"
 
+# --- case #1964: a no-match refusal names every open candidate and source
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+plant_comment "2026-10-09T10:00:00Z" 260 "review-pr: patch-id none, head $FAKE_SHA
+
+## standards (M)
+
+P2 posted-round-row: posted round candidate
+VERDICT standards: CHANGES"
+printf 'P2 findings-file-row: findings candidate\n' >"$T/findings.txt"
+cap_i=1
+while [ "$cap_i" -le 20 ]; do
+  printf 'P3 capped-row-%02d: open candidate\n' "$cap_i" >>"$T/findings.txt"
+  cap_i=$((cap_i + 1))
+done
+printf '{"id":84,"body":"refutes: P2 absent-row","html_url":"https://example.invalid/o/n/issues/7#issuecomment-84","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-84.json"
+st=0
+err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 84 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "no-match ruling exits 2"
+grep -Fq 'review-pr: open candidate [posted round]: P2 posted-round-row: posted round candidate' <<<"$err" || \
+  fail "no-match refusal prints its posted-round candidate"
+grep -Fq 'review-pr: open candidate [findings file]: P2 findings-file-row: findings candidate' <<<"$err" || \
+  fail "no-match refusal prints its findings-file candidate"
+[ "$(grep -Fc 'review-pr: open candidate [' <<<"$err")" -eq 20 ] || \
+  fail "no-match refusal caps displayed candidates at 20"
+grep -Fq 'review-pr: ... 2 more candidate rows' <<<"$err" || \
+  fail "no-match refusal reports candidates omitted by the cap"
+[ ! -e "$T/state/runs.txt" ] || fail "no-match refusal calls no delegate"
+
+# --- case #1964: an ambiguous refusal lists matching rows, not unrelated rows
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+plant_comment "2026-10-09T10:00:00Z" 261 "review-pr: patch-id none, head $FAKE_SHA
+
+## standards (M)
+
+P2 shared-prefix: from the posted round
+VERDICT standards: CHANGES"
+printf 'P2 shared-prefix: from the findings file\nP2 unrelated-row: not a match\n' >"$T/findings.txt"
+printf '{"id":85,"body":"refutes: P2 shared-prefix","html_url":"https://example.invalid/o/n/issues/7#issuecomment-85","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-85.json"
+st=0
+err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 85 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "ambiguous ruling exits 2"
+grep -Fq 'review-pr: open candidate [posted round]: P2 shared-prefix: from the posted round' <<<"$err" || \
+  fail "ambiguous refusal prints its posted-round match"
+grep -Fq 'review-pr: open candidate [findings file]: P2 shared-prefix: from the findings file' <<<"$err" || \
+  fail "ambiguous refusal prints its findings-file match"
+! grep -Fq 'P2 unrelated-row' <<<"$err" || fail "ambiguous refusal omits unrelated open candidates"
+[ ! -e "$T/state/runs.txt" ] || fail "ambiguous refusal calls no delegate"
+
+# --- case #1964: bad-refutes explains the required P1/P2/P3 prefix format
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 file.txt:1 — finding — repair it\n' >"$T/findings.txt"
+printf '{"id":86,"body":"refutes: file.txt:1 — finding","html_url":"https://example.invalid/o/n/issues/7#issuecomment-86","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-86.json"
+st=0
+err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 86 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "bad-refutes ruling exits 2"
+grep -Fq 'bad-refutes: line must start with P1, P2 or P3 followed by a space and the row text' <<<"$err" || \
+  fail "bad-refutes refusal describes the required prefix"
+[ ! -e "$T/state/runs.txt" ] || fail "bad-refutes refusal calls no delegate"
+
+# --- case #1964: punctuation is a prefix boundary, but token continuations are not
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 x busy-waits: finding after punctuation\n' >"$T/findings.txt"
+printf '{"id":87,"body":"refutes: P2 x busy-waits","html_url":"https://example.invalid/o/n/issues/7#issuecomment-87","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-87.json"
+write_record verify DONE "FIX-OK all repaired
+STATUS: DONE" 0
+run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 87 2>"$T/punctuation-match.err")" || \
+  fail "punctuation-boundary ruling is accepted: $(cat "$T/punctuation-match.err")"
+grep -Fxq 'FIX-OK all repaired' <<<"$run_out" || fail "punctuation-boundary ruling runs verify"
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 x busy-waitsX: finding after token continuation\n' >"$T/findings.txt"
+printf '{"id":88,"body":"refutes: P2 x busy-waits","html_url":"https://example.invalid/o/n/issues/7#issuecomment-88","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-88.json"
+st=0
+err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 88 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "token-continuation ruling is refused as no-match"
+grep -Fq 'refusing --ruling 88: no-match' <<<"$err" || fail "token continuation is a no-match"
+[ ! -e "$T/state/runs.txt" ] || fail "token-continuation refusal calls no delegate"
+# A period is a boundary only before a space or at the end: a path prefix
+# must not match a longer filename.
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 x/y.sh: finding\n' >"$T/findings.txt"
+printf '{"id":90,"body":"refutes: P2 x/y","html_url":"https://example.invalid/o/n/issues/7#issuecomment-90","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-90.json"
+st=0
+err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 90 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "mid-token period ruling is refused"
+grep -Fq 'refusing --ruling 90: no-match' <<<"$err" || fail "a period inside a filename is not a boundary"
+[ ! -e "$T/state/runs.txt" ] || fail "mid-token period refusal calls no delegate"
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 x busy-waits. finding\n' >"$T/findings.txt"
+printf '{"id":91,"body":"refutes: P2 x busy-waits","html_url":"https://example.invalid/o/n/issues/7#issuecomment-91","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-91.json"
+write_record verify DONE "FIX-OK all repaired
+STATUS: DONE" 0
+run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 91 2>"$T/period-match.err")" || \
+  fail "period-then-space ruling is accepted: $(cat "$T/period-match.err")"
+grep -Fxq 'FIX-OK all repaired' <<<"$run_out" || fail "period-then-space ruling runs verify"
+
+# --- case #1964: when the comment is on another issue, refusal suggests --issue
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 file.txt:1 — finding — repair it\n' >"$T/findings.txt"
+printf '{"id":89,"body":"refutes: P2 file.txt:1","html_url":"https://example.invalid/o/n/issues/42#issuecomment-89","issue_url":"https://api.github.com/repos/O/N/issues/42","author_association":"OWNER"}\n' >"$T/state/ruling-comment-89.json"
+st=0
+err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 89 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "ruling on another issue is refused"
+grep -Fq 'comment is not on PR #7' <<<"$err" || fail "issue mismatch refusal names PR #7"
+grep -Fq 'if the ruling is on the ticket issue, add --issue 42' <<<"$err" || \
+  fail "issue mismatch refusal suggests --issue for issue #42"
+[ ! -e "$T/state/runs.txt" ] || fail "issue mismatch refusal calls no delegate"
+
 # --- case: --ruling without --verify is rejected before delegate calls
 reset_state
 rm -f "$T/state/calls.txt" "$T/state/runs.txt"

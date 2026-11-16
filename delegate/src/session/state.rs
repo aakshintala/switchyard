@@ -80,7 +80,8 @@ pub struct State {
     pub inbox: String,
     pub supervisor_pid: Option<i32>,
     pub host_pid: Option<i32>,
-    pub muse_session_id: Option<String>,
+    #[serde(alias = "muse_session_id", alias = "museSessionId")]
+    pub host_session_id: Option<String>,
     pub active_turn_id: Option<String>,
     pub turn_count: u64,
     pub started_at: u64,
@@ -105,7 +106,7 @@ pub fn new_state(id: &str, model: &str, cwd: &str, inbox: &str, now_ms: u64) -> 
         inbox: inbox.to_string(),
         supervisor_pid: None,
         host_pid: None,
-        muse_session_id: None,
+        host_session_id: None,
         active_turn_id: None,
         turn_count: 0,
         started_at: now_ms,
@@ -549,7 +550,7 @@ pub fn apply_event(state: &mut State, event: &HostEvent, now_ms: u64) -> Vec<Val
     }
     match event {
         HostEvent::SessionStarted { session_id } => {
-            state.muse_session_id = Some(session_id.clone())
+            state.host_session_id = Some(session_id.clone())
         }
         HostEvent::TurnStarted { turn_id } => {
             drop_steer(state, turn_id);
@@ -1229,6 +1230,36 @@ mod tests {
             read_state(&scratch.paths, &scratch.id),
             Err(StateError::Unreadable(_))
         ));
+    }
+
+    #[test]
+    fn legacy_muse_session_id_loads_from_old_state_files() {
+        let scratch = Scratch::new();
+        create_session_dir(&scratch.paths, &scratch.id).unwrap();
+        let mut legacy = serde_json::to_value(scratch.state()).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("hostSessionId");
+        object.insert("museSessionId".into(), json!("fiber-session"));
+        std::fs::write(
+            scratch.paths.state_file(&scratch.id),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = read_state(&scratch.paths, &scratch.id).unwrap();
+        let serialized = serde_json::to_value(loaded).unwrap();
+        assert_eq!(serialized["hostSessionId"], "fiber-session");
+        assert!(serialized.get("museSessionId").is_none());
+
+        let mut legacy_snake_case = serde_json::to_value(scratch.state()).unwrap();
+        let object = legacy_snake_case.as_object_mut().unwrap();
+        object.remove("hostSessionId");
+        object.insert("muse_session_id".into(), json!("fiber-session-snake"));
+        let loaded: State = serde_json::from_value(legacy_snake_case).unwrap();
+        assert_eq!(
+            serde_json::to_value(loaded).unwrap()["hostSessionId"],
+            "fiber-session-snake"
+        );
     }
 
     #[test]

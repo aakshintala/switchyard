@@ -70,6 +70,15 @@ plan_base() {
   awk '/^Base:[[:space:]]/ { gsub(/`/, "", $2); print $2; exit }' "$1"
 }
 
+# plan_has_commits_beyond_base WORKTREE BASE: true when HEAD has commits
+# beyond the known Base; an absent Base or an unreadable revision is false.
+plan_has_commits_beyond_base() {
+  local worktree="$1" base="${2:-}" count
+  [ -n "$base" ] || return 1
+  count="$(git -C "$worktree" rev-list --count "$base..HEAD" 2>/dev/null || printf 0)"
+  [ "$count" -gt 0 ]
+}
+
 # plan_outcome PLAN: the first token of the Outcome line with backticks
 # stripped, read the same way as plan_base. Prints nothing when there is no
 # Outcome line.

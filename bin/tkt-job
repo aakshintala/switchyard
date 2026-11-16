@@ -848,8 +848,8 @@ $digest" ;;
         case "$verdict" in
           "NO-COMMITS "*" gate=PASS"*) [ "$slot" = lane ] && push_only=1 ;;
         esac
-        if [ "$push_only" -eq 1 ] && [ -n "$hint_base" ] && [ "$(git -C "$worktree" rev-list --count "$hint_base..HEAD" 2>/dev/null || printf 0)" -gt 0 ]; then
-          digest="hint: this job has finished; a rerun only re-watches it. This verdict is about ${head_after:-unknown}, you are on $twelve; resume the push step with: tkt-job $state --slot $slot --resume $jobid --prompt <file> --gate-from-plan (the prompt asks only for the push step: push the branch and open the PR); journal the reason and continue.
+        if [ "$push_only" -eq 1 ] && plan_has_commits_beyond_base "$worktree" "${hint_base:-}"; then
+          digest="hint: this job has finished; a rerun only re-watches it. This verdict is about ${head_after:-unknown}, you are on $twelve; resume the push step with: tkt-job $state --slot $slot --resume $jobid --prompt <file> --gate-from-plan (the prompt asks for one push-only action: push the branch and open the PR); journal the reason and continue.
 $digest"
         else
           digest="hint: this job has finished; a rerun only re-watches it. This verdict is about ${head_after:-unknown}, you are on $twelve; clear the slot with: tkt-state $state set job.$slot ''; journal the reason and re-dispatch.
