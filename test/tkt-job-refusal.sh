@@ -26,29 +26,33 @@ fail() {
   exit 1
 }
 
-for tool in tkt-drive tkt-fix tkt-job tkt-build tkt-plan tkt-verify tkt-gate tkt-ship tkt-start; do
+# One row per entry point: the tool, then its arguments, all split on "|".
+# Each row runs the same way, so a new tkt-* tool needs only a row here.
+CASES=(
+  "tkt-drive|$STATE"
+  "tkt-fix|$STATE|--no-verify"
+  "tkt-job|$STATE|--slot|lane|--brief|$T/brief.md"
+  "tkt-build|$STATE"
+  "tkt-plan|$STATE|verify"
+  "tkt-verify|$STATE|--findings|$T/brief.md"
+  "tkt-gate|$STATE"
+  "tkt-ship|$STATE"
+  "tkt-start|--run|$T/run|--repo|acme/switchyard|--issue|123|--spec|$T/spec.md|--branch|refusal-test|--worktree|$T/worktree|--workflow-doc|$T/workflow.md|--closing|Resolves #123|--no-preflight"
+)
+
+# Pinned copy of bin/lib/job-refusal.sh's wording, so a change to it fails here.
+REFUSAL=": refusing to run inside delegate job refusal-fixture: a delegate job never runs the orchestrator's tkt-* tools; report to your orchestrator instead; if this is a top-level session, DELEGATE_JOB_ID leaked from its launcher (#1748): report that to switchyard"
+
+for row in "${CASES[@]}"; do
+  IFS='|' read -r -a args <<<"$row"
+  tool="${args[0]}"
   stdout="$T/$tool.stdout"
   stderr="$T/$tool.stderr"
   rc=0
-  case "$tool" in
-    tkt-drive) DELEGATE_JOB_ID=refusal-fixture bash "$ROOT/bin/$tool" "$STATE" >"$stdout" 2>"$stderr" || rc=$? ;;
-    tkt-fix) DELEGATE_JOB_ID=refusal-fixture bash "$ROOT/bin/$tool" "$STATE" --no-verify >"$stdout" 2>"$stderr" || rc=$? ;;
-    tkt-job) DELEGATE_JOB_ID=refusal-fixture bash "$ROOT/bin/$tool" "$STATE" --slot lane --brief "$T/brief.md" >"$stdout" 2>"$stderr" || rc=$? ;;
-    tkt-build) DELEGATE_JOB_ID=refusal-fixture bash "$ROOT/bin/$tool" "$STATE" >"$stdout" 2>"$stderr" || rc=$? ;;
-    tkt-plan) DELEGATE_JOB_ID=refusal-fixture bash "$ROOT/bin/$tool" "$STATE" verify >"$stdout" 2>"$stderr" || rc=$? ;;
-    tkt-verify) DELEGATE_JOB_ID=refusal-fixture bash "$ROOT/bin/$tool" "$STATE" --findings "$T/brief.md" >"$stdout" 2>"$stderr" || rc=$? ;;
-    tkt-gate) DELEGATE_JOB_ID=refusal-fixture bash "$ROOT/bin/$tool" "$STATE" >"$stdout" 2>"$stderr" || rc=$? ;;
-    tkt-ship) DELEGATE_JOB_ID=refusal-fixture bash "$ROOT/bin/$tool" "$STATE" >"$stdout" 2>"$stderr" || rc=$? ;;
-    tkt-start)
-      DELEGATE_JOB_ID=refusal-fixture bash "$ROOT/bin/$tool" \
-        --run "$T/run" --repo acme/switchyard --issue 123 --spec "$T/spec.md" \
-        --branch refusal-test --worktree "$T/worktree" --workflow-doc "$T/workflow.md" \
-        --closing 'Resolves #123' --no-preflight >"$stdout" 2>"$stderr" || rc=$?
-      ;;
-  esac
+  DELEGATE_JOB_ID=refusal-fixture bash "$ROOT/bin/$tool" "${args[@]:1}" >"$stdout" 2>"$stderr" || rc=$?
   [ "$rc" -eq 2 ] || fail "$tool exited $rc instead of 2 (stdout: $(cat "$stdout"); stderr: $(cat "$stderr"))"
   [ ! -s "$stdout" ] || fail "$tool wrote stdout: $(cat "$stdout")"
-  printf '%s\n' "$tool: refusing to run inside delegate job refusal-fixture: a lane never runs the orchestrator's tkt-* tools; report to your orchestrator instead; if this is a top-level session, DELEGATE_JOB_ID leaked from its launcher (#1748): report that to switchyard" >"$T/expected.err"
+  printf '%s%s\n' "$tool" "$REFUSAL" >"$T/expected.err"
   cmp -s "$T/expected.err" "$stderr" || fail "$tool refusal wording differs: $(cat "$stderr")"
   cmp -s "$T/state.before" "$STATE" || fail "$tool changed the state file"
   cmp -s "$T/journal.before" "$JOURNAL" || fail "$tool changed the journal"
