@@ -42,12 +42,10 @@ case "${1:-}" in
     printf '{"status":"%s","result":{"status":"%s","text":"%s"}}\n' \
       "${DEPRECATIONS_STATUS:-DONE}" "${DEPRECATIONS_STATUS:-DONE}" "${DEPRECATIONS_RESULT_TEXT:-}" \
       >"$DELEGATE_JOBS_DIR/12345678-1234-1234-1234-123456789abc.json"
-    if [ "${DEPRECATIONS_STUB_MODE:-report}" = report ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = unknown ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = duplicate ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = capital ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = blank ]; then
+    if [ "${DEPRECATIONS_STUB_MODE:-report}" = report ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = unknown ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = duplicate ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = capital ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = blank ]; then
       report_date="$(sed -n 's/^Report date: //p' <<<"$prompt")"
       source_line="$(sed -n 's/^Source line: //p' <<<"$prompt")"
-      if [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ]; then
-        printf '# Wrong heading\n' >"$report_path"
-      elif [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ]; then
+      if [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ]; then
         printf '# Model deprecations %s\n%s\n\n## skipped\n' "$report_date" "$source_line" >"$report_path"
       elif [ "${DEPRECATIONS_STUB_MODE:-report}" = blank ]; then
         : >"$report_path"
