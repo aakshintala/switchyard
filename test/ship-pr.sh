@@ -451,7 +451,12 @@ gh() {
         [ ! -e "$ST/merge-fails-but-merges" ] || echo MERGED >"$ST/state"
         exit 1
       fi
-      if [ -e "$ST/merge-fail-msg" ]; then cat "$ST/merge-fail-msg" >&2; [ ! -e "$ST/merge-fails-but-merges" ] || echo MERGED >"$ST/state"; exit 1; fi
+      if [ -e "$ST/merge-fail-msg" ]; then
+        cat "$ST/merge-fail-msg" >&2
+        grep -qF 'Merge already in progress' "$ST/merge-fail-msg" && { touch "$ST/in-progress-wait"; echo MERGED >"$ST/state"; }
+        [ ! -e "$ST/merge-fails-but-merges" ] || echo MERGED >"$ST/state"
+        exit 1
+      fi
       [ ! -e "$ST/merge-fail" ] || exit 1
       [ -e "$ST/no-merge" ] || echo MERGED >"$ST/state"
       [ ! -e "$ST/merge-deletes-branch" ] || git --git-dir="$ORIGIN" update-ref -d refs/heads/feature;;
@@ -515,6 +520,19 @@ advance_main() {
   git -C "$C" add . && git -C "$C" commit -qm "main $1"
   git -C "$C" push -q origin main
 }
+land_matching_squash() {
+  git -C "$C" fetch -q origin refs/heads/feature:refs/remotes/origin/feature
+  git -C "$C" merge --squash --no-commit origin/feature
+  git -C "$C" commit -qm 'feature (#7)'
+  git -C "$C" push -q origin main
+}
+land_wrong_patch() {
+  printf 'unrelated main content\n' >"$C/unrelated.txt"
+  git -C "$C" add unrelated.txt
+  git -C "$C" commit -qm 'feature (#7)'
+  git -C "$C" push -q origin main
+}
+export -f land_matching_squash land_wrong_patch
 # checks_hook <shell>: runs once, inside the first CI poll (a check-runs call).
 checks_hook() { printf '%s\n' "$1" >"$ST/checks-hook"; }
 # checks_each <shell>: runs inside every CI poll (a check-runs call).
@@ -2580,6 +2598,39 @@ grep -q 'retrying once' <<<"$ERR" || fail "GraphQL retry message: [$ERR]"
 grep -q 'GraphQL' <<<"$ERR" || fail "GraphQL error printed: [$ERR]"
 grep -q '^5$' "$ST/sleeps.txt" || fail "GraphQL retry sleeps 5 s"
 [ ! -e "$WT" ] || fail "worktree removed after a GraphQL retry"
+
+setup
+printf 'GraphQL: HTTP 502' >"$ST/merge-fail-once"
+merge_each 'if [ ! -e "$ST/m1" ]; then touch "$ST/m1"; else printf "%s\\n" "GraphQL: Merge already in progress (mergePullRequest)" >"$ST/merge-fail-msg"; fi'
+ship
+expect 0 "GraphQL 502 followed by an in-progress merge"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "in-progress merge eventually reports MERGED: [$OUT]"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 2 ] || fail "Merge already in progress does not trigger another merge call"
+grep -q 'waiting for the in-progress merge' <<<"$ERR" || fail "in-progress merge waiting line: [$ERR]"
+grep -q $'^gh pr\\tview\\t7\\t--repo\\tO/N\\t--json\\tstate,mergeCommit' "$ST/gh.log" || fail "in-progress path re-reads PR state: [$(cat "$ST/gh.log")]"
+
+setup
+printf 'Pull request cannot be merged: review required.' >"$ST/merge-fail-once"
+printf 'Resolves #97\n' >"$ST/body"
+printf '{"state":"OPEN"}\n' >"$ST/ticket-97.json"
+merge_once 'land_matching_squash'
+ship; expect 0 "matching squash commit recovers a failed merge"
+LANDED_SHA="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+[ "$OUT" = "merged $LANDED_SHA (PR record not updated by GitHub)" ] || fail "landed merge line: [$OUT]"
+grep -qF 'PR #7 is still open' <<<"$ERR" || fail "stale PR record warning: [$ERR]"
+grep -qF 'Resolves issues still open: #97' <<<"$ERR" || fail "open Resolves issue warning: [$ERR]"
+grep -qF 'close them manually' <<<"$ERR" || fail "manual issue closure requested: [$ERR]"
+[ ! -e "$WT" ] || fail "worktree cleanup ran after detecting the landed commit"
+git -C "$C" show-ref --verify --quiet refs/heads/feature && fail "local feature branch cleanup ran after landed merge"
+git --git-dir="$ORIGIN" show-ref --verify --quiet refs/heads/feature && fail "remote feature branch cleanup ran after landed merge"
+grep -q 'worktree removed:' <<<"$ERR" || fail "worktree removal logged after landed merge: [$ERR]"
+
+setup
+printf 'Pull request cannot be merged: review required.' >"$ST/merge-fail-once"
+merge_once 'land_wrong_patch'
+ship; expect 1 "matching subject with a different patch is not claimed"
+grep -q 'gh pr merge failed' <<<"$ERR" || fail "different landed patch retains merge failure: [$ERR]"
+[ -d "$WT" ] || fail "worktree remains when landed patch does not match"
 
 setup; printf 'GraphQL error: still broken' >"$ST/merge-fail-msg"; touch "$ST/merge-fails-but-merges"
 ship; expect 0 "failed GraphQL retry still polls MERGED"
