@@ -59,6 +59,27 @@ impl Env {
         fiber_bin: bool,
         extra_env: &[(&str, &str)],
     ) -> Output {
+        let mut child = self
+            .delegate_command(args, fiber_bin, extra_env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut si = child.stdin.take().unwrap();
+        if let Some(text) = stdin {
+            let _ = si.write_all(text.as_bytes());
+        }
+        drop(si);
+        child.wait_with_output().unwrap()
+    }
+
+    fn delegate_command(
+        &self,
+        args: &[&str],
+        fiber_bin: bool,
+        extra_env: &[(&str, &str)],
+    ) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
         cmd.args(model_ruling::args_with_model_ruling(args))
             .current_dir(&self.dir)
@@ -79,18 +100,7 @@ impl Env {
             cmd.env_remove("FIBER_BIN");
         }
         cmd.envs(extra_env.iter().copied());
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut si = child.stdin.take().unwrap();
-        if let Some(text) = stdin {
-            let _ = si.write_all(text.as_bytes());
-        }
-        drop(si);
-        child.wait_with_output().unwrap()
+        cmd
     }
 
     fn delegate(&self, args: &[&str], stdin: Option<&str>) -> Output {
@@ -759,24 +769,7 @@ fn fiber_session_send_resumes_an_idle_exited_fiber_with_a_prompt() {
     );
     let state: Value = serde_json::from_slice(&start.stdout).unwrap();
     let id = state["session"]["id"].as_str().unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let logs = e.delegate(&["session", "logs", id, "--json"], None);
-        let logs: Value = serde_json::from_slice(&logs.stdout).unwrap();
-        if logs["lines"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|line| line["kind"] == "session.exited" && line["reason"] == "idle")
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "idle exit was not logged: {logs:#}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    LogFollow::new(&e, id).until("the idle exit", is_idle_exit);
     let sent = e.delegate(
         &["session", "send", id, "resume after idle exit", "--json"],
         None,
@@ -788,19 +781,8 @@ fn fiber_session_send_resumes_an_idle_exited_fiber_with_a_prompt() {
     );
     let value: Value = serde_json::from_slice(&sent.stdout).unwrap();
     assert_eq!(value["disposition"], "started", "{value:#}");
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let status = e.delegate(&["session", "status", id, "--json"], None);
-        let status: Value = serde_json::from_slice(&status.stdout).unwrap();
-        if status["session"]["status"] == "idle" {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "resumed turn did not complete: {status:#}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    // The resumed turn completes.
+    watch_until(&e, id, "idle");
     let stopped = e.delegate(&["session", "stop", id, "--json"], None);
     assert!(
         stopped.status.success(),
@@ -873,37 +855,8 @@ fn fiber_session_stop_after_idle_exit_sends_no_hub_command() {
     );
     let state: Value = serde_json::from_slice(&start.stdout).unwrap();
     let id = state["session"]["id"].as_str().unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let status = e.delegate(&["session", "status", id, "--json"], None);
-        let value: Value = serde_json::from_slice(&status.stdout).unwrap();
-        if value["session"]["status"] == "idle" {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "session did not become idle: {value:#}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let logs = e.delegate(&["session", "logs", id, "--json"], None);
-        let logs: Value = serde_json::from_slice(&logs.stdout).unwrap();
-        if logs["lines"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|line| line["kind"] == "session.exited" && line["reason"] == "idle")
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "idle exit was not logged: {logs:#}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    watch_until(&e, id, "idle");
+    LogFollow::new(&e, id).until("the idle exit", is_idle_exit);
     let stopped = e.delegate(&["session", "stop", id, "--json"], None);
     assert!(
         stopped.status.success(),
@@ -1423,21 +1376,83 @@ fn session_log_lines(e: &Env, id: &str) -> Vec<Value> {
     value["lines"].as_array().unwrap().clone()
 }
 
-fn wait_for_status(e: &Env, id: &str, status: &str, within: Duration) -> Value {
-    let deadline = std::time::Instant::now() + within;
-    loop {
-        let state = session_state(e, id);
-        if state["status"] == status {
-            return state;
+/// Blocks in `session watch`, which returns once the session is not
+/// running, and checks it settled as `status`. Watch exits 0 at idle and 4
+/// when dead.
+fn watch_until(e: &Env, id: &str, status: &str) -> Value {
+    let out = e.delegate(&["session", "watch", id, "--json"], None);
+    let watched: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+        panic!(
+            "watch printed no state: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    let state = watched["session"].clone();
+    assert_eq!(state["status"], status, "{state:#}");
+    let code = if status == "dead" { 4 } else { 0 };
+    assert_eq!(out.status.code(), Some(code), "{state:#}");
+    state
+}
+
+/// `session logs --follow --json`, read line by line as the supervisor
+/// writes them. The guard on each read only turns a hang into a failure.
+struct LogFollow {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<Value>,
+}
+
+impl LogFollow {
+    fn new(e: &Env, id: &str) -> Self {
+        let mut child = e
+            .delegate_command(&["session", "logs", id, "--follow", "--json"], true, &[])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, lines) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if tx.send(value).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { child, lines }
+    }
+
+    /// Reads to the first line `matches` accepts.
+    fn until(&self, what: &str, matches: impl Fn(&Value) -> bool) -> Value {
+        loop {
+            match self.lines.recv_timeout(Duration::from_secs(20)) {
+                Ok(line) if matches(&line) => return line,
+                Ok(_) => {}
+                Err(error) => panic!("{what} was not logged: {error}"),
+            }
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "session did not become {status}: {state:#}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
+impl Drop for LogFollow {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn is_idle_exit(line: &Value) -> bool {
+    line["kind"] == "session.exited" && line["reason"] == "idle"
+}
+
+/// Waits for the supervisor's inbox note, which it writes just after the
+/// state change `watch_until` returns on. The note file is itself the
+/// supervisor's signal, read as the `DELEGATE_SESSION_TEST_*` readiness
+/// files are; a hook would be a second file written beside it.
 fn wait_for_note(inbox: &Path, note: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -1488,7 +1503,7 @@ fn one_fiber_turn(turn_events: fn(&str) -> Vec<Value>) -> OneTurn {
         conn.send(event("fiber_exited", session_id, 99, json!({"exit_code":0})));
     });
     let id = started_session_id(&start_fiber_session(&e, MODEL, &brief, &inbox, &[]));
-    wait_for_status(&e, &id, "idle", Duration::from_secs(10));
+    // Watch blocks until the turn ends; 0 is idle.
     let watch = e.delegate(&["session", "watch", &id, "--json"], None);
     assert_eq!(
         watch.status.code(),
@@ -1626,7 +1641,7 @@ fn fiber_session_reconnect_exhaustion_marks_the_session_dead() {
         // goes with it, so every reconnect attempt is refused.
     });
     let id = started_session_id(&start_fiber_session(&e, MODEL, &brief, &inbox, &[]));
-    let state = wait_for_status(&e, &id, "dead", Duration::from_secs(20));
+    let state = watch_until(&e, &id, "dead");
     assert_eq!(state["dead"]["reason"], "hostExited", "{state:#}");
     assert_eq!(state["dead"]["exitCode"], 1, "{state:#}");
     wait_for_note(&inbox, &format!("[session {id} dead]\n"));
@@ -1697,7 +1712,7 @@ fn fiber_session_start_accepts_both_lane_model_fiber_rows() {
         });
         let id = started_session_id(&start_fiber_session(&e, model, &brief, &inbox, &[]));
         assert_eq!(session_state(&e, &id)["model"], model);
-        wait_for_status(&e, &id, "idle", Duration::from_secs(10));
+        watch_until(&e, &id, "idle");
         let stopped = e.delegate(&["session", "stop", &id, "--json"], None);
         assert!(
             stopped.status.success(),
@@ -1799,14 +1814,14 @@ fn fiber_session_stop_sends_close_now_when_fiber_does_not_exit_within_the_grace(
     });
     let grace = [("DELEGATE_SESSION_GRACE_MS", "300")];
     let id = started_session_id(&start_fiber_session(&e, MODEL, &brief, &inbox, &grace));
-    wait_for_status(&e, &id, "idle", Duration::from_secs(10));
+    watch_until(&e, &id, "idle");
     let stopped = e.command_with_env(&["session", "stop", &id, "--json"], None, true, &grace);
     assert!(
         stopped.status.success(),
         "{}",
         String::from_utf8_lossy(&stopped.stderr)
     );
-    let state = wait_for_status(&e, &id, "dead", Duration::from_secs(10));
+    let state = watch_until(&e, &id, "dead");
     assert_eq!(state["dead"]["reason"], "stopped", "{state:#}");
     let commands = fake.finish();
     assert_eq!(
