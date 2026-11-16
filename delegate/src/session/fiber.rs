@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -15,6 +15,12 @@ fn now_ms() -> u64 {
 
 /// How long the bridge waits for Fiber to exit after `close` with `now`.
 pub(crate) const CLOSE_NOW_WAIT: Duration = Duration::from_secs(1);
+
+/// How long the bridge waits for Fiber to settle a `prompt` or `steer`. The
+/// supervisor kills a host that leaves a request unanswered for
+/// `RPC_TIMEOUT`, so the bridge answers with an error well inside it.
+const DISPOSITION_WAIT: Duration =
+    Duration::from_millis(crate::session::supervisor::RPC_TIMEOUT / 2);
 
 pub fn main(args: &[String]) -> i32 {
     let Some(model) = args
@@ -35,10 +41,6 @@ pub fn main(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let mut stdout = io::BufWriter::new(io::stdout().lock());
-    let mut session: Option<HubSession> = None;
-    let mut session_id = String::new();
-    let mut running = false;
     let (input_tx, input_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         for line in io::stdin().lock().lines() {
@@ -48,53 +50,239 @@ pub fn main(args: &[String]) -> i32 {
             }
         }
     });
-    let mut idle_exited = false;
-    let mut events = EventMap::default();
+    let mut bridge = Bridge::new(io::BufWriter::new(io::stdout().lock()), model, cwd, socket);
     loop {
-        if let Some(link) = session.as_ref() {
-            while let Some(message) = link.try_recv() {
-                match message {
-                    HubSessionLine::Line(line) => {
-                        if let Ok(event) = serde_json::from_str::<Value>(&line) {
-                            let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
-                            if kind == "turn_started" {
-                                running = true;
-                                idle_exited = false;
-                            }
-                            if kind == "turn_completed" {
-                                running = false;
-                            }
-                            if kind == "fiber_exited" {
-                                idle_exited = !running;
-                                if idle_exited {
-                                    emit_idle_exit(&mut stdout);
-                                } else {
-                                    events.emit(&mut stdout, &event);
-                                }
-                            } else {
-                                events.emit(&mut stdout, &event);
-                            }
-                        }
-                    }
-                    HubSessionLine::Lost(error) => {
-                        eprintln!("{error}");
-                        return 1;
-                    }
-                    HubSessionLine::Ready(_) => {}
-                }
-            }
+        if let Some(code) = bridge.drain_hub() {
+            return code;
         }
+        bridge.expire(Instant::now());
         let line = match input_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => line,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
+        if let Some(code) = bridge.on_request(&line) {
+            return code;
+        }
+    }
+    bridge.shutdown();
+    0
+}
+
+fn should_steer(method: &str, running: bool) -> bool {
+    method == "turn/steer" && running
+}
+
+/// A `prompt` or `steer` sent to Fiber whose request the bridge has not
+/// answered yet. The main loop keeps reading the supervisor while it waits.
+struct Pending {
+    rpc_id: i64,
+    command_id: String,
+    text: String,
+    steer: bool,
+    deadline: Instant,
+}
+
+enum Disposition {
+    Started(String),
+    Steered(String),
+    RetrySteer,
+    Rejected(String),
+}
+
+/// What a hub line settles for the pending command, if anything.
+fn disposition(event: &Value, command_id: &str, steer: bool) -> Option<Disposition> {
+    let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
+    let payload = event.get("payload").unwrap_or(&Value::Null);
+    let names_command =
+        |item: &Value| item.get("command_id").and_then(Value::as_str) == Some(command_id);
+    match kind {
+        "turn_started"
+            if payload
+                .get("input")
+                .and_then(Value::as_array)
+                .is_some_and(|input| input.iter().any(names_command)) =>
+        {
+            Some(Disposition::Started(envelope_turn_id(event)))
+        }
+        // An applied steer is the user message the supervisor drops its
+        // pending steer on; a queued one is not delivered yet.
+        "steering_applied" | "steering_queue" if names_command(payload) => {
+            Some(Disposition::Steered(envelope_turn_id(event)))
+        }
+        "command_rejected" if names_command(payload) => {
+            let code = payload
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("rejected");
+            if !steer && code == "busy" {
+                return Some(Disposition::RetrySteer);
+            }
+            Some(Disposition::Rejected(format!(
+                "hub rejected {code}: {}",
+                payload.get("message").and_then(Value::as_str).unwrap_or("")
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// The bridge between the supervisor's MSP requests and one hub session.
+struct Bridge<W: Write> {
+    out: W,
+    model: String,
+    cwd: String,
+    socket: PathBuf,
+    link: Option<HubSession>,
+    session_id: String,
+    running: bool,
+    idle_exited: bool,
+    events: EventMap,
+    pending: Option<Pending>,
+    disposition_wait: Duration,
+}
+
+impl<W: Write> Bridge<W> {
+    fn new(out: W, model: String, cwd: String, socket: PathBuf) -> Self {
+        Self {
+            out,
+            model,
+            cwd,
+            socket,
+            link: None,
+            session_id: String::new(),
+            running: false,
+            idle_exited: false,
+            events: EventMap::default(),
+            pending: None,
+            disposition_wait: DISPOSITION_WAIT,
+        }
+    }
+
+    /// Handles every hub line already waiting. `Some` is the bridge's exit
+    /// code: the hub session is lost, or Fiber no longer knows the session.
+    fn drain_hub(&mut self) -> Option<i32> {
+        while let Some(message) = self.link.as_ref().and_then(HubSession::try_recv) {
+            match message {
+                HubSessionLine::Line(line) => {
+                    if let Ok(event) = serde_json::from_str::<Value>(&line)
+                        && let Some(code) = self.on_hub_event(&event)
+                    {
+                        return Some(code);
+                    }
+                }
+                HubSessionLine::Lost(error) => {
+                    if let Some(pending) = self.pending.take() {
+                        write_error(&mut self.out, pending.rpc_id, -32000, &error);
+                    }
+                    eprintln!("{error}");
+                    return Some(1);
+                }
+                HubSessionLine::Ready(_) => {}
+            }
+        }
+        None
+    }
+
+    fn on_hub_event(&mut self, event: &Value) -> Option<i32> {
+        if let Some(pending) = self.pending.as_ref()
+            && let Some(settled) = disposition(event, &pending.command_id, pending.steer)
+        {
+            return self.settle(event, settled);
+        }
+        match event.get("kind").and_then(Value::as_str).unwrap_or("") {
+            "turn_started" => {
+                self.running = true;
+                self.idle_exited = false;
+                self.events.emit(&mut self.out, event);
+            }
+            "turn_completed" => {
+                self.running = false;
+                self.events.emit(&mut self.out, event);
+            }
+            "fiber_exited" => {
+                self.idle_exited = !self.running;
+                if self.idle_exited {
+                    emit_idle_exit(&mut self.out);
+                } else {
+                    self.events.emit(&mut self.out, event);
+                }
+            }
+            _ => self.events.emit(&mut self.out, event),
+        }
+        None
+    }
+
+    fn settle(&mut self, event: &Value, settled: Disposition) -> Option<i32> {
+        let (disposition, turn_id) = match settled {
+            Disposition::Started(turn_id) => {
+                self.events.emit(&mut self.out, event);
+                self.running = true;
+                self.idle_exited = false;
+                ("started", turn_id)
+            }
+            Disposition::Steered(turn_id) => {
+                self.events.emit(&mut self.out, event);
+                ("steered", turn_id)
+            }
+            Disposition::RetrySteer => {
+                // Fiber took a turn between the bridge's look and its
+                // prompt: send the same text again as a steer, once.
+                let pending = self.pending.as_mut()?;
+                pending.steer = true;
+                let raw = hub::steer_command(&pending.command_id, &self.session_id, &pending.text);
+                let command = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
+                let sent = self
+                    .link
+                    .as_ref()
+                    .is_some_and(|link| link.send(command).is_ok());
+                if !sent && let Some(pending) = self.pending.take() {
+                    write_error(&mut self.out, pending.rpc_id, -32000, "hub writer stopped");
+                }
+                return None;
+            }
+            Disposition::Rejected(message) => {
+                let pending = self.pending.take()?;
+                write_error(&mut self.out, pending.rpc_id, -32000, &message);
+                return message.contains("session_not_found").then_some(1);
+            }
         };
-        let Some(id) = value.get("id").and_then(Value::as_i64) else {
-            continue;
+        let pending = self.pending.take()?;
+        write_result(
+            &mut self.out,
+            pending.rpc_id,
+            json!({"turnId":turn_id,"disposition":disposition}),
+        );
+        None
+    }
+
+    /// Answers a pending command Fiber has not settled by its deadline with
+    /// an error. The session stays up: Fiber may still be busy, and a later
+    /// line for the command is handled as any other.
+    fn expire(&mut self, now: Instant) {
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| now >= pending.deadline)
+        {
+            return;
+        }
+        if let Some(pending) = self.pending.take() {
+            let command = if pending.steer { "steer" } else { "prompt" };
+            let message = format!(
+                "Fiber did not answer the {command} within {} ms",
+                self.disposition_wait.as_millis()
+            );
+            write_error(&mut self.out, pending.rpc_id, -32000, &message);
+        }
+    }
+
+    /// Handles one supervisor line. `Some` is the bridge's exit code.
+    fn on_request(&mut self, line: &str) -> Option<i32> {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return None;
         };
+        let id = value.get("id").and_then(Value::as_i64)?;
         let method = value
             .get("method")
             .and_then(Value::as_str)
@@ -106,13 +294,13 @@ pub fn main(args: &[String]) -> i32 {
                 let cwd = params
                     .get("workspaceRoot")
                     .and_then(Value::as_str)
-                    .unwrap_or(&cwd)
+                    .unwrap_or(&self.cwd)
                     .to_string();
-                let link = hub::spawn_session(model.clone(), cwd, PathBuf::from(&socket));
+                let link = hub::spawn_session(self.model.clone(), cwd, self.socket.clone());
                 match link.recv(Duration::from_secs(60)) {
                     Ok(HubSessionLine::Ready(id)) => {
-                        session_id = id.clone();
-                        session = Some(link);
+                        self.session_id = id.clone();
+                        self.link = Some(link);
                         Ok(json!({"session":{"sessionId":id}}))
                     }
                     Ok(HubSessionLine::Lost(error)) | Err(error) => Err((-32000, error)),
@@ -122,231 +310,110 @@ pub fn main(args: &[String]) -> i32 {
                 }
             }
             "turn/start" | "turn/steer" => {
-                let Some(link) = session.as_ref() else {
-                    write_error(&mut stdout, id, -32000, "session is not started");
-                    continue;
-                };
-                let text = params
-                    .get("input")
-                    .and_then(Value::as_array)
-                    .and_then(|a| a.first())
-                    .and_then(|v| v.get("text"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let command_id = params
-                    .get("commandId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let steering = should_steer(method, running);
-                let make_command = |steer: bool| {
-                    let raw = if steer {
-                        hub::steer_command(&command_id, &session_id, text)
-                    } else {
-                        hub::prompt_command(&command_id, &session_id, text)
-                    };
-                    serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null)
-                };
-                let mut steer = steering;
-                if link.send(make_command(steer)).is_err() {
-                    write_error(&mut stdout, id, -32000, "hub writer stopped");
-                    continue;
-                }
-                match await_disposition(
-                    link,
-                    &mut stdout,
-                    &mut events,
-                    &command_id,
-                    id,
-                    &mut running,
-                    steer,
-                    &session_id,
-                    text,
-                ) {
-                    Ok((disposition, turn_id)) => {
-                        if disposition == "retry-steer" {
-                            steer = true;
-                            if link.send(make_command(true)).is_err() {
-                                write_error(&mut stdout, id, -32000, "hub writer stopped");
-                                continue;
-                            }
-                            match await_disposition(
-                                link,
-                                &mut stdout,
-                                &mut events,
-                                &command_id,
-                                id,
-                                &mut running,
-                                steer,
-                                &session_id,
-                                text,
-                            ) {
-                                Ok((d, tid)) => {
-                                    if d == "started" {
-                                        idle_exited = false;
-                                    }
-                                    write_result(
-                                        &mut stdout,
-                                        id,
-                                        json!({"turnId":tid,"disposition":d}),
-                                    );
-                                }
-                                Err((code, message)) => {
-                                    write_error(&mut stdout, id, code, &message);
-                                    if !message.starts_with("hub rejected")
-                                        || message.contains("session_not_found")
-                                    {
-                                        return 1;
-                                    }
-                                }
-                            }
-                        } else {
-                            if disposition == "started" {
-                                idle_exited = false;
-                            }
-                            write_result(
-                                &mut stdout,
-                                id,
-                                json!({"turnId":turn_id,"disposition":disposition}),
-                            );
-                        }
-                    }
-                    Err((code, message)) => {
-                        write_error(&mut stdout, id, code, &message);
-                        if !message.starts_with("hub rejected")
-                            || message.contains("session_not_found")
-                        {
-                            return 1;
-                        }
-                    }
-                }
-                continue;
+                self.begin_command(id, method, &params);
+                return None;
             }
+            // Read even while a prompt or steer waits, so it goes out at once.
             "turn/interrupt" => {
-                if let Some(link) = session.as_ref() {
-                    let raw = hub::cancel_command(&msp::uuid7(now_ms()), &session_id);
+                if let Some(link) = self.link.as_ref() {
+                    let raw = hub::cancel_command(&msp::uuid7(now_ms()), &self.session_id);
                     let command = serde_json::from_str(&raw).unwrap_or(Value::Null);
                     let _ = link.send(command);
-                    Ok(json!({"interrupted":true}))
-                } else {
-                    Ok(json!({"interrupted":true}))
                 }
+                Ok(json!({"interrupted":true}))
             }
-            "initialized" => continue,
+            "initialized" => return None,
             _ => Ok(Value::Null),
         };
         match result {
-            Ok(value) => write_result(&mut stdout, id, value),
-            Err((code, message)) => write_error(&mut stdout, id, code, &message),
+            Ok(value) => write_result(&mut self.out, id, value),
+            Err((code, message)) => write_error(&mut self.out, id, code, &message),
         }
+        None
     }
-    if let Some(link) = session.as_ref() {
-        while let Some(message) = link.try_recv() {
+
+    /// Sends a `prompt`, or a `steer` while a turn runs, and leaves its
+    /// request pending until Fiber settles it.
+    fn begin_command(&mut self, id: i64, method: &str, params: &Value) {
+        let Some(link) = self.link.as_ref() else {
+            write_error(&mut self.out, id, -32000, "session is not started");
+            return;
+        };
+        if self.pending.is_some() {
+            write_error(
+                &mut self.out,
+                id,
+                -32000,
+                "an earlier prompt or steer is still waiting for Fiber",
+            );
+            return;
+        }
+        let text = params
+            .get("input")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(|v| v.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let command_id = params
+            .get("commandId")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let steer = should_steer(method, self.running);
+        let raw = if steer {
+            hub::steer_command(command_id, &self.session_id, text)
+        } else {
+            hub::prompt_command(command_id, &self.session_id, text)
+        };
+        let command = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
+        if link.send(command).is_err() {
+            write_error(&mut self.out, id, -32000, "hub writer stopped");
+            return;
+        }
+        self.pending = Some(Pending {
+            rpc_id: id,
+            command_id: command_id.to_string(),
+            text: text.to_string(),
+            steer,
+            deadline: Instant::now() + self.disposition_wait,
+        });
+    }
+
+    /// Stdin has closed: read what the hub already sent, then close the
+    /// session, and close it with `now` when Fiber does not exit in the grace.
+    fn shutdown(&mut self) {
+        while let Some(message) = self.link.as_ref().and_then(HubSession::try_recv) {
             if let HubSessionLine::Line(line) = message
                 && let Ok(event) = serde_json::from_str::<Value>(&line)
             {
-                let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
-                if kind == "turn_completed" {
-                    running = false;
-                }
-                if kind == "fiber_exited" {
-                    idle_exited = !running;
-                    if idle_exited {
-                        emit_idle_exit(&mut stdout);
-                    } else {
-                        events.emit(&mut stdout, &event);
-                    }
-                } else {
-                    events.emit(&mut stdout, &event);
-                }
+                let _ = self.on_hub_event(&event);
             }
         }
-        if !idle_exited {
-            let close_id = msp::uuid7(now_ms());
-            let raw = serde_json::json!({"id":close_id,"command":"close","session_id":session_id});
-            let _ = link.send(raw);
-            if !await_exit(link, &mut stdout, &mut events, &mut running, stop_grace()) {
-                let now = msp::uuid7(now_ms());
-                let _ = link.send(serde_json::json!({"id":now,"command":"close","session_id":session_id,"args":{"now":true}}));
-                let _ = await_exit(link, &mut stdout, &mut events, &mut running, CLOSE_NOW_WAIT);
-            }
-        }
-    }
-    0
-}
-
-fn should_steer(method: &str, running: bool) -> bool {
-    method == "turn/steer" && running
-}
-
-#[allow(clippy::too_many_arguments)]
-fn await_disposition(
-    link: &HubSession,
-    out: &mut impl Write,
-    events: &mut EventMap,
-    command_id: &str,
-    rpc_id: i64,
-    running: &mut bool,
-    steer: bool,
-    session_id: &str,
-    text: &str,
-) -> Result<(String, String), (i64, String)> {
-    loop {
-        let line = match link.recv(Duration::from_secs(120)) {
-            Ok(HubSessionLine::Line(line)) => line,
-            Ok(HubSessionLine::Lost(error)) | Err(error) => return Err((-32000, error)),
-            Ok(HubSessionLine::Ready(_)) => continue,
+        let Some(link) = self.link.as_ref() else {
+            return;
         };
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let kind = v.get("kind").and_then(Value::as_str).unwrap_or("");
-        let payload = v.get("payload").unwrap_or(&Value::Null);
-        if kind == "turn_started" {
-            let found = payload
-                .get("input")
-                .and_then(Value::as_array)
-                .is_some_and(|a| {
-                    a.iter()
-                        .any(|i| i.get("command_id").and_then(Value::as_str) == Some(command_id))
-                });
-            if found {
-                events.emit(out, &v);
-                *running = true;
-                return Ok(("started".into(), envelope_turn_id(&v)));
-            }
+        if self.idle_exited {
+            return;
         }
-        if matches!(kind, "steering_applied" | "steering_queue")
-            && payload.get("command_id").and_then(Value::as_str) == Some(command_id)
-        {
-            // An applied steer is the user message the supervisor drops its
-            // pending steer on; a queued one is not delivered yet.
-            events.emit(out, &v);
-            return Ok(("steered".into(), envelope_turn_id(&v)));
+        let close_id = msp::uuid7(now_ms());
+        let _ = link.send(json!({"id":close_id,"command":"close","session_id":self.session_id}));
+        if !await_exit(
+            link,
+            &mut self.out,
+            &mut self.events,
+            &mut self.running,
+            stop_grace(),
+        ) {
+            let now = msp::uuid7(now_ms());
+            let _ = link.send(json!({"id":now,"command":"close","session_id":self.session_id,"args":{"now":true}}));
+            let _ = await_exit(
+                link,
+                &mut self.out,
+                &mut self.events,
+                &mut self.running,
+                CLOSE_NOW_WAIT,
+            );
         }
-        if kind == "command_rejected"
-            && payload.get("command_id").and_then(Value::as_str) == Some(command_id)
-        {
-            let code = payload
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or("rejected");
-            if !steer && code == "busy" {
-                return Ok(("retry-steer".into(), String::new()));
-            }
-            return Err((
-                -32000,
-                format!(
-                    "hub rejected {code}: {}",
-                    payload.get("message").and_then(Value::as_str).unwrap_or("")
-                ),
-            ));
-        }
-        if kind == "turn_completed" {
-            *running = false;
-        }
-        events.emit(out, &v);
-        let _ = (rpc_id, session_id, text);
     }
 }
 
@@ -598,13 +665,52 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
-    fn link_with_line(value: Value) -> HubSession {
-        let (commands, _command_rx) = mpsc::channel();
+    /// A bridge on a started session whose hub is two channels: the commands
+    /// it sends and the lines the test feeds it.
+    fn test_bridge() -> (
+        Bridge<Vec<u8>>,
+        mpsc::Receiver<String>,
+        mpsc::Sender<HubSessionLine>,
+    ) {
+        let (commands, command_rx) = mpsc::channel();
         let (line_tx, lines) = mpsc::channel();
-        line_tx
-            .send(HubSessionLine::Line(value.to_string()))
-            .unwrap();
-        HubSession::from_channels(commands, lines)
+        let mut bridge = Bridge::new(Vec::new(), "m".into(), "/w".into(), PathBuf::new());
+        bridge.link = Some(HubSession::from_channels(commands, lines));
+        bridge.session_id = "s1".into();
+        (bridge, command_rx, line_tx)
+    }
+
+    fn request(
+        bridge: &mut Bridge<Vec<u8>>,
+        id: i64,
+        method: &str,
+        command_id: &str,
+    ) -> Option<i32> {
+        let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":{"commandId":command_id,"input":[{"type":"text","text":"text"}]}});
+        bridge.on_request(&line.to_string())
+    }
+
+    fn feed(
+        bridge: &mut Bridge<Vec<u8>>,
+        lines: &mpsc::Sender<HubSessionLine>,
+        event: Value,
+    ) -> Option<i32> {
+        lines.send(HubSessionLine::Line(event.to_string())).unwrap();
+        bridge.drain_hub()
+    }
+
+    /// Every line the bridge has written since the last call.
+    fn written(bridge: &mut Bridge<Vec<u8>>) -> Vec<Value> {
+        let out = std::mem::take(&mut bridge.out);
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn sent(commands: &mpsc::Receiver<String>) -> Value {
+        serde_json::from_str(&commands.try_recv().expect("a hub command")).unwrap()
     }
 
     #[test]
@@ -616,117 +722,173 @@ mod tests {
 
     #[test]
     fn busy_prompt_disposition_requests_one_steer_retry() {
-        let link = link_with_line(
+        let (mut bridge, commands, lines) = test_bridge();
+        assert_eq!(request(&mut bridge, 1, "turn/start", "c1"), None);
+        assert_eq!(sent(&commands)["command"], "prompt");
+        feed(
+            &mut bridge,
+            &lines,
             json!({"kind":"command_rejected","payload":{"command_id":"c1","code":"busy"}}),
         );
-        let mut output = Vec::new();
-        let result = await_disposition(
-            &link,
-            &mut output,
-            &mut EventMap::default(),
-            "c1",
-            1,
-            &mut false,
-            false,
-            "s1",
-            "text",
+        let retry = sent(&commands);
+        assert_eq!(retry["command"], "steer");
+        assert_eq!(retry["id"], "c1");
+        assert!(
+            written(&mut bridge).is_empty(),
+            "no answer before the steer settles"
         );
-        assert_eq!(result.unwrap().0, "retry-steer");
+        assert!(bridge.pending.as_ref().is_some_and(|pending| pending.steer));
     }
 
     #[test]
     fn rejected_steer_returns_an_error_without_retry() {
-        let link = link_with_line(
+        let (mut bridge, commands, lines) = test_bridge();
+        bridge.running = true;
+        request(&mut bridge, 1, "turn/steer", "c1");
+        assert_eq!(sent(&commands)["command"], "steer");
+        let exit = feed(
+            &mut bridge,
+            &lines,
             json!({"kind":"command_rejected","payload":{"command_id":"c1","code":"stale_request","message":"idle"}}),
         );
-        let mut output = Vec::new();
-        let result = await_disposition(
-            &link,
-            &mut output,
-            &mut EventMap::default(),
-            "c1",
-            1,
-            &mut false,
-            true,
-            "s1",
-            "text",
+        assert_eq!(exit, None);
+        let reply = written(&mut bridge);
+        assert_eq!(reply[0]["id"], 1);
+        assert!(
+            reply[0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("stale_request")
         );
-        assert!(result.unwrap_err().1.contains("stale_request"));
+        assert!(commands.try_recv().is_err(), "no retry");
     }
 
     #[test]
     fn late_steer_that_starts_the_next_turn_reports_started() {
-        let link = link_with_line(
+        let (mut bridge, _commands, lines) = test_bridge();
+        bridge.running = true;
+        request(&mut bridge, 1, "turn/steer", "c1");
+        feed(
+            &mut bridge,
+            &lines,
             json!({"kind":"turn_started","turn_id":"t2","payload":{"input":[{"command_id":"c1"}]}}),
         );
-        let mut output = Vec::new();
-        let result = await_disposition(
-            &link,
-            &mut output,
-            &mut EventMap::default(),
-            "c1",
-            1,
-            &mut false,
-            true,
-            "s1",
-            "text",
+        let reply = written(&mut bridge).pop().unwrap();
+        assert_eq!(reply["id"], 1);
+        assert_eq!(
+            reply["result"],
+            json!({"turnId":"t2","disposition":"started"})
         );
-        assert_eq!(result.unwrap(), ("started".into(), "t2".into()));
     }
 
     #[test]
     fn an_applied_steer_is_logged_as_its_user_message_before_the_reply() {
-        let link = link_with_line(
+        let (mut bridge, _commands, lines) = test_bridge();
+        bridge.running = true;
+        request(&mut bridge, 1, "turn/steer", "c1");
+        feed(
+            &mut bridge,
+            &lines,
             json!({"kind":"steering_applied","turn_id":"t1","seq":4,"payload":{"content":[{"type":"text","text":"also run clippy"}],"source":"driver","command_id":"c1"}}),
         );
-        let mut output = Vec::new();
-        let result = await_disposition(
-            &link,
-            &mut output,
-            &mut EventMap::default(),
-            "c1",
-            1,
-            &mut true,
-            true,
-            "s1",
-            "also run clippy",
-        );
-        assert_eq!(result.unwrap(), ("steered".into(), "t1".into()));
-        let line: Value = serde_json::from_slice(&output).unwrap();
+        let lines = written(&mut bridge);
         assert_eq!(
-            line["params"]["item"],
+            lines[0]["params"]["item"],
             json!({"kind":"userMessage","turnId":"t1","text":"also run clippy","commandId":"c1"})
+        );
+        assert_eq!(
+            lines[1]["result"],
+            json!({"turnId":"t1","disposition":"steered"})
         );
     }
 
     #[test]
     fn a_turn_started_by_a_steer_logs_the_steer_as_a_user_message() {
-        let link = link_with_line(
+        let (mut bridge, _commands, lines) = test_bridge();
+        request(&mut bridge, 1, "turn/steer", "c1");
+        feed(
+            &mut bridge,
+            &lines,
             json!({"kind":"turn_started","turn_id":"t2","seq":9,"payload":{"input":[{"type":"message","command_id":"c1","content":[{"type":"text","text":"one more thing"}],"source":"driver"}]}}),
         );
-        let mut output = Vec::new();
-        let result = await_disposition(
-            &link,
-            &mut output,
-            &mut EventMap::default(),
-            "c1",
-            1,
-            &mut false,
-            true,
-            "s1",
-            "one more thing",
-        );
-        assert_eq!(result.unwrap(), ("started".into(), "t2".into()));
-        let lines: Vec<Value> = String::from_utf8(output)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let lines = written(&mut bridge);
         assert_eq!(lines[0]["method"], "turn/started");
         assert_eq!(
             lines[1]["params"]["item"],
             json!({"kind":"userMessage","turnId":"t2","text":"one more thing","commandId":"c1"})
         );
+        assert_eq!(
+            lines[2]["result"],
+            json!({"turnId":"t2","disposition":"started"})
+        );
+    }
+
+    #[test]
+    fn a_silent_fiber_past_the_disposition_wait_gets_an_error_and_the_session_stays_up() {
+        let (mut bridge, commands, lines) = test_bridge();
+        assert_eq!(request(&mut bridge, 1, "turn/start", "c1"), None);
+        bridge.expire(Instant::now());
+        assert!(written(&mut bridge).is_empty(), "no answer inside the wait");
+        bridge.expire(Instant::now() + DISPOSITION_WAIT);
+        let reply = written(&mut bridge);
+        assert_eq!(reply.len(), 1);
+        assert_eq!(reply[0]["id"], 1);
+        assert!(
+            reply[0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("did not answer the prompt")
+        );
+        assert!(bridge.pending.is_none());
+        // Fiber starts the late prompt's turn after all: it is logged as any
+        // other turn, and the next prompt is still served.
+        feed(
+            &mut bridge,
+            &lines,
+            json!({"kind":"turn_started","turn_id":"t1","payload":{"input":[{"command_id":"c1"}]}}),
+        );
+        assert_eq!(written(&mut bridge)[0]["method"], "turn/started");
+        feed(
+            &mut bridge,
+            &lines,
+            json!({"kind":"turn_completed","turn_id":"t1","payload":{"outcome":"completed"}}),
+        );
+        written(&mut bridge);
+        assert_eq!(sent(&commands)["command"], "prompt");
+        assert_eq!(request(&mut bridge, 2, "turn/start", "c2"), None);
+        assert_eq!(sent(&commands)["id"], "c2");
+        feed(
+            &mut bridge,
+            &lines,
+            json!({"kind":"turn_started","turn_id":"t2","payload":{"input":[{"command_id":"c2"}]}}),
+        );
+        let reply = written(&mut bridge).pop().unwrap();
+        assert_eq!(reply["id"], 2);
+        assert_eq!(reply["result"]["disposition"], "started");
+    }
+
+    #[test]
+    fn an_interrupt_during_a_pending_disposition_goes_out_at_once() {
+        let (mut bridge, commands, lines) = test_bridge();
+        bridge.running = true;
+        request(&mut bridge, 1, "turn/steer", "c1");
+        assert_eq!(sent(&commands)["command"], "steer");
+        assert_eq!(request(&mut bridge, 2, "turn/interrupt", ""), None);
+        let cancel = sent(&commands);
+        assert_eq!(cancel["command"], "cancel");
+        assert_eq!(cancel["session_id"], "s1");
+        let reply = written(&mut bridge);
+        assert_eq!(reply[0]["id"], 2);
+        assert_eq!(reply[0]["result"], json!({"interrupted":true}));
+        // The steer is still waiting, and is answered when Fiber settles it.
+        feed(
+            &mut bridge,
+            &lines,
+            json!({"kind":"steering_applied","turn_id":"t1","payload":{"content":[],"command_id":"c1"}}),
+        );
+        let reply = written(&mut bridge).pop().unwrap();
+        assert_eq!(reply["id"], 1);
+        assert_eq!(reply["result"]["disposition"], "steered");
     }
 
     #[test]
