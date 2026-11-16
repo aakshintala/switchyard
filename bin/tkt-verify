@@ -29,6 +29,9 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+# shellcheck disable=SC1090
+. "$script_dir/lib/job-refusal.sh"
+tkt_refuse_inside_delegate tkt-verify
 tkt_state="$script_dir/tkt-state"; bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-verify: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
