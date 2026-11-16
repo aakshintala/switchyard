@@ -131,8 +131,8 @@ for m in ${models[@]+"${models[@]}"}; do
     exit 2
   fi
   model_id="${m#*=}"
-  if [[ "$model_id" == openai/* ]] && ! [[ "$model_id" =~ :[^/]+$ ]] && ! pool_has_bare_model "$model_id"; then
-    echo "tkt-start: --model role '$model_role' requires an openai effort suffix (e.g. :medium)" >&2
+  if { [[ "$model_id" == openai/* ]] || [[ "$model_id" == fiber/codex/* ]]; } && ! [[ "$model_id" =~ :[^/]+$ ]] && ! pool_has_bare_model "$model_id"; then
+    echo "tkt-start: --model role '$model_role' requires an effort suffix (e.g. :medium)" >&2
     exit 2
   fi
 done

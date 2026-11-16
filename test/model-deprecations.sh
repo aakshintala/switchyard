@@ -117,7 +117,7 @@ grep -q '^- gemini: page unavailable (fixture)$' "$REPORT" || fail "failed page 
 [ -z "$(find "$TMPDIR" -mindepth 1 -print -quit)" ] || fail "delegate scratch directory was left behind"
 [ "$(grep -c '^run ' "$DELEGATE_CALLS")" -eq 1 ] || fail "run did not make exactly one delegate run"
 [ "$(grep -c '^watch ' "$DELEGATE_CALLS")" -eq 1 ] || fail "delegate job was not waited on"
-grep -q '^run model=openai/gpt-6-luna:medium cwd=' "$DELEGATE_CALLS" || fail "default allowed model openai/gpt-6-luna:medium was not selected"
+grep -q '^run model=fiber/codex/gpt-6-luna:medium cwd=' "$DELEGATE_CALLS" || fail "default allowed model fiber/codex/gpt-6-luna:medium was not selected"
 RUN_LINE="$(grep '^run ' "$DELEGATE_CALLS")"
 RUN_CWD="$(sed -E 's/.* cwd=([^ ]+) scratch=.*/\1/' <<<"$RUN_LINE")"
 RUN_SCRATCH="$(sed -E 's/.* scratch=([^ ]+) empty=.*/\1/' <<<"$RUN_LINE")"
