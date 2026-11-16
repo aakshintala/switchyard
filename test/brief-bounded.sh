@@ -86,8 +86,17 @@ build_brief() {
     pi=0 run_dir="$TKT_ROOT/runt"
   fi
   mkdir -p "$run_dir" || fail "create $kind run directory"
-  HOME="$LAUNCH_HOME" FW_PARENT='flywheel [test00]' FW_RUN= FW_REPO="$ROOT" \
-    FW_WORKTREE_ROOT="$LAUNCH_HOME/work/fiber-worktrees" FW_LIB= POOL_FILE="$ROOT/bin/lib/pool.md" \
+  # Pinned inputs, so a fill at one commit measures the same bytes on any host
+  # (#1928): RUN_DIR, HOME and the worktree root (embedded paths, fixed
+  # lengths); FW_PARENT, CLOSING, ISSUE, BRANCH, TAG and notes.md (embedded
+  # text; mkbrief reads CLOSING from the caller otherwise). The pool line is
+  # the checked-in pool.md. FW_REPO, TPL_DIR and POOL_FILE are checkout paths
+  # used only to read files; none is written into the brief.
+  # PR CI measures refs/pull/<n>/merge, the PR merged into main's tip, not the
+  # head: on #1916, head aac3e578 filled 33262 B here and CI's merge 6f75899
+  # filled 33308 B. Merge origin/main before measuring a near-ceiling change.
+  HOME="$LAUNCH_HOME" CLOSING="Resolves #$ISSUE" FW_PARENT='flywheel [test00]' FW_RUN='' FW_REPO="$ROOT" \
+    FW_WORKTREE_ROOT="$LAUNCH_HOME/work/fiber-worktrees" FW_LIB='' POOL_FILE="$ROOT/bin/lib/pool.md" \
     TPL_DIR="$ROOT/bin" RUN_DIR="$run_dir" TAG="$ISSUE" SKIP_PATHS=1 \
     TKT=1 PI="$pi" bash "$MKBRIEF" "$ISSUE" "$BRANCH" "$TMP_ROOT/notes.md" \
       >/dev/null 2>"$TMP_ROOT/$kind.err" || fail "mkbrief fills template-$kind.md: $(cat "$TMP_ROOT/$kind.err")"
