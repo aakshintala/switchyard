@@ -3125,6 +3125,28 @@ err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
 [ "$st" -eq 2 ] || fail "token-continuation ruling is refused as no-match"
 grep -Fq 'refusing --ruling 88: no-match' <<<"$err" || fail "token continuation is a no-match"
 [ ! -e "$T/state/runs.txt" ] || fail "token-continuation refusal calls no delegate"
+# A period is a boundary only before a space or at the end: a path prefix
+# must not match a longer filename.
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 x/y.sh: finding\n' >"$T/findings.txt"
+printf '{"id":90,"body":"refutes: P2 x/y","html_url":"https://example.invalid/o/n/issues/7#issuecomment-90","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-90.json"
+st=0
+err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 90 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "mid-token period ruling is refused"
+grep -Fq 'refusing --ruling 90: no-match' <<<"$err" || fail "a period inside a filename is not a boundary"
+[ ! -e "$T/state/runs.txt" ] || fail "mid-token period refusal calls no delegate"
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 x busy-waits. finding\n' >"$T/findings.txt"
+printf '{"id":91,"body":"refutes: P2 x busy-waits","html_url":"https://example.invalid/o/n/issues/7#issuecomment-91","issue_url":"https://api.github.com/repos/O/N/issues/7","author_association":"OWNER"}\n' >"$T/state/ruling-comment-91.json"
+write_record verify DONE "FIX-OK all repaired
+STATUS: DONE" 0
+run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --ruling 91 2>"$T/period-match.err")" || \
+  fail "period-then-space ruling is accepted: $(cat "$T/period-match.err")"
+grep -Fxq 'FIX-OK all repaired' <<<"$run_out" || fail "period-then-space ruling runs verify"
 
 # --- case #1964: when the comment is on another issue, refusal suggests --issue
 reset_state

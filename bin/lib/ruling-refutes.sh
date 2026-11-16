@@ -48,7 +48,9 @@ ruling_match_file() {
 
     boundary_match=0
     case "$base" in
-      "$prefix"|"$prefix "*|"$prefix":*|"$prefix",*|"$prefix".*|"$prefix"\;*) boundary_match=1 ;;
+      # `:` may run into a line number (path:N); `,` `.` `;` end a token only
+      # before a space or at the end, so a path prefix can't match a longer filename.
+      "$prefix"|"$prefix "*|"$prefix":*|"$prefix",|"$prefix",\ *|"$prefix".|"$prefix".\ *|"$prefix"\;|"$prefix"\;\ *) boundary_match=1 ;;
     esac
     [ "$boundary_match" -eq 1 ] || continue
     duplicate=0

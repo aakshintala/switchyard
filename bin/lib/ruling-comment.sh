@@ -6,7 +6,6 @@ fetch_issue_comment() {
   local comment_id="$1" comment_json="$2" comment_error="$3" alternate_issue="${4:-}"
   ruling_comment_failure=""
   ruling_comment_error=""
-  ruling_comment_issue_url=""
   ruling_comment_issue_number=""
   if ! gh api "repos/$repo/issues/comments/$comment_id" >"$comment_json" 2>"$comment_error"; then
     ruling_comment_error="$(head -n 1 "$comment_error" 2>/dev/null || true)"
@@ -14,7 +13,6 @@ fetch_issue_comment() {
     ruling_comment_failure=fetch
     return 1
   fi
-  ruling_comment_issue_url="$(jq -r 'if (.issue_url | type) == "string" then .issue_url else "" end' "$comment_json" 2>/dev/null || true)"
   ruling_comment_issue_number="$(jq -r --arg repo "$repo" '
     if (.issue_url | type) == "string"
       and (.issue_url | contains("/repos/" + $repo + "/issues/"))
