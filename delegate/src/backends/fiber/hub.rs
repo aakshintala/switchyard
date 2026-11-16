@@ -10089,6 +10089,257 @@ mod tests {
         );
     }
 
+    /// Reads session lines until one of `kind` arrives; false if none does.
+    fn session_line_of_kind(link: &HubSession, kind: &str) -> bool {
+        for _ in 0..12 {
+            match link.recv(Duration::from_secs(5)) {
+                Ok(HubSessionLine::Line(line))
+                    if serde_json::from_str::<serde_json::Value>(&line).unwrap()["kind"]
+                        == kind =>
+                {
+                    return true;
+                }
+                Ok(HubSessionLine::Line(_)) => {}
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// The fake's side of a session start: hello, start, subscribe at 0.
+    fn fake_session_start(srv: &mut FakeSrv) {
+        srv.send(&hello(serde_json::json!(1), "9.9.9"));
+        let (start_id, _) = recv_id(srv);
+        srv.send(&accepted(
+            &start_id,
+            serde_json::json!({"session_id":"s_1"}),
+        ));
+        let (sub_id, _) = recv_id(srv);
+        srv.send(&accepted(&sub_id, serde_json::json!({"last_seq":0})));
+    }
+
+    /// The fake drops the connection and answers the re-subscribe with
+    /// `last_seq`.
+    fn fake_reconnect(srv: &mut FakeSrv, last_seq: u64) {
+        srv.disconnect();
+        srv.accept_next();
+        srv.send(&hello(serde_json::json!(1), "9.9.9"));
+        let (re_sub_id, re_sub) = recv_id(srv);
+        assert_eq!(re_sub["command"], "subscribe");
+        srv.send(&accepted(
+            &re_sub_id,
+            serde_json::json!({"last_seq": last_seq}),
+        ));
+    }
+
+    /// The fake answers the test's closing `close` and exits the session.
+    fn fake_close(srv: &mut FakeSrv, seq: u64) {
+        let (close_id, close) = recv_id(srv);
+        assert_eq!(close["command"], "close");
+        srv.send(&accepted(&close_id, serde_json::json!({})));
+        srv.send(&ev("fiber_exited", seq, serde_json::json!({"exit_code":0})));
+    }
+
+    fn steering_applied_ev(cmd_id: &str, seq: u64) -> String {
+        ev(
+            "steering_applied",
+            seq,
+            serde_json::json!({
+                "content": [{"type": "text", "text": "steer"}],
+                "source": "driver",
+                "command_id": cmd_id,
+            }),
+        )
+    }
+
+    fn steer_line(id: &str) -> serde_json::Value {
+        serde_json::json!({"id":id,"command":"steer","session_id":"s_1","args":{"content":[{"type":"text","text":"steer"}]}})
+    }
+
+    fn prompt_line(id: &str) -> serde_json::Value {
+        serde_json::json!({"id":id,"command":"prompt","session_id":"s_1","args":{"content":[{"type":"text","text":"go"}]}})
+    }
+
+    fn close_session(
+        link: HubSession,
+        path: &Path,
+        rx: mpsc::Receiver<Vec<String>>,
+    ) -> Vec<String> {
+        link.send(serde_json::json!({"id":"close-1","command":"close","session_id":"s_1"}))
+            .unwrap();
+        assert!(session_line_of_kind(&link, "fiber_exited"));
+        drop(link);
+        join_fake(path, rx)
+    }
+
+    #[test]
+    fn session_reconnect_resends_an_unanswered_steer_with_the_same_id() {
+        let (path, rx) = spawn_fake(|srv| {
+            fake_session_start(srv);
+            let (steer_id, steer) = recv_id(srv);
+            assert_eq!(steer["command"], "steer");
+            fake_reconnect(srv, 0);
+            let (resent_id, resent) = recv_id(srv);
+            assert_eq!(resent["command"], "steer");
+            assert_eq!(resent_id, steer_id);
+            srv.send(&accepted(&resent_id, serde_json::json!({})));
+            srv.send(&steering_applied_ev(&resent_id, 1));
+            fake_close(srv, 2);
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(matches!(
+            link.recv(Duration::from_secs(5)).unwrap(),
+            HubSessionLine::Ready(_)
+        ));
+        link.send(steer_line("steer-1")).unwrap();
+        assert!(session_line_of_kind(&link, "steering_applied"));
+        let received = close_session(link, &path, rx);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "steer", "subscribe", "steer", "close"]
+        );
+    }
+
+    #[test]
+    fn session_reconnect_does_not_resend_a_steer_the_replay_applied() {
+        let (path, rx) = spawn_fake(|srv| {
+            fake_session_start(srv);
+            let (steer_id, _) = recv_id(srv);
+            fake_reconnect(srv, 1);
+            srv.send(&steering_applied_ev(&steer_id, 1));
+            fake_close(srv, 2);
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(matches!(
+            link.recv(Duration::from_secs(5)).unwrap(),
+            HubSessionLine::Ready(_)
+        ));
+        link.send(steer_line("steer-1")).unwrap();
+        assert!(session_line_of_kind(&link, "steering_applied"));
+        let received = close_session(link, &path, rx);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "steer", "subscribe", "close"]
+        );
+    }
+
+    #[test]
+    fn session_reconnect_does_not_resend_a_steer_the_replayed_turn_start_names() {
+        let (path, rx) = spawn_fake(|srv| {
+            fake_session_start(srv);
+            let (steer_id, _) = recv_id(srv);
+            fake_reconnect(srv, 1);
+            srv.send(&turn_started_ev(&steer_id, 1));
+            fake_close(srv, 2);
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(matches!(
+            link.recv(Duration::from_secs(5)).unwrap(),
+            HubSessionLine::Ready(_)
+        ));
+        link.send(steer_line("steer-1")).unwrap();
+        assert!(session_line_of_kind(&link, "turn_started"));
+        let received = close_session(link, &path, rx);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "steer", "subscribe", "close"]
+        );
+    }
+
+    #[test]
+    fn session_reconnect_resends_an_unanswered_prompt_with_the_same_id() {
+        let (path, rx) = spawn_fake(|srv| {
+            fake_session_start(srv);
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            fake_reconnect(srv, 0);
+            let (resent_id, resent) = recv_id(srv);
+            assert_eq!(resent["command"], "prompt");
+            assert_eq!(resent_id, prompt_id);
+            srv.send(&accepted(&resent_id, serde_json::json!({})));
+            srv.send(&turn_started_ev(&resent_id, 1));
+            fake_close(srv, 2);
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(matches!(
+            link.recv(Duration::from_secs(5)).unwrap(),
+            HubSessionLine::Ready(_)
+        ));
+        link.send(prompt_line("prompt-1")).unwrap();
+        assert!(session_line_of_kind(&link, "turn_started"));
+        let received = close_session(link, &path, rx);
+        assert_eq!(
+            received_commands(&received),
+            [
+                "start",
+                "subscribe",
+                "prompt",
+                "subscribe",
+                "prompt",
+                "close"
+            ]
+        );
+    }
+
+    #[test]
+    fn session_reconnect_does_not_resend_an_unanswered_prompt_the_replayed_turn_start_names() {
+        let (path, rx) = spawn_fake(|srv| {
+            fake_session_start(srv);
+            let (prompt_id, _) = recv_id(srv);
+            fake_reconnect(srv, 1);
+            srv.send(&turn_started_ev(&prompt_id, 1));
+            fake_close(srv, 2);
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(matches!(
+            link.recv(Duration::from_secs(5)).unwrap(),
+            HubSessionLine::Ready(_)
+        ));
+        link.send(prompt_line("prompt-1")).unwrap();
+        assert!(session_line_of_kind(&link, "turn_started"));
+        let received = close_session(link, &path, rx);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "subscribe", "close"]
+        );
+    }
+
+    #[test]
+    fn session_reconnect_never_resends_a_cancel_or_a_hub_command() {
+        let (path, rx) = spawn_fake(|srv| {
+            fake_session_start(srv);
+            let (_, cancel) = recv_id(srv);
+            assert_eq!(cancel["command"], "cancel");
+            let (_, sessions) = recv_id(srv);
+            assert_eq!(sessions["command"], "sessions");
+            fake_reconnect(srv, 0);
+            srv.send(&turn_completed_ev(1, "interrupted", None));
+            fake_close(srv, 2);
+        });
+        let link = spawn_session("fiber/provider/model".into(), "/w".into(), path.clone());
+        assert!(matches!(
+            link.recv(Duration::from_secs(5)).unwrap(),
+            HubSessionLine::Ready(_)
+        ));
+        link.send(serde_json::json!({"id":"cancel-1","command":"cancel","session_id":"s_1"}))
+            .unwrap();
+        link.send(serde_json::json!({"id":"hub-sessions-1","command":"sessions"}))
+            .unwrap();
+        assert!(session_line_of_kind(&link, "turn_completed"));
+        let received = close_session(link, &path, rx);
+        assert_eq!(
+            received_commands(&received),
+            [
+                "start",
+                "subscribe",
+                "cancel",
+                "sessions",
+                "subscribe",
+                "close"
+            ]
+        );
+    }
+
     #[test]
     fn hub_message_ending_in_status_done_still_errors() {
         let (res, _) = run_case(|srv| {
