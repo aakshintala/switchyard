@@ -1193,7 +1193,7 @@ else
 fi
 
 python3 -I - "$tmp" "$roster" "$retired" "$R" "$BOX" "$boxssh" "$FW_LOCAL_BOX" "$script_dir/job-record" "$tmp/roster-retirement.py" <<'PY'
-import glob, json, sys, os, re, shlex, subprocess, tempfile, time, fcntl
+import glob, json, sys, os, re, shlex, subprocess, tempfile, time, fcntl, datetime
 
 tmp, roster, retired, R, BOX, BOXSSH, LOCAL_BOX, JOB_RECORD, RETIREMENT_HELPER = sys.argv[1:10]
 exec(compile(open(RETIREMENT_HELPER).read(), RETIREMENT_HELPER, "exec"), globals())
@@ -1413,7 +1413,7 @@ for _d, _is_inbox in _srcs:
         # is only true for a reader standing in that directory, and the row is
         # also read from a sandbox and over ssh.
         reported[t] = (when, " ".join(status.split())[:110], wants,
-                       os.path.basename(p), os.path.abspath(p))
+                       os.path.basename(p), os.path.abspath(p), text)
 
 # Two facts about a ticket's rulings, because one of them is not enough.
 #
@@ -1431,6 +1431,7 @@ for _d, _is_inbox in _srcs:
 # from a weaker signal, and it is the one that costs a lost question.
 ruled = {}
 answers = {}
+ruling_archives = {}
 for p in glob.glob(os.path.join(R, "rulings", "ruling-*.md")):
     m = re.search(r"ruling-(\d{3,5})-", os.path.basename(p))
     if not m:
@@ -1442,6 +1443,7 @@ for p in glob.glob(os.path.join(R, "rulings", "ruling-*.md")):
         continue
     if ruled.get(m.group(1), 0.0) < when:
         ruled[m.group(1)] = when
+    ruling_archives.setdefault(m.group(1), []).append((when, p, text))
     for named in re.findall(r"<!--\s*answers-report:\s*(\S+)\s*-->", text):
         answers.setdefault(m.group(1), set()).add(named)
 
@@ -1657,6 +1659,18 @@ def send_action(entry, action_id, store, jid, message):
     return "failed", count
 
 
+def state_values_for(path):
+    values = {}
+    try:
+        for line in open(path, errors="replace"):
+            key, sep, value = line.rstrip("\n").partition("=")
+            if sep:
+                values.setdefault(key, value)
+    except OSError:
+        pass
+    return values
+
+
 def state_path_for(ticket, args=""):
     for token in process_tokens(args):
         if token.endswith(".state"):
@@ -1665,19 +1679,33 @@ def state_path_for(ticket, args=""):
                 return candidate
     candidates = sorted(glob.glob(os.path.join(R, "*-" + ticket + ".state")))
     for candidate in candidates:
-        try:
-            values = {}
-            for line in open(candidate, errors="replace"):
-                key, sep, value = line.rstrip("\n").partition("=")
-                if sep:
-                    values.setdefault(key, value)
-            if values.get("issue") == ticket:
-                return os.path.abspath(candidate)
-        except OSError:
-            pass
+        if state_values_for(candidate).get("issue") == ticket:
+            return os.path.abspath(candidate)
     if candidates:
         return os.path.abspath(candidates[0])
     return os.path.abspath(os.path.join(R, "fiber-" + ticket + ".state"))
+
+
+def job_started_at_ms(job_id, store):
+    try:
+        if store == "mac" or LOCAL_BOX == "1":
+            result = subprocess.run([JOB_RECORD, job_id], text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    timeout=10)
+            record_path = result.stdout.strip() if result.returncode == 0 else ""
+            record = json.load(open(record_path)) if record_path else {}
+        else:
+            remote = (f'record=$(bash "$HOME/.agents/bin/job-record" '
+                      f'{shlex.quote(job_id)}) || exit; cat "$record"')
+            result = subprocess.run([BOXSSH, "-o", "BatchMode=yes", "-o",
+                                     "ConnectTimeout=10", BOX, remote], text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    timeout=10)
+            record = json.loads(result.stdout) if result.returncode == 0 else {}
+        started = record.get("startedAtMs")
+        return started if isinstance(started, (int, float)) else None
+    except Exception:
+        return None
 
 
 def job_exit_code(command, args, ticket, store):
@@ -2320,6 +2348,62 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         else:
             missing += 1
             print(f"MISSING {n} {host} {sess} id={jid} launched {ts} — relaunch or park with a reason")
+
+def state_epoch(value):
+    if not value:
+        return None
+    try:
+        stamp = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        parsed = datetime.datetime.fromisoformat(stamp)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return parsed.timestamp()
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def churn_ruling_count(ticket, settled_at):
+    paths = set()
+    for when, path, text in ruling_archives.get(ticket, []):
+        if when < settled_at:
+            continue
+        if re.search(r"\bRULING-" + re.escape(ticket) + r"-\d+\b",
+                     text + " " + os.path.basename(path)):
+            paths.add(path)
+    return len(paths)
+
+
+for ticket in sorted((value for value in active_roster_tickets if value.isdigit()), key=int):
+    state_path = state_path_for(ticket)
+    state_values = state_values_for(state_path)
+    state_times = [state_epoch(state_values.get("plan_verdict_at")),
+                   state_epoch(state_values.get("rule_ok_at"))]
+    journal_path = (state_path[:-6] + ".journal" if state_path.endswith(".state")
+                    else state_path + ".journal")
+    try:
+        for line in open(journal_path, errors="replace"):
+            parts = line.split(None, 1)
+            if len(parts) == 2 and re.search(r"\btkt-plan rule-ok(?:\s|$)", parts[1]):
+                state_times.append(state_epoch(parts[0]))
+    except OSError:
+        pass
+    settled_times = [stamp for stamp in state_times if stamp is not None]
+    if not settled_times:
+        continue
+    settled_at = max(settled_times)
+    lane = newest_roster.get(ticket)
+    store = "mac" if lane and lane[1] == "mac" else "box"
+    job_ids = {value for key, value in state_values.items()
+               if re.fullmatch(r"job\.(?:fix|repair)\d*", key) and value.strip()}
+    fix_count = 0
+    for job_id in job_ids:
+        started_at_ms = job_started_at_ms(job_id, store)
+        if started_at_ms is not None and started_at_ms >= settled_at * 1000:
+            fix_count += 1
+    rulings_count = churn_ruling_count(ticket, settled_at)
+    if fix_count >= 10 or rulings_count >= 15:
+        print(f"CHURN {ticket} fix={fix_count} rulings={rulings_count} — "
+              "hold after current step; flywheel and surveyor DECISION: finish, split or redo.")
 
 recorded_retirements = set(done)
 recorded_retirements.update(n for n, _ in done_sess)
