@@ -1998,6 +1998,10 @@ fn session_loop(
     }
 }
 
+/// One supervised turn through the hub: connect, start or resume, subscribe
+/// at `full`, send one `prompt`, read to `turn_completed`, `close`, then read
+/// `fiber_exited` as the verdict. There is no `bin` field: nothing here spawns
+/// anything.
 #[derive(Clone)]
 pub struct HubRequest {
     pub cwd: String,
@@ -2087,7 +2091,9 @@ fn spawn_turn_with(req: HubRequest, socket: PathBuf, hooks: Hooks) -> HubRun {
     }
 }
 
-/// One supervised turn through the hub: connect, start or resume, subscribe at `full`, send one `prompt`, read to `turn_completed`, `close`, then read `fiber_exited` as the verdict. There is no `bin` field: nothing here spawns anything.
+/// Drive one supervised turn to a verdict. The client sends `prompt` itself
+/// so it knows the command id C, never answers an approval, and ends the
+/// session with `close`, reading `fiber_exited` as the verdict.
 pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResult {
     let run = spawn_turn(req.clone(), socket.to_path_buf());
     (run.drive)(on)
