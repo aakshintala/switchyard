@@ -44,6 +44,10 @@ case "$destination_real/" in
     ;;
 esac
 
+exists_or_symlink() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
 move_one() {
   local source="$1" basename candidate source_rel source_q destination_q suffix=0
   basename="${source##*/}"
@@ -54,7 +58,7 @@ move_one() {
     else
       candidate="$run_dir/stray-$job_id-$suffix-$basename"
     fi
-    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+    if exists_or_symlink "$candidate"; then
       suffix=$((suffix + 1))
       continue
     fi
@@ -68,7 +72,7 @@ move_one() {
         fi
         return 0
       fi
-      if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      if exists_or_symlink "$candidate"; then
         suffix=$((suffix + 1))
         continue
       fi
