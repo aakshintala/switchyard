@@ -794,6 +794,8 @@ do_verify() {
   fi
   # A recorded Base change that touched no plan File leaves an accepted,
   # unchanged plan valid: record PLAN OK at the new Base without a round (#1712).
+  # A triaged verdict counts as accepted here, as it does for REANCHORED (#1609):
+  # both mean the plan passed and may be built.
   if [ "$drift" -eq 0 ] && [ "$unresolved_fix" -eq 0 ] && [ -n "$vbase" ] && [ "$vbase" != "$base" ] \
     && git -C "$worktree" merge-base --is-ancestor "$vbase" "$base" 2>/dev/null; then
     nodrift_files=()

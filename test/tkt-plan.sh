@@ -2370,6 +2370,29 @@ expect_plan_verdict ok "$B" "drift-reanchor-no-files records the unchanged plan 
 [ "$(state_get confirmed_for)" = 2 ] || fail "drift-reanchor-no-files preserves the completed confirm"
 [ "$(grep -c '^job|' "$T/stub.log" || true)" = 0 ] || fail "drift-reanchor-no-files starts no Verifier job"
 
+# Same #4767 sequence, but the plan body changed since its PLAN OK: the
+# no-drift shortcut does not apply and the round limit holds.
+setup_case drift-reanchor-no-files-edited
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-reanchor-no-files-edited initial verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+A="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "drift-reanchor-no-files-edited seed exhausted Verifier count"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "drift-reanchor-no-files-edited seed completed confirm"
+mkdir -p "$WT/docs"
+wcommit "$WT" docs/extensions.md "unrelated documentation sentence"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+B="$(git -C "$WT" rev-parse HEAD)"
+set_plan_base "$B"
+printf '\n## Tasks\n\n1. Edit `f.txt`.\n' >>"$CDIR/plan.md"
+: >"$T/stub.log"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "drift-reanchor-no-files-edited exits 1 (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-reanchor-no-files-edited"
+[ "$(state_get verified_base)" = "$A" ] || fail "drift-reanchor-no-files-edited leaves verified_base"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" = 0 ] || fail "drift-reanchor-no-files-edited starts no Verifier job"
+
 setup_case drift-e
 rebase_plan
 A="$(cat "$CDIR/base")"
