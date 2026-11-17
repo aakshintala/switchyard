@@ -251,13 +251,23 @@ def is_shim(path):
     return MARKER in [line.rstrip() for line in head.split(b"\n")[:5]]
 
 
-def find_real_cargo(path_env, shim_dir):
+def visited_paths():
+    # The exec chain keeps its pid; a nested cargo process does not. So this
+    # guard covers exec chains only: a wrapper that runs the shim as a child
+    # (`cargo "$@"` without exec) gets a new pid each hop and resets the list.
+    if os.environ.get("CARGO_SLOT_VISITED_PID") != str(os.getpid()):
+        return []
+    return [os.path.abspath(path) for path in os.environ.get("CARGO_SLOT_VISITED", "").split(os.pathsep) if path]
+
+
+def find_real_cargo(path_env, shim_dir, visited):
     # An unset PATH searches nothing. Otherwise follow execvp: an empty entry
     # is the working directory, and a relative entry resolves against it.
     # Skip the shim's own directory, non-directories, candidates that are not
-    # executable regular files, and candidates that carry the shim marker.
+    # executable regular files, shim copies, and paths already tried this exec chain.
     if path_env is None:
-        return None
+        return None, False
+    loop = False
     for entry in path_env.split(os.pathsep):
         directory = os.path.abspath(entry)
         if directory == shim_dir or not os.path.isdir(directory):
@@ -267,11 +277,22 @@ def find_real_cargo(path_env, shim_dir):
             continue
         if is_shim(candidate):
             continue
-        return candidate
-    return None
+        if candidate in visited:
+            loop = True
+            continue
+        return candidate, loop
+    return None, loop
 
 
 def exec_real(real, args):
+    # Record the candidate for same-pid exec re-entry. A forked slot child
+    # starts a new chain because visited_paths rejects the parent's pid.
+    visited = visited_paths()
+    candidate = os.path.abspath(real)
+    if candidate not in visited:
+        visited.append(candidate)
+    os.environ["CARGO_SLOT_VISITED"] = os.pathsep.join(visited)
+    os.environ["CARGO_SLOT_VISITED_PID"] = str(os.getpid())
     # Python ignores SIGPIPE and SIGXFSZ, and exec keeps ignored signals.
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
@@ -323,10 +344,19 @@ def main():
     args = sys.argv[1:]
     if subcommand(args) == "mutants": fail(1, "cargo mutants is banned for lanes; mutants run in CI, read verdicts with ~/.agents/bin/mutant-verdicts <run> --repo <owner/name>")
     shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    real = os.environ.get("CARGO_SLOT_REAL")
-    if not (real and os.path.isfile(real) and os.access(real, os.X_OK) and not is_shim(real)):
-        real = find_real_cargo(os.environ.get("PATH"), shim_dir)
+    visited = visited_paths()
+    configured_real = os.environ.get("CARGO_SLOT_REAL")
+    real = configured_real
+    valid_configured_real = bool(
+        real and os.path.isfile(real) and os.access(real, os.X_OK) and not is_shim(real)
+    )
+    exec_loop = bool(valid_configured_real and os.path.abspath(real) in visited)
+    if not valid_configured_real or exec_loop:
+        real, path_loop = find_real_cargo(os.environ.get("PATH"), shim_dir, visited)
+        exec_loop = exec_loop or path_loop
     if real is None:
+        if exec_loop:
+            fail(127, "exec loop: visited cargo paths: %s" % os.pathsep.join(visited))
         fail(127, "no cargo on PATH outside cargo-slot")
     if subcommand(args) in SLOT_SUBCOMMANDS and in_shared_checkout():
         message = "cwd %s is inside the shared checkout %s; cd into your ticket worktree and rerun" % (

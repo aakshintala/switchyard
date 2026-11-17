@@ -312,6 +312,79 @@ for value in "$T/missing/cargo" "$T/shims/cargo"; do
   [ -e "$R/wrapper-ran" ] || fail "invalid CARGO_SLOT_REAL [$value] did not fall back to PATH"
 done
 
+# CARGO_SLOT_REAL is invalid when this same-pid exec chain already tried it.
+# The fallback PATH wrapper must win over the configured real cargo.
+cat >"$T/visited-real-launcher" <<'LAUNCHER'
+#!/bin/sh
+CARGO_SLOT_VISITED="$VISITED_REAL_PATH"
+CARGO_SLOT_VISITED_PID=$$
+export CARGO_SLOT_VISITED CARGO_SLOT_VISITED_PID
+exec "$SHIM_PATH" build
+LAUNCHER
+chmod 755 "$T/visited-real-launcher"
+new_run cargo-slot-real-visited
+env -i \
+  PATH="$T/shims:$T/wrapper:$T/real:$T/py:/usr/bin:/bin" HOME="$T/home" \
+  TMPDIR=/tmp FAKE_DIR="$R" CARGO_SLOT_REAL="$T/real/cargo" \
+  VISITED_REAL_PATH="$T/real/cargo" SHIM_PATH="$T/shims/cargo" \
+  "$T/visited-real-launcher" >"$R/out" 2>"$R/shim.err"
+rc=$?
+[ "$rc" = 88 ] || fail "visited CARGO_SLOT_REAL: exit $rc, want PATH wrapper status 88"
+[ -e "$R/wrapper-ran" ] || fail "visited CARGO_SLOT_REAL did not fall back to PATH"
+[ ! -e "$R/started" ] || fail "visited CARGO_SLOT_REAL ran despite being visited"
+
+# A markerless passthrough stub that loops back to the installed shim must be
+# skipped after the first exec, allowing the real cargo behind it to run.
+mkdir -p "$T/passthrough" "$T/loop-only-2" "$T/loop-real"
+cat >"$T/passthrough/cargo" <<STUB
+#!/bin/sh
+exec "$T/shims/cargo" "\$@"
+STUB
+cp "$T/passthrough/cargo" "$T/loop-only-2/cargo"
+chmod 755 "$T/passthrough/cargo" "$T/loop-only-2/cargo"
+cat >"$T/loop-real/cargo" <<'LOOP_REAL'
+#!/bin/sh
+printf '%s\n' "$*" >>"$FAKE_RUNS"
+if [ "${NESTED_CALL:-0}" = 1 ] && [ "${NESTED_CHILD:-0}" != 1 ]; then
+  NESTED_CHILD=1 cargo nested || exit $?
+fi
+LOOP_REAL
+chmod 755 "$T/loop-real/cargo"
+
+new_run passthrough-loop
+shim_cmd "$R" PATH="$T/passthrough:$T/shims:$T/loop-real:$T/py" \
+  FAKE_RUNS="$R/runs" CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/slots-passthrough-loop" -- build passthrough
+"${CMD[@]}" >"$R/out" 2>"$R/shim.err"
+rc=$?
+[ "$rc" = 0 ] || fail "passthrough loop: exit $rc, want 0"
+[ "$(wc -l <"$R/runs" | tr -d ' ')" = 1 ] || fail "passthrough loop: real cargo did not run exactly once"
+[ "$(cat "$R/runs")" = "build passthrough" ] || fail "passthrough loop: wrong arguments reached real cargo: [$(cat "$R/runs")]"
+
+# When every executable cargo candidate loops back to the shim, it must stop
+# with a 127 diagnostic naming the exec loop and its visited paths.
+new_run passthrough-all-visited
+shim_cmd "$R" PATH="$T/passthrough:$T/shims:$T/loop-only-2:$T/py" \
+  FAKE_RUNS="$R/runs" -- xtask no-real-cargo
+"${CMD[@]}" >"$R/out" 2>"$R/shim.err"
+rc=$?
+[ "$rc" = 127 ] || fail "all-visited passthrough loop: exit $rc, want 127"
+grep -q 'exec loop' "$R/shim.err" || fail "all-visited passthrough loop: missing exec loop diagnostic"
+# The shim lists normalised paths; $T has a doubled slash when TMPDIR ends in /.
+TN="$("$T/py/python3" -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$T")"
+grep -Fq "$TN/passthrough/cargo" "$R/shim.err" || fail "all-visited passthrough loop: diagnostic omitted first stub"
+grep -Fq "$TN/loop-only-2/cargo" "$R/shim.err" || fail "all-visited passthrough loop: diagnostic omitted second stub"
+
+# A real cargo child starts a fresh chain even though it inherits the parent's
+# visited list; its own passthrough stub must still reach real cargo.
+new_run passthrough-nested
+shim_cmd "$R" PATH="$T/passthrough:$T/shims:$T/loop-real:$T/py" \
+  FAKE_RUNS="$R/runs" NESTED_CALL=1 -- xtask nested-parent
+"${CMD[@]}" >"$R/out" 2>"$R/shim.err"
+rc=$?
+[ "$rc" = 0 ] || fail "nested passthrough loop: exit $rc, want 0"
+[ "$(wc -l <"$R/runs" | tr -d ' ')" = 2 ] || fail "nested passthrough loop: real cargo did not run twice"
+[ "$(cat "$R/runs")" = "$(printf 'xtask nested-parent\nnested')" ] || fail "nested passthrough loop: wrong arguments reached real cargo"
+
 new_run nocargo
 env -i PATH="$T/shims:$T/py" HOME="$T/home" FAKE_DIR="$R" \
   "$T/shims/cargo" build >"$R/out" 2>"$R/shim.err"
