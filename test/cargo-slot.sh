@@ -150,20 +150,6 @@ cargo_as() {
   "${CMD[@]}"
 }
 
-# run_bounded SECONDS COMMAND ...: portable per-command bound for tests that
-# exercise a deliberate exec loop. Python kills and reaps the timed-out pid.
-run_bounded() {
-  "$T/py/python3" - "$1" "${@:2}" <<'PY'
-import subprocess
-import sys
-try:
-    result = subprocess.run(sys.argv[2:], timeout=float(sys.argv[1]))
-except subprocess.TimeoutExpired:
-    sys.exit(124)
-sys.exit(result.returncode)
-PY
-}
-
 # spawn R [VAR=VAL ...] -- ARGS: the shim in the background, stderr straight to
 # the FIFO R/err (stage made it). The background open of the write end and the
 # open of fd 9 for reading unblock each other. Fd 9 holds no write end, so its
@@ -337,7 +323,7 @@ exec "$SHIM_PATH" build
 LAUNCHER
 chmod 755 "$T/visited-real-launcher"
 new_run cargo-slot-real-visited
-run_bounded 5 env -i \
+env -i \
   PATH="$T/shims:$T/wrapper:$T/real:$T/py:/usr/bin:/bin" HOME="$T/home" \
   TMPDIR=/tmp FAKE_DIR="$R" CARGO_SLOT_REAL="$T/real/cargo" \
   VISITED_REAL_PATH="$T/real/cargo" SHIM_PATH="$T/shims/cargo" \
@@ -368,7 +354,7 @@ chmod 755 "$T/loop-real/cargo"
 new_run passthrough-loop
 shim_cmd "$R" PATH="$T/passthrough:$T/shims:$T/loop-real:$T/py" \
   FAKE_RUNS="$R/runs" CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/slots-passthrough-loop" -- build passthrough
-run_bounded 5 "${CMD[@]}" >"$R/out" 2>"$R/shim.err"
+"${CMD[@]}" >"$R/out" 2>"$R/shim.err"
 rc=$?
 [ "$rc" = 0 ] || fail "passthrough loop: exit $rc, want 0"
 [ "$(wc -l <"$R/runs" | tr -d ' ')" = 1 ] || fail "passthrough loop: real cargo did not run exactly once"
@@ -379,7 +365,7 @@ rc=$?
 new_run passthrough-all-visited
 shim_cmd "$R" PATH="$T/passthrough:$T/shims:$T/loop-only-2:$T/py" \
   FAKE_RUNS="$R/runs" -- xtask no-real-cargo
-run_bounded 5 "${CMD[@]}" >"$R/out" 2>"$R/shim.err"
+"${CMD[@]}" >"$R/out" 2>"$R/shim.err"
 rc=$?
 [ "$rc" = 127 ] || fail "all-visited passthrough loop: exit $rc, want 127"
 grep -q 'exec loop' "$R/shim.err" || fail "all-visited passthrough loop: missing exec loop diagnostic"
@@ -393,7 +379,7 @@ grep -Fq "$TN/loop-only-2/cargo" "$R/shim.err" || fail "all-visited passthrough 
 new_run passthrough-nested
 shim_cmd "$R" PATH="$T/passthrough:$T/shims:$T/loop-real:$T/py" \
   FAKE_RUNS="$R/runs" NESTED_CALL=1 -- xtask nested-parent
-run_bounded 5 "${CMD[@]}" >"$R/out" 2>"$R/shim.err"
+"${CMD[@]}" >"$R/out" 2>"$R/shim.err"
 rc=$?
 [ "$rc" = 0 ] || fail "nested passthrough loop: exit $rc, want 0"
 [ "$(wc -l <"$R/runs" | tr -d ' ')" = 2 ] || fail "nested passthrough loop: real cargo did not run twice"

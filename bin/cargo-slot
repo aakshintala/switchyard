@@ -252,7 +252,9 @@ def is_shim(path):
 
 
 def visited_paths():
-    # The exec chain keeps its pid; a nested cargo process does not.
+    # The exec chain keeps its pid; a nested cargo process does not. So this
+    # guard covers exec chains only: a wrapper that runs the shim as a child
+    # (`cargo "$@"` without exec) gets a new pid each hop and resets the list.
     if os.environ.get("CARGO_SLOT_VISITED_PID") != str(os.getpid()):
         return []
     return [os.path.abspath(path) for path in os.environ.get("CARGO_SLOT_VISITED", "").split(os.pathsep) if path]
