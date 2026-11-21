@@ -30,34 +30,27 @@ In order: issue references in the commit messages or PR body (`#123`, `Resolves 
 
 Start from the repo's `AGENTS.md` or `CLAUDE.md`: the docs it indexes for code rules and review are the standards sources, and a list headed as the reviewer's checks is the core of the Standards brief. Then add any other file that documents how code should be written, such as `CODING_STANDARDS.md` or `CONTRIBUTING.md`.
 
-On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below: a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:
+On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below: three structural smells that apply even when a repo documents nothing. Two rules bind it:
 
 - **The repo overrides.** A documented repo standard always wins; where it endorses something the baseline would flag, suppress the smell.
-- **Always a judgement call.** Each smell is a labelled heuristic ("possible Feature Envy"), never a hard violation. Like any standard here, skip anything tooling already enforces.
+- **Always a judgement call, always P3.** Each smell is a labelled heuristic ("possible Data Clump"), never a hard violation, and never starts a fix round by itself. Like any standard here, skip anything tooling already enforces.
 
 Each smell reads *what it is* → *how to fix*; match it against the diff:
 
-- **Mysterious Name**: a function, variable, or type whose name doesn't reveal what it does or holds. → rename it; if no honest name comes, the design's murky.
-- **Duplicated Code**: the same logic shape appears in more than one hunk or file in the change. → extract the shared shape, call it from both.
-- **Feature Envy**: a method that reaches into another object's data more than its own. → move the method onto the data it envies.
+- **Duplicated Code**: the same logic shape appears in more than one hunk or file in the change, or the change adds a copy of something the codebase already has. → extract the shared shape, or call the existing one.
 - **Data Clumps**: the same few fields or params keep travelling together (a type wanting to be born). → bundle them into one type, pass that.
-- **Primitive Obsession**: a primitive or string standing in for a domain concept that deserves its own type. → give the concept its own small type.
-- **Repeated Switches**: the same `switch`/`if`-cascade on the same type recurs across the change. → replace with polymorphism, or one map both sites share.
-- **Shotgun Surgery**: one logical change forces scattered edits across many files in the diff. → gather what changes together into one module.
-- **Divergent Change**: one file or module is edited for several unrelated reasons. → split so each module changes for one reason.
-- **Speculative Generality**: abstraction, parameters, or hooks added for needs the spec doesn't have. → delete it; inline back until a real need shows.
-- **Message Chains**: long `a.b().c().d()` navigation the caller shouldn't depend on. → hide the walk behind one method on the first object.
-- **Middle Man**: a class or function that mostly just delegates onward. → cut it, call the real target direct.
-- **Refused Bequest**: a subclass or implementer that ignores or overrides most of what it inherits. → drop the inheritance, use composition.
-- **Parallel APIs**: a new API lands beside the legacy one it replaces, with callers split between them. → migrate the callers, then delete the legacy API.
+- **Parallel APIs**: a new API lands beside the legacy one it replaces, with callers split between them, or a second path exists that only tests call. → migrate the callers, then delete the other path.
+
+Names, message chains, middle men and other matters of taste are findings only when a documented standard covers them.
 
 ### 4. Review
 
 Read the diff once per axis, and follow each hunk into the code around it as far as the finding needs.
 
-- **Standards**: every place the diff breaks a documented standard (cite the file and rule), and any baseline smell the diff shows at named sites (name it, quote each site, such as both copies of duplicated code). A smell that rests on taste alone, such as a name, is written only when a documented standard covers it. Skip anything tooling enforces.
+- **Standards**: every place the diff breaks a documented standard (cite the file and rule), and any baseline smell the diff shows at named sites (name it, quote each site, such as both copies of duplicated code). Skip anything tooling enforces.
 - **Spec**: requirements missing or partial; requirements that look implemented but wrong (quote the spec line). A criterion that asks for evidence the code can no longer produce, such as a repro of a path this diff or a merged fix deleted, is met by a construction argument in the PR body, quoted from the code, that shows every candidate path is gone: judge whether it holds, and raise a finding only when it doesn't.
 - **Scope check** (Spec axis): every file or hunk the diff modified that the ticket didn't ask for. An unrequested edit is a finding even when it looks like an improvement.
+- **Behaviour is its own review.** Whether the change works across inputs, states, failures and environments is `behaviour-review`'s question. When that axis runs alongside, leave wrong behaviour to it unless you trip over it while checking a standard or a criterion; when it does not run, a wrong behaviour you find is still a P1 here.
 - When the change touches security, permission, authentication or persistence, add the adversarial branch: try spelling tricks, fail-open inputs, weaker fallback identities, unresolvable indirection and TOCTOU gaps, plus one bypass family beyond the list.
 
 ### 5. Report
@@ -71,7 +64,7 @@ VERDICT spec: APPROVE|CHANGES
 P1 src/order.ts:88 — refund skips the ledger entry the spec requires — write the entry before returning
 ```
 
-Each finding is `P1|P2|P3 file:line — defect — fix`, under its axis's verdict, most severe first. P1 is wrong behaviour or a security hole, P2 a missed acceptance criterion, an unrequested edit or a hard standards breach, P3 anything smaller, baseline smells included. An axis with any P1 or P2 is `CHANGES`. A merge needs both axes `APPROVE`.
+Each finding is `P1|P2|P3 file:line — defect — fix`, under its axis's verdict, most severe first: lead with the one finding that matters most, and spend the words there before listing smaller ones. P1 is wrong behaviour or a security hole. P2 is a missed acceptance criterion, an unrequested edit or a breach of a standard that changes what the code does or what a test proves. P3 is anything smaller: baseline smells, wording, comments, and a breach of a rule about form (how a pull request body, a commit or a citation is laid out). An axis with any P1 or P2 is `CHANGES`. A merge needs both axes `APPROVE`.
 
 Every finding names its evidence: a concrete input or state that goes wrong, or the doc line or ruling it breaks (for a standard, the doc's rule and the code line; for a baseline smell, every site that shows it, such as both copies of duplicated code). A finding with neither is not written, whatever its severity. That drops a hypothetical input nothing in the code or ticket produces, a request to cite the ticket line that asks for the code, a name or shape that no doc rule covers and no second site shows, and remarks on process. Standards, spec and overbuild verdict lines may end with one period. Verify verdicts may stand alone, continue with whitespace and detail, or have exactly one of `.`, `:`, `;` or `,` immediately after the verdict, followed by whitespace and optional detail or the end of the line.
 
