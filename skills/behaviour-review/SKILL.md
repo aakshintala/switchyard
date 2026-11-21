@@ -67,7 +67,7 @@ coverage: input checked: empty and oversized amounts traced through parse(); con
 ```
 
 - `P1`: a consumer sees wrong behaviour, loses data or crosses a security boundary, and the trigger is one a real caller or person reaches.
-- `P2`: the trigger needs an unusual but possible condition, or a claim has no test that would catch its breaking.
+- `P2`: the trigger needs an unusual but possible condition, such as a crash at a particular moment; or the person has a way round the defect and loses nothing; or a claim has no test that would catch its breaking. Before writing that a test is missing, search the diff and the checkout for it.
 - No `P3`. A behaviour finding either has a reachable trigger or is not written.
 - `UNDECIDED`: behaviour nobody has ruled on. It does not block and is not fixed by guessing; whoever runs the review routes it to the project's triage role for a ruling. Use it only when no doc or ticket line speaks, or two of them disagree. Code that differs from what one doc line plainly says is a finding, with that line quoted, even when the pull request calls the gap a later step.
 - An axis with any P1 or P2 is `CHANGES`.
