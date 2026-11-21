@@ -31,13 +31,16 @@ Take every dimension below against every claim. The list is the same for every c
 
 - **Input**: empty, absent, one, many, the largest allowed, malformed, duplicate, wide or combining characters, a value from an older version.
 - **State and lifecycle**: first use, second use, use after an interruption midway, after a restart, after a resume or reload, after an upgrade that left old data.
+- **Identity and scope**: every key, id, flag or cache entry the change stores or looks up. Is it unique across everything that shares that store (sessions, clients, connections, runs), and is it cleared when its owner goes away?
 - **Concurrency and order**: two actors at once, the same events in another order, a cancel or a close arriving at each step.
-- **Failure**: each fallible call in the changed path fails. Is the failure reported to the consumer, or dropped, defaulted or retried forever? What is left half-written?
+- **Failure**: list every fallible call the diff adds or newly reaches (in the diff, search for each place a result is propagated, discarded, defaulted or unwrapped), and take each one failing. Is the failure reported to the consumer, or dropped, defaulted or retried forever? What is left half-written, and does the work the failure interrupted still finish or get cleaned up? A failure that is dropped or defaulted is a finding unless a doc or ticket line says that is the behaviour; a `checked` line for one quotes that line.
+- **Limits**: every cap the changed path runs under (memory, size, count, depth, time) is reached partway through the operation, not only before it starts. Is the result the one the doc promises for hitting that cap?
 - **Environment**: another platform the product ships on, another filesystem layout, another terminal or shell, no network or a stalled one, a different clock or locale.
 - **Composition**: a neighbouring feature that shares this state, a configuration combination, the feature switched off.
 - **Wiring**: the pieces work alone, but does the product's real assembly connect them? Does a test go through that assembly, or through a stand-in that the product never uses?
 - **Resources**: growth without a bound, work repeated per item, a thread, handle or process per unit of load, polling.
-- **Contract**: every consumer of a changed type, event, file format or message handles the change, and data written before it still reads.
+- **Contract**: every consumer of a changed type, event, file format or message handles the change, and data written before it still reads. Everyone who watches the state the change alters is told: a second client, a subscriber, a view that drew the old value.
+- **Time of evaluation**: a value the change makes depend on live state, but which some caller computed earlier and kept (a cached definition, a snapshot, a value captured before a yield). Who still holds the old one?
 
 Then the repository's own list: when the workflow doc names a list of escape classes (bug classes this project has shipped before), check each one the same way.
 
