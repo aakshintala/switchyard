@@ -39,7 +39,7 @@ Take every dimension below against every claim. The list is the same for every c
 - **Composition**: a neighbouring feature that shares this state, a configuration combination, the feature switched off.
 - **Wiring**: the pieces work alone, but does the product's real assembly connect them? Does a test go through that assembly, or through a stand-in that the product never uses?
 - **Resources**: growth without a bound, work repeated per item, a thread, handle or process per unit of load, polling.
-- **Contract**: every consumer of a changed type, event, file format or message handles the change, and data written before it still reads. Everyone who watches the state the change alters is told: a second client, a subscriber, a view that drew the old value.
+- **Contract**: every consumer of a changed type, event, file format or message handles the change, and data written before it still reads. Everyone who watches the state the change alters is told: a second client, a subscriber, a view that drew the old value. What the change shows a person survives its last step: after wrapping, truncation and expiry, can they still read and use it at a real size?
 - **Time of evaluation**: a value the change makes depend on live state, but which some caller computed earlier and kept (a cached definition, a snapshot, a value captured before a yield). Who still holds the old one?
 
 Then the repository's own list: when the workflow doc names a list of escape classes (bug classes this project has shipped before), check each one the same way.
@@ -69,7 +69,7 @@ coverage: input checked: empty and oversized amounts traced through parse(); con
 - `P1`: a consumer sees wrong behaviour, loses data or crosses a security boundary, and the trigger is one a real caller or person reaches.
 - `P2`: the trigger needs an unusual but possible condition, or a claim has no test that would catch its breaking.
 - No `P3`. A behaviour finding either has a reachable trigger or is not written.
-- `UNDECIDED`: behaviour nobody has ruled on. It does not block and is not fixed by guessing; whoever runs the review routes it to the project's triage role for a ruling.
+- `UNDECIDED`: behaviour nobody has ruled on. It does not block and is not fixed by guessing; whoever runs the review routes it to the project's triage role for a ruling. Use it only when no doc or ticket line speaks, or two of them disagree. Code that differs from what one doc line plainly says is a finding, with that line quoted, even when the pull request calls the gap a later step.
 - An axis with any P1 or P2 is `CHANGES`.
 
 Lead with the finding that matters most. Every finding names its trigger: the concrete input, state or sequence, and the line that mishandles it. The `coverage:` line holds the step 3 results and is not counted against a word limit.
