@@ -38,6 +38,7 @@ cat >"$STUBS/claude" <<'CLAUDE'
 {
   printf 'cwd=%s\n' "$PWD"
   printf 'job-env=%s|%s\n' "${DELEGATE_JOB_ID-unset}" "${DELEGATE_JOB_CHAIN-unset}"
+  printf 'path=%s\n' "$PATH"
   printf 'arg=%s\n' "$@"
   printf '\n'
 } >>"$CLAUDE_LOG"
@@ -287,5 +288,13 @@ fi
 [ "$rc" -ne 0 ] || fail "network/auth timeout exited zero"
 grep -F 'timed out' "$T/roles-restart.log" >/dev/null || fail "network/auth timeout was not logged"
 [ ! -s "$CLAUDE_LOG" ] || fail "role launched without network/auth"
+
+# A launched role gets cargo on PATH from ~/.cargo/env, as a login shell would.
+mkdir -p "$HOME/.cargo/bin"
+printf 'export PATH="%s/.cargo/bin:$PATH"\n' "$HOME" >"$HOME/.cargo/env"
+: >"$CLAUDE_LOG"; : >"$PS_FILE"; printf '[]\n' >"$AGENTS_JSON"; rm -rf "$STATE_DIR"
+ROLE_TABLE="test-role|$ROLE_HOME|$HANDOFF" run_restart >/dev/null 2>&1 || fail "run with ~/.cargo/env failed"
+grep -F "path=$HOME/.cargo/bin:" "$CLAUDE_LOG" >/dev/null || fail "role launched without ~/.cargo/bin on PATH"
+rm -rf "$HOME/.cargo"
 
 printf 'roles-restart: all cases passed\n'
