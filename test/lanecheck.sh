@@ -565,7 +565,7 @@ fi
 
 # A pr= from another repo's state names a different PR than fiber's open #4173.
 r=$(newrun 7ad); lane "$r" 4188 fiber-4188-build abe
-printf 'repo=aakshintala/switchyard\npr=4173\n' > "$r/switchyard-4188.state"
+printf 'repo=example/switchyard\npr=4173\n' > "$r/switchyard-4188.state"
 printf '4173 feat/9999-unrelated\n' > "$T/prs"
 out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4188 2>&1); grc=$?
 if [ "$grc" = 0 ] && ! printf '%s' "$out" | grep -q 'REFUSING'; then
@@ -1195,7 +1195,7 @@ printf '[' > "$T/all-prs"
 sep=""
 for ticket in 4193 4194 4195; do
   pr=$((ticket + 1000)); lane "$r" "$ticket" "fiber-$ticket-build" "jid-$ticket"
-  printf 'repo=aakshintala/fiber\nissue=%s\npr=%s\n' "$ticket" "$pr" > "$r/fiber-$ticket.state"
+  printf 'repo=example/fiber\nissue=%s\npr=%s\n' "$ticket" "$pr" > "$r/fiber-$ticket.state"
   printf 'RETIRE issue=%s\n' "$ticket" > "$r/fiber-$ticket-report.md"
   printf '%s{"number":%s,"headRefName":"fiber-%s-build","state":"MERGED","mergedAt":"2026-11-16T12:00:00Z"}' \
     "$sep" "$pr" "$ticket" >> "$T/all-prs"
