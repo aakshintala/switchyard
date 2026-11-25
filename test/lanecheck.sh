@@ -36,12 +36,18 @@ unset FW_OWNER_ASK
 # it cannot read and the input the UNRESOLVED case needs.
 cat > "$T/stub/gh" <<'EOF'
 #!/bin/bash
+printf '%s\n' "$*" >> "$STUBD/gh.log"
 if [ -n "${GH_BOOM:-}" ]; then echo "HTTP 502" >&2; exit 1; fi
 if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   cat "$STUBD/prbranch-${3:-}" 2>/dev/null || exit 1
   exit 0
 fi
 case " $* " in
+  *" --state all "*)
+    [ "${GH_MERGED_BOOM:-0}" != 1 ] || { echo "HTTP 502" >&2; exit 1; }
+    cat "$STUBD/all-prs" 2>/dev/null || echo '[]'
+    exit 0
+    ;;
   *" --state merged "*)
     [ "${GH_MERGED_BOOM:-0}" != 1 ] || { echo "HTTP 502" >&2; exit 1; }
     cat "$STUBD/merged-prs" 2>/dev/null || echo '[]'
@@ -81,6 +87,7 @@ if [ "${1:-}" = version ] && [ "${DELEGATE_STALE_TEST:-0}" = 1 ]; then
     'warn  delegate binary is stale: built from 1111111111111111111111111111111111111111, but delegate/ is at 2222222222222222222222222222222222222222'
   exit 0
 fi
+[ "${1:-}" = session ] && [ "${2:-}" = stop ] && exit 0
 [ "${1:-}" = session ] && [ "${2:-}" = list ] || exit 2
 cat "$STUBD/dsess" 2>/dev/null || echo '{"ok":true,"sessions":[]}'
 EOF
@@ -125,6 +132,7 @@ printf '[]' > "$T/cagents"
 printf '{"ok":true,"sessions":[]}' > "$T/dsess"
 : > "$T/prs"
 : > "$T/merged-prs"
+printf '[]\n' > "$T/all-prs"
 : > "$T/owner-ask-list"
 : > "$T/file-claim.log"
 : > "$T/pending"
@@ -206,6 +214,7 @@ PY
 }
 write_merged_pr() { # number branch mergedAt
   printf '[{"number":%s,"headRefName":"%s","mergedAt":"%s"}]\n' "$1" "$2" "$3" > "$T/merged-prs"
+  printf '[{"number":%s,"headRefName":"%s","state":"MERGED","mergedAt":"%s"}]\n' "$1" "$2" "$3" > "$T/all-prs"
 }
 
 # The retired-lane query lists only tickets whose roster entries are all retired.
@@ -529,6 +538,41 @@ r=$(newrun 7); lane "$r" 4155 fiber-4155-build abc
 printf '4170 tests/4155-selector\n' > "$T/prs"
 out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4155 2>&1); grc=$?
 if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'PR(s) 4170 still open'; then ok pr-guard-refuses-open-pr; else fail "pr-guard-refuses-open-pr (rc=$grc) $out"; fi
+
+# A state-recorded PR still blocks retirement when its branch does not use the ticket prefix.
+r=$(newrun 7ab); lane "$r" 4186 fiber-4186-build abc
+printf 'pr=4171\n' > "$r/fiber-4186.state"
+printf '4171 fiber-4186-session-id-env\n' > "$T/prs"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4186 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'REFUSING to retire 4186 — PR(s) 4171 still open' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok pr-guard-refuses-state-pr-on-non-ticket-branch
+else
+  fail "pr-guard-refuses-state-pr-on-non-ticket-branch (rc=$grc) $out"
+fi
+
+# An exact state branch still blocks an open PR even when the branch has no ticket prefix.
+r=$(newrun 7ac); lane "$r" 4187 fiber-4187-build abd
+printf 'branch=feature/unscoped-session\n' > "$r/switchyard-4187.state"
+printf '4172 feature/unscoped-session\n' > "$T/prs"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4187 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'REFUSING to retire 4187 — PR(s) 4172 still open' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok pr-guard-refuses-state-branch-exact-match
+else
+  fail "pr-guard-refuses-state-branch-exact-match (rc=$grc) $out"
+fi
+
+# A pr= from another repo's state names a different PR than fiber's open #4173.
+r=$(newrun 7ad); lane "$r" 4188 fiber-4188-build abe
+printf 'repo=aakshintala/switchyard\npr=4173\n' > "$r/switchyard-4188.state"
+printf '4173 feat/9999-unrelated\n' > "$T/prs"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4188 2>&1); grc=$?
+if [ "$grc" = 0 ] && ! printf '%s' "$out" | grep -q 'REFUSING'; then
+  ok pr-guard-ignores-state-pr-from-other-repo
+else
+  fail "pr-guard-ignores-state-pr-from-other-repo (rc=$grc) $out"
+fi
 
 # FW_OWNER_ASK does not waive the ordinary open-PR guard for done.
 r=$(newrun 7aa); lane "$r" 4155 fiber-4155-build abc
@@ -1142,6 +1186,32 @@ rep() { # rep <run> <ticket> <status line> [age in minutes, default 10]
   printf '# %s report\n\n%s\n' "$2" "$3" > "$f"
   age_file "$f" "${4:-10}"
 }
+
+# The #1986 profile pins a normal scan plus auto-retirement of three lanes to two list calls.
+r=$(newrun batch-gh-bound)
+: > "$T/prs"; : > "$T/gh.log"
+printf '{"ok":true,"sessions":[{"id":"jid-4193","status":"idle","activeTurnId":null},{"id":"jid-4194","status":"idle","activeTurnId":null},{"id":"jid-4195","status":"idle","activeTurnId":null}]}' > "$T/dsess"
+printf '[' > "$T/all-prs"
+sep=""
+for ticket in 4193 4194 4195; do
+  pr=$((ticket + 1000)); lane "$r" "$ticket" "fiber-$ticket-build" "jid-$ticket"
+  printf 'repo=aakshintala/fiber\nissue=%s\npr=%s\n' "$ticket" "$pr" > "$r/fiber-$ticket.state"
+  printf 'RETIRE issue=%s\n' "$ticket" > "$r/fiber-$ticket-report.md"
+  printf '%s{"number":%s,"headRefName":"fiber-%s-build","state":"MERGED","mergedAt":"2026-11-16T12:00:00Z"}' \
+    "$sep" "$pr" "$ticket" >> "$T/all-prs"
+  sep=,
+done
+printf ']\n' >> "$T/all-prs"
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+gh_calls=$(wc -l < "$T/gh.log" | tr -d ' ')
+if [ "$grc" = 0 ] && [ "$gh_calls" = 2 ] \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 3 ]; then
+  ok gh-call-count-bounded-for-three-retiring-lanes
+else
+  fail "gh-call-count-bounded-for-three-retiring-lanes (rc=$grc calls=$gh_calls done=$(wc -l < "$r/roster-done" | tr -d ' '); $out; $(cat "$T/gh.log"))"
+fi
+printf '{"ok":true,"sessions":[]}' > "$T/dsess"
+
 ruling() { # ruling <run> <ticket> <n> [age in minutes, default 1]
   mkdir -p "$1/rulings"
   f=$1/rulings/ruling-$2-$3.md
@@ -1699,7 +1769,7 @@ fi
 # is resolved through its PR's head branch, which does carry the ticket.
 r=$(newrun C7); lane "$r" 4162 fiber-4162-build h9; grant "$r" 4162
 : > "$T/fclog"; : > "$T/fcheld"
-printf 'contract/4162-kind-private\n' > "$T/prbranch-4328"
+printf '[{"number":4328,"headRefName":"contract/4162-kind-private","state":"MERGED","mergedAt":"2026-11-06T12:00:00Z"}]\n' > "$T/all-prs"
 held pr#4328 crates/contract/src/kind.rs
 held pr#4328 crates/contract/src/envelope.rs
 out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fcheld \
@@ -1735,6 +1805,7 @@ fi
 # holder that carries the most paths, with no line saying so.
 r=$(newrun C9); lane "$r" 4162 fiber-4162-build h11; grant "$r" 4162
 : > "$T/fclog"; : > "$T/fcheld"; rm -f "$T/prbranch-4328"
+printf '[]\n' > "$T/all-prs"
 held pr#4328 crates/contract/src/kind.rs
 out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fcheld \
   bash "$BIN/lanecheck" done 4162 2>&1)
@@ -1743,6 +1814,23 @@ if printf '%s' "$out" | grep -q 'PR-SHAPED HOLDER UNRESOLVED: pr#4328 (1 path(s)
   ok pr-shaped-holder-that-cannot-be-resolved-is-reported
 else
   fail "pr-shaped-holder-that-cannot-be-resolved-is-reported ($out)"
+fi
+
+# #1986 reuses one all-state list for every PR-shaped holder in a multi-lane done.
+r=$(newrun C10); lane "$r" 4162 fiber-4162-build h12; lane "$r" 4318 fiber-4318-build h13
+: > "$T/prs"; : > "$T/gh.log"; : > "$T/fcheld"
+printf '[{"number":4328,"headRefName":"contract/4162-kind-private","state":"MERGED","mergedAt":"2026-11-06T12:00:00Z"},{"number":4329,"headRefName":"tests/4318-terminal-resume-list","state":"OPEN","mergedAt":null}]\n' > "$T/all-prs"
+held pr#4328 crates/contract/src/kind.rs
+held pr#4329 crates/main/src/terminal.rs
+out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fcheld \
+  bash "$BIN/lanecheck" done 4162 4318 2>&1); grc=$?
+gh_calls=$(wc -l < "$T/gh.log" | tr -d ' ')
+if [ "$grc" = 0 ] && [ "$gh_calls" = 2 ] \
+  && printf '%s' "$out" | grep -q 'PR-SHAPED CLAIMS LEFT for pr#4328' \
+  && printf '%s' "$out" | grep -q 'PR-SHAPED CLAIMS LEFT for pr#4329'; then
+  ok gh-call-count-bounded-for-multiple-pr-holders
+else
+  fail "gh-call-count-bounded-for-multiple-pr-holders (rc=$grc calls=$gh_calls; $out; $(cat "$T/gh.log"))"
 fi
 
 # --- a box Claude lane reaches the waiting states -----------------------------

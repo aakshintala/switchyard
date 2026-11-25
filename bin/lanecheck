@@ -613,7 +613,8 @@ PY
   # FW_DONE_MIN seconds (default 1800) is the floor; FW_DONE_FORCE=1 overrides it
   # for the real case of a lane that started and died inside the window.
   young=0
-  # One open-PR list for every ticket being retired, matched by head branch.
+  # #1986 checks the state PR and exact state branch first; the ticket pattern remains fallback.
+  # One open-PR list for every ticket being retired.
   # The body search this replaced matched any pull request whose body merely
   # mentioned the number: on 2026-11-04 retiring 4042 was refused by PR #4116
   # (head `feat/3890-keeper-shell-path`), whose only mention of 4042 is a doc
@@ -622,12 +623,45 @@ PY
   # the #4125 case it exists for. A lane's own pull request is the one on this
   # ticket's branch, by mkbrief's `<area>/<n>-<slug>` convention.
   _prs_ok=0
-  if _prs=$(gh pr list --repo aakshintala/fiber --state open --limit 200 --json number,headRefName --jq '.[] | "\(.number) \(.headRefName)"' 2>/dev/null); then
+  if [ -n "${FW_LANECHECK_OPEN_PRS_FILE:-}" ]; then
+    if [ "${FW_LANECHECK_OPEN_PRS_OK:-0}" = 1 ] \
+      && _prs=$(cat "$FW_LANECHECK_OPEN_PRS_FILE" 2>/dev/null); then
+      _prs_ok=1
+    fi
+  elif _prs=$(gh pr list --repo aakshintala/fiber --state open --limit 200 --json number,headRefName --jq '.[] | "\(.number) \(.headRefName)"' 2>/dev/null); then
     _prs_ok=1
   fi
-  _merged_prs=""
-  _merged_prs_ok=0
-  _merged_prs_loaded=0
+  _all_prs=""
+  _all_prs_ok=0
+  _all_prs_loaded=0
+  load_all_prs() {
+    if [ "$_all_prs_loaded" = 1 ]; then
+      [ "$_all_prs_ok" = 1 ]
+      return
+    fi
+    _all_prs_loaded=1
+    if [ -n "${FW_LANECHECK_ALL_PRS_FILE:-}" ]; then
+      if [ "${FW_LANECHECK_ALL_PRS_OK:-0}" = 1 ] \
+        && _all_prs=$(cat "$FW_LANECHECK_ALL_PRS_FILE" 2>/dev/null); then
+        _all_prs_ok=1
+      fi
+    elif _all_prs=$(gh pr list --repo "${FW_REPO:-aakshintala/fiber}" --state all --limit 200 --json number,headRefName,state,mergedAt 2>/dev/null); then
+      _all_prs_ok=1
+    fi
+    [ "$_all_prs_ok" = 1 ]
+  }
+  # #1986 uses the same ticket-state lookup for the merged and open-PR guards.
+  state_value_for_ticket() {
+    local ticket="$1" key="$2" state_file value
+    for state_file in "$R"/*-"$ticket".state "$R/fiber-$ticket.state"; do
+      [ -f "$state_file" ] || continue
+      value=$(sed -n "s/^${key}=//p" "$state_file" | head -n 1)
+      if [ -n "$value" ]; then
+        printf '%s\n' "$value"
+        return
+      fi
+    done
+  }
   handoff_problem_for() {
     local open_pr="$1" handoff_ok p
     handoff_problem=""
@@ -667,6 +701,14 @@ else:
     # way the retirement line is scoped.
     sn=""
     case "$n" in *:*) sn=${n#*:} ;; esac
+    state_branch=$(state_value_for_ticket "$tn" branch)
+    state_pr=$(state_value_for_ticket "$tn" pr)
+    # The open list is fiber's: a pr= from another repo's lane names a
+    # different PR, and a false refusal trains FW_DONE_FORCE (#1986).
+    case "$(state_value_for_ticket "$tn" repo)" in
+      "" | aakshintala/fiber) ;;
+      *) state_pr="" ;;
+    esac
     newest=$(awk -F'\t' -v t="$tn" -v s="$sn" '$2==t && (s=="" || $4==s){print $1}' "$roster" 2>/dev/null | sort | tail -1)
     [ -n "$newest" ] || continue
     if [ "$(uname -s)" = Darwin ]; then
@@ -678,19 +720,8 @@ else:
     if [ "$already_retired" != 1 ] && [ "$age" -lt "${FW_DONE_MIN:-1800}" ]; then
       merged_pr=""
       if [ -n "$sn" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
-        if [ "$_merged_prs_loaded" = 0 ]; then
-          _merged_prs_loaded=1
-          if _merged_prs=$(gh pr list --repo aakshintala/fiber --state merged --limit 200 --json number,headRefName,mergedAt 2>/dev/null); then
-            _merged_prs_ok=1
-          fi
-        fi
-        if [ "$_merged_prs_ok" = 1 ]; then
-          state_branch=""
-          for state_file in "$R"/*-"$tn".state "$R/fiber-$tn.state"; do
-            [ -f "$state_file" ] || continue
-            state_branch=$(sed -n 's/^branch=//p' "$state_file" | head -n 1)
-            [ -z "$state_branch" ] || break
-          done
+        load_all_prs || true
+        if [ "$_all_prs_ok" = 1 ]; then
           merged_pr=$(python3 -I -c 'import json,re,sys
 
 ticket,newest,state_branch=sys.argv[1:]
@@ -702,7 +733,7 @@ if not isinstance(prs,list):
     sys.exit(0)
 valid=re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 for pr in prs:
-    if not isinstance(pr,dict):
+    if not isinstance(pr,dict) or pr.get("state") != "MERGED":
         continue
     head=pr.get("headRefName")
     merged=pr.get("mergedAt")
@@ -712,7 +743,7 @@ for pr in prs:
     if head == "fiber-" + ticket or head.startswith("fiber-" + ticket + "-") or (state_branch and head == state_branch):
         if isinstance(number,(int,str)):
             print(number)
-            break' "$tn" "$newest" "$state_branch" <<<"$_merged_prs" 2>/dev/null) || merged_pr=""
+            break' "$tn" "$newest" "$state_branch" <<<"$_all_prs" 2>/dev/null) || merged_pr=""
         fi
       fi
       if [ -n "$merged_pr" ]; then
@@ -740,7 +771,8 @@ for pr in prs:
     # Fails open on a gh error: a network blip must not wedge retirement, but
     # the line says the guard did not run so the log cannot be misread.
     if [ "$_prs_ok" = 1 ]; then
-      open_pr=$(printf '%s\n' "$_prs" | awk -v t="$tn" '$2 ~ ("^[^/]+/" t "-") || $2 ~ ("^" t "-") { print $1 }')
+      open_pr=$(printf '%s\n' "$_prs" | awk -v t="$tn" -v pr="$state_pr" -v branch="$state_branch" '
+        NF >= 2 && (($1 == pr && pr != "") || ($2 == branch && branch != "") || $2 ~ ("^[^/]+/" t "-") || $2 ~ ("^" t "-")) && !seen[$1]++ { print $1 }')
     else
       open_pr=""
     fi
@@ -926,9 +958,9 @@ PY
     # searched for the ticket number inside the holder name, which can never
     # find a `pr#` holder, because that name carries the PR number and not the
     # ticket's. So a `pr#` holder is resolved through its PR's head branch,
-    # which does carry the ticket. `gh pr view` is used rather than the open-PR
-    # list built at the top of this script: by the time a ticket retires its PR
-    # has usually merged, and a merged PR is not in that list.
+    # which does carry the ticket. #1986 resolves holders from one all-state
+    # PR snapshot per run; a missing row stays unresolved, never guessed from
+    # the open-PR list built at the top of this script.
     claims=$("$fc" list --repo "${FW_REPO:-aakshintala/fiber}" 2>/dev/null) || claims=""
     for h in $(printf '%s\n' "$claims" |
       awk -F'\t' -v t="$t" '$2 ~ ("^[A-Za-z0-9_.-]+/" t "-") { print $2 }' | sort -u); do
@@ -943,8 +975,21 @@ PY
     for h in $(printf '%s\n' "$claims" |
       awk -F'\t' '$2 ~ /^pr#[0-9]+$/ { print $2 }' | sort -u); do
       n=$(printf '%s\n' "$claims" | awk -F'\t' -v h="$h" '$2 == h' | wc -l | tr -d ' ')
-      br=$(gh pr view "${h#pr\#}" --repo "${FW_REPO:-aakshintala/fiber}" \
-        --json headRefName --jq .headRefName 2>/dev/null) || br=""
+      load_all_prs || true
+      br=$(python3 -I -c 'import json,sys
+number=sys.argv[1]
+try:
+    prs=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(prs,list):
+    sys.exit(0)
+for pr in prs:
+    if isinstance(pr,dict) and str(pr.get("number")) == number:
+        head=pr.get("headRefName")
+        if isinstance(head,str):
+            print(head)
+        break' "${h#pr\#}" <<<"$_all_prs" 2>/dev/null) || br=""
       if [ -z "$br" ]; then
         # An unresolved holder is reported, never skipped. Silence is the defect
         # this whole block exists to fix, and a gh failure here would otherwise
@@ -1191,6 +1236,42 @@ else
   : >"$tmp/openprs.txt"
   rm -f "$tmp/openprs.ok"
 fi
+# #1986 batches PR state once per repository, not once per reported lane.
+pr_repos=$(python3 -I - "$R" <<'PY'
+import glob, os, re, sys
+root = sys.argv[1]
+repos = set()
+for path in glob.glob(os.path.join(root, "*.state")):
+    try:
+        for line in open(path, errors="replace"):
+            if line.startswith("repo="):
+                repo = line.rstrip("\n").split("=", 1)[1]
+                if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+                    repos.add(repo)
+                break
+    except OSError:
+        pass
+print("\n".join(sorted(repos)))
+PY
+)
+mkdir -p "$tmp/allprs"
+for pr_repo in $pr_repos; do
+  pr_owner=${pr_repo%%/*}
+  pr_name=${pr_repo#*/}
+  pr_dir="$tmp/allprs/$pr_owner"
+  mkdir -p "$pr_dir"
+  pr_file="$pr_dir/$pr_name.json"
+  if gh pr list --repo "$pr_repo" --state all --limit 200 \
+       --json number,headRefName,state,mergedAt >"$pr_file" 2>/dev/null; then
+    : >"$pr_file.ok"
+  else
+    printf '[]\n' >"$pr_file"
+    rm -f "$pr_file.ok"
+  fi
+done
+export FW_LANECHECK_OPEN_PRS_FILE="$tmp/openprs.txt"
+export FW_LANECHECK_OPEN_PRS_OK=0
+[ ! -f "$tmp/openprs.ok" ] || export FW_LANECHECK_OPEN_PRS_OK=1
 
 python3 -I - "$tmp" "$roster" "$retired" "$R" "$BOX" "$boxssh" "$FW_LOCAL_BOX" "$script_dir/job-record" "$tmp/roster-retirement.py" <<'PY'
 import glob, json, sys, os, re, shlex, subprocess, tempfile, time, fcntl, datetime
@@ -1460,6 +1541,28 @@ try:
             open_prs.add(f[0])
 except OSError:
     prs_ok = False
+
+all_prs_by_repo = {}
+all_prs_ok = set()
+all_prs_files = {}
+for owner_dir in glob.glob(os.path.join(tmp, "allprs", "*")):
+    owner = os.path.basename(owner_dir)
+    for path in glob.glob(os.path.join(owner_dir, "*.json")):
+        repo = owner + "/" + os.path.basename(path)[:-5]
+        all_prs_files[repo] = path
+        if not os.path.exists(path + ".ok"):
+            continue
+        try:
+            rows = json.load(open(path))
+        except (OSError, ValueError, TypeError):
+            continue
+        if not isinstance(rows, list):
+            continue
+        all_prs_by_repo[repo] = {
+            str(row["number"]): row for row in rows
+            if isinstance(row, dict) and isinstance(row.get("number"), (int, str))
+        }
+        all_prs_ok.add(repo)
 
 
 def launched(ts):
@@ -2056,16 +2159,12 @@ for ticket, report in reported.items():
             or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)
             or not pr.isdigit()):
         continue
-    try:
-        pr_result = subprocess.run(
-            ["gh", "pr", "view", pr, "--repo", repo, "--json", "state,mergedAt"],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
-        pr_data = json.loads(pr_result.stdout) if pr_result.returncode == 0 else {}
-    except Exception:
-        pr_data = {}
+    if repo not in all_prs_ok:
+        continue
+    pr_data = all_prs_by_repo.get(repo, {}).get(pr, {})
     if (isinstance(pr_data, dict) and pr_data.get("state") == "MERGED"
             and isinstance(pr_data.get("mergedAt"), str) and pr_data["mergedAt"]):
-        retirement_lanes[(ticket, sess)] = pr
+        retirement_lanes[(ticket, sess)] = (pr, repo)
 
 missing = 0
 active_roster_tickets = set()
@@ -2305,7 +2404,9 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         hold_at = hold_timestamp(n, rep, assistant_messages, lane_started)
         held = hold_at is not None and ruled.get(n, 0.0) <= hold_at
         wake_done = False
-        retirement_pr = retirement_lanes.get((n, sess))
+        retirement = retirement_lanes.get((n, sess))
+        retirement_pr = retirement[0] if retirement else None
+        retirement_repo = retirement[1] if retirement else ""
         if held:
             print(f"WAITING {n} hold")
             wake_done = True
@@ -2320,9 +2421,12 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
             if (not working and not current_jobs and not parked and not jobq
                     and n not in pending):
                 lanecheck_script = os.path.join(os.path.dirname(JOB_RECORD), "lanecheck")
+                child_env = os.environ.copy()
+                child_env["FW_LANECHECK_ALL_PRS_FILE"] = all_prs_files.get(retirement_repo, "")
+                child_env["FW_LANECHECK_ALL_PRS_OK"] = "1" if retirement_repo in all_prs_ok else "0"
                 result = subprocess.run(
                     ["bash", lanecheck_script, "done", f"{n}:{sess}"],
-                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env)
                 if result.stdout:
                     print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
                 if result.returncode == 0:
