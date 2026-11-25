@@ -13,6 +13,11 @@
 set -euo pipefail
 # A session is not a delegate job: drop a job's DELEGATE_JOB_ID/CHAIN inherited from the caller's shell (#1748).
 unset DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
+# launchd runs this with a minimal PATH, and bash never reads ~/.zshenv, so the roles it starts
+# (and every lane they launch) had no cargo: a lane gate failed with "cargo: command not found".
+# Source rustup's env file the way a login shell would.
+# shellcheck disable=SC1091
+[ -r "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
 log_file="${ROLES_RESTART_LOG:-$HOME/.cache/agents/roles-restart.log}"
 lock_dir="${ROLES_RESTART_LOCK_DIR:-$HOME/.cache/agents/roles-restart.lock}"
