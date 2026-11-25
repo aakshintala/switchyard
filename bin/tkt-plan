@@ -792,6 +792,34 @@ do_verify() {
       fi
     fi
   fi
+  # A recorded Base change that touched no plan File leaves an accepted,
+  # unchanged plan valid: record PLAN OK at the new Base without a round (#1712).
+  # A triaged verdict counts as accepted here, as it does for REANCHORED (#1609):
+  # both mean the plan passed and may be built.
+  if [ "$drift" -eq 0 ] && [ "$unresolved_fix" -eq 0 ] && [ -n "$vbase" ] && [ "$vbase" != "$base" ] \
+    && git -C "$worktree" merge-base --is-ancestor "$vbase" "$base" 2>/dev/null; then
+    nodrift_files=()
+    while IFS= read -r p; do nodrift_files+=("$p"); done < <(plan_files_pathspecs "$plan")
+    prior_verdict="$(t get plan_verdict 2>/dev/null || true)"
+    prior_plan_hash="$(t get verified_plan_hash 2>/dev/null || true)"
+    if [ "${#nodrift_files[@]}" -gt 0 ] && [ -n "$prior_plan_hash" ] \
+      && nodrift_stat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${nodrift_files[@]}" 2>/dev/null)" \
+      && [ -z "$nodrift_stat" ] \
+      && { [ "$prior_verdict" = ok ] || [ "$prior_verdict" = triaged ]; } \
+      && prior_body_hash="$(plan_object_body_hash "$prior_plan_hash" 2>/dev/null)" \
+      && current_body_hash="$(plan_body_hash "$plan" 2>/dev/null)" \
+      && [ "$prior_body_hash" = "$current_body_hash" ]; then
+      plan_verdict_write "$tkt_state" "$state" ok "$base" "$plan" "$worktree"
+      verified_plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+      t set verified_base "$base"
+      t set verified_plan_hash "$verified_plan_hash"
+      t set plan_stop_verdict_key ""
+      t set plan_stop_verdict_at ""
+      t set build_stale_recovery_base ""
+      t set build_stale_recovery_plan_hash ""
+      emit "PLAN-OK drift=none" 0 "the recorded Base change touched no plan File and the accepted plan is unchanged; no Verifier round spent"
+    fi
+  fi
   if [ "$drift" -eq 0 ] && [ "$unresolved_fix" -eq 0 ]; then
     if [ -n "$(t get confirmed_for 2>/dev/null || true)" ]; then
       if grant_pending; then
