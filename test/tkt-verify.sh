@@ -198,6 +198,15 @@ write_ruling_comment() {
     >"$T/comment-$id.json"
 }
 
+install_delegate_probe() {
+  cat >"$T/bin/delegate" <<'EOF'
+#!/usr/bin/env bash
+printf 'delegate|%s\n' "$*" >>"$T/calls.log"
+exit 99
+EOF
+  chmod +x "$T/bin/delegate"
+}
+
 assert_no_grant() {
   ! grep -q '^grant[.]' "$S" || fail "$1 wrote grant state: $(grep '^grant[.]' "$S")"
 }
@@ -236,7 +245,63 @@ append_review_comment() {
   mv "$T/comments.next.json" "$T/comments.json"
 }
 
-# FIX-OK records the exact reviewed head and the command passes the findings delta.
+run_ruling_refutes_reviewed_all() {
+  local history_file history journal ship_command
+  setup_case ruling-refutes-reviewed-all
+  install_delegate_probe
+  set_state reviewed "$HEAD"
+  printf 'P1 src/main.sh:1 — initial finding\nP2 src/worker.sh:2 — another finding\n' >"$F"
+  history_file="$CASE_DIR/findings-history.md"
+  printf '# Findings history\nP3 src/old.sh:3 — posted finding [tkt-history: raised=review round 0; status=open; unverified=none]\n' >"$history_file"
+  set_state findings_history "$history_file"
+  write_ruling_comment 930 'refutes: P1 src/main.sh:1'
+  write_ruling_comment 931 $'refutes: P2 src/worker.sh:2\nrefutes: P3 src/old.sh:3'
+
+  run_verify_rulings 930 931
+  [ "$RC" = 0 ] || fail "ruling-refutes-reviewed-all exited $RC, want 0: $OUT $(cat "$T/stderr")"
+  grep -Fxq "TKT tkt-verify RULED unverified head=$HEAD" <<<"$(head -n 1 <<<"$OUT")" || fail "ruling-refutes-reviewed-all omitted reviewed head: $OUT"
+  grep -Fxq "tkt-ship $S" <<<"$OUT" || fail "ruling-refutes-reviewed-all omitted ship command: $OUT"
+  [ "$(read_state unverified)" = "$F" ] || fail "ruling-refutes-reviewed-all did not set unverified to findings"
+  [ "$(read_state round)" = 0 ] || fail "ruling-refutes-reviewed-all incremented round"
+  assert_no_review 'ruling-refutes-reviewed-all'
+  assert_no_slot 'ruling-refutes-reviewed-all'
+  ! grep -q '^delegate|' "$T/calls.log" || fail "ruling-refutes-reviewed-all dispatched delegate: $(cat "$T/calls.log")"
+
+  journal="${S%.state}.journal"
+  grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-930 refutes P1 src/main.sh:1' "$journal" || fail "ruling-refutes-reviewed-all did not journal comment 930"
+  grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-931 refutes P2 src/worker.sh:2' "$journal" || fail "ruling-refutes-reviewed-all did not journal comment 931's P2 refutation"
+  grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-931 refutes P3 src/old.sh:3' "$journal" || fail "ruling-refutes-reviewed-all did not journal comment 931's history refutation"
+  history="$(read_state findings_history)"
+  [ -n "$history" ] && [ -r "$history" ] || fail "ruling-refutes-reviewed-all did not write findings history"
+  grep -Fq 'P1 src/main.sh:1 — initial finding' "$history" || fail "ruling-refutes-reviewed-all omitted current findings from history"
+  grep -Fq 'P3 src/old.sh:3 — posted finding [tkt-history: raised=review round 0; status=open; unverified=' "$history" || fail "ruling-refutes-reviewed-all did not write unverified history"
+}
+
+run_ruling_refutes_reviewed_partial() {
+  setup_case ruling-refutes-reviewed-partial
+  set_state reviewed "$HEAD"
+  printf 'P1 src/main.sh:1 — initial finding\nP2 src/worker.sh:2 — another finding\n' >"$F"
+  write_ruling_comment 932 'refutes: P1 src/main.sh:1'
+
+  run_verify_ruling 932
+  [ "$RC" = 1 ] || fail "ruling-refutes-reviewed-partial exited $RC, want 1: $OUT $(cat "$T/stderr")"
+  assert_first_verdict NOTHING-TO-VERIFY 'ruling-refutes-reviewed-partial'
+  assert_no_review 'ruling-refutes-reviewed-partial'
+  assert_no_slot 'ruling-refutes-reviewed-partial'
+  [ "$(read_state reviewed)" = "$HEAD" ] || fail "ruling-refutes-reviewed-partial changed reviewed"
+  [ "$(bash "$TKT_STATE" "$S" get unverified 2>/dev/null || true)" = '' ] || fail "ruling-refutes-reviewed-partial set unverified"
+  ! grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-932' "${S%.state}.journal" 2>/dev/null \
+    || fail "ruling-refutes-reviewed-partial journalled a partial ruling"
+}
+
+if [ -n "${CASE:-}" ]; then
+  case "$CASE" in
+    ruling-refutes-reviewed-all) run_ruling_refutes_reviewed_all; exit 0 ;;
+    ruling-refutes-reviewed-partial) run_ruling_refutes_reviewed_partial; exit 0 ;;
+  esac
+fi
+
+# FIX-OK records the exact reviewed head and passes the findings delta.
 setup_case fix-ok
 run_verify
 [ "$RC" = 0 ] || fail "FIX-OK exited $RC: $OUT $(cat "$T/stderr")"
@@ -598,6 +663,11 @@ run_verify
 assert_first_verdict NOTHING-TO-VERIFY 'NOTHING-TO-VERIFY'
 assert_no_review NOTHING-TO-VERIFY
 assert_no_slot NOTHING-TO-VERIFY
+
+if [ -z "${CASE:-}" ]; then
+  run_ruling_refutes_reviewed_all
+  run_ruling_refutes_reviewed_partial
+fi
 
 setup_case since-not-ancestor
 set_state reviewed 0000000000000000000000000000000000000000

@@ -27,7 +27,7 @@ findings_row_status() {
 # Store every finding supplied to a scoped verify, with its origin and later
 # closure, separately from the open-only file the next fix job consumes.
 write_findings_history() {
-  local action="$1" verify_output="${2:-}" round_list_file="${3:-}" history_source row base meta raised status unverified round_path round_no
+  local action="$1" verify_output="${2:-}" round_list_file="${3:-}" record_slot="${4:-1}" history_source row base meta raised status unverified round_path round_no
   local rounds_csv="" rounds_seen="" earlier=0 label
   local i found new_raised
   local -a history_base=() history_raised=() history_status=() history_unverified=() verify_open=()
@@ -126,5 +126,5 @@ write_findings_history() {
   } >"$history_file"
   t journal "findings history write $history_file"
   t set findings_history "$history_file"
-  t set "fix_round.$knum.history" "$history_file"
+  if [ "$record_slot" -eq 1 ]; then t set "fix_round.$knum.history" "$history_file"; fi
 }

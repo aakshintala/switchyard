@@ -838,12 +838,7 @@ EOF
   cp "$T/tkt-job-stub" "$T/bin/tkt-job"
 }
 
-case "${CASE:-}" in
-  ruling-refutes-all) run_ruling_refutes_all; exit 0 ;;
-esac
-if [ -z "${CASE:-}" ]; then
-  run_ruling_refutes_all
-fi
+if want ruling-refutes-all; then run_ruling_refutes_all; fi
 
 # A ruling closes only the named finding, and is passed as recorded context.
 if want ruling-refutes-one; then

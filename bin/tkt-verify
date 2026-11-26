@@ -100,7 +100,11 @@ origin_head="$(git -C "$worktree" rev-parse --verify "refs/remotes/origin/$branc
 pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid 2>/dev/null)" || emit "VERIFY-FAIL" 1 "cannot read PR head: pr=$pr"
 pr_head="$(jq -r '.headRefOid // empty' <<<"$pr_json" 2>/dev/null || true)"
 [ "$head" = "$pr_head" ] || emit "PR-HEAD-MISMATCH" 1 "worktree HEAD=$head PR head=$pr_head"
-[ "$head" != "$reviewed" ] || emit "NOTHING-TO-VERIFY" 1 "HEAD=$head is already reviewed"
+head_is_reviewed=0
+if [ "$head" = "$reviewed" ]; then
+  [ "${#ruling_requested[@]}" -gt 0 ] || emit "NOTHING-TO-VERIFY" 1 "HEAD=$head is already reviewed"
+  head_is_reviewed=1
+fi
 if ! git -C "$worktree" merge-base --is-ancestor "$reviewed" "$head" 2>/dev/null; then
   emit "SINCE-NOT-ANCESTOR" 1 "reviewed=$reviewed HEAD=$head"
 fi
@@ -159,12 +163,19 @@ for ruling_id in "${ruling_requested[@]+${ruling_requested[@]}}"; do
     ruling_refuse no-refutes "$ruling_id"
   fi
 done
+ruling_history_source=""
+if [ "$head_is_reviewed" -eq 1 ]; then
+  ruling_history_source="$(t get findings_history 2>/dev/null || true)"
+  ruling_match_sources=(current "$findings" history "$ruling_history_source")
+else
+  ruling_match_sources=(current "$findings")
+fi
 for ruling_index in "${!ruling_ids[@]}"; do
   if ! ruling_refutes_validate_file \
     "${ruling_ids[$ruling_index]}" \
     "${ruling_urls[$ruling_index]}" \
     "$tmp/ruling-${ruling_ids[$ruling_index]}.refutes" \
-    current "$findings"; then
+    "${ruling_match_sources[@]}"; then
     ruling_refuse "$ruling_refutes_failure" "$ruling_refutes_failure_id" \
       "$ruling_refutes_hint"
   fi
@@ -176,6 +187,29 @@ for grant_id in "${ruling_grant_ids[@]+${ruling_grant_ids[@]}}"; do
   fi
   grant_accepted=1
 done
+if [ "$head_is_reviewed" -eq 1 ]; then
+  if ruling_refutes_all_open_rows "$findings" "$ruling_history_source"; then
+    for ruling_index in "${!ruling_refute_ids[@]}"; do
+      t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
+    done
+    if [ -n "$issue" ]; then set_namebase "$repo" "$issue"; else namebase="${repo##*/}"; fi
+    part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
+    fixslot="$(t get fixslot 2>/dev/null || printf '0')"
+    case "$fixslot" in ''|*[!0-9]*) fixslot=0 ;; esac
+    if [ "$fixslot" -gt 0 ] \
+      && [ "$(t get "fix_round.$fixslot.start" 2>/dev/null || true)" = "$reviewed" ] \
+      && [ "$(t get "fix_round.$fixslot.head" 2>/dev/null || true)" = "$head" ]; then
+      knum="$fixslot"
+    elif [ "$round" -gt "$fixslot" ]; then knum=$((round + 1)); else knum=$((fixslot + 1)); fi
+    history_file="$(history_path "$knum")"
+    write_findings_history unverified "" "" 0
+    t set unverified "$findings"
+    ship_command="tkt-ship $(printf '%q' "$state")"
+    emit "RULED unverified head=$head" 0 "$ship_command"
+  fi
+  grant_url=""
+  emit "NOTHING-TO-VERIFY" 1 "HEAD=$head is already reviewed"
+fi
 if [ "$grant_accepted" -eq 1 ]; then
   record_round_grant "$grant_id" "$grant_url" "$grant_round" t
 fi
