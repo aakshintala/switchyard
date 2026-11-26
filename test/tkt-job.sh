@@ -1856,6 +1856,13 @@ for v in "" abc 12x -5 0 00; do
   grep -q . "$T/stub.log" && fail "TKT_IDLE_MS='$v' does not call delegate"
 done
 
+# --- the docs say every dispatch passes --idle-ms, and the Tools header names TKT_IDLE_MS (#1999) ---
+SKILL_DOC="$SCRIPT_DIR/../skills/delegate/SKILL.md"
+grep -q 'muse/\*` runs get 1800000' "$SKILL_DOC" && fail "delegate SKILL.md still says only muse/* runs get --idle-ms 1800000 from tkt-job"
+grep -q 'TKT_IDLE_MS' "$SKILL_DOC" || fail "delegate SKILL.md names TKT_IDLE_MS"
+grep -q 'overrides a host-profile `idleMs`' "$SKILL_DOC" || fail "delegate SKILL.md says tkt-job's --idle-ms overrides a host-profile idleMs"
+sed -n '/^# Tools:/,/^set -euo/p' "$TKT" | grep -q 'TKT_IDLE_MS' || fail "tkt-job Tools header names TKT_IDLE_MS"
+
 # --- verifier-r* slots pass --wall-ms 10800000, gated and ungated ---
 setup_case wall-verifier-ungated
 reset_stub

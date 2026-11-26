@@ -81,11 +81,13 @@ never restarts by itself. Cursor, pi and claude were verified (2026-10-04) to re
 mid-turn. Answer `NEEDS_CONTEXT` with it. A resumed lane whose `result.changeSet.newCommits` comes back empty committed nothing: start a fresh job.
 
 `--tool-idle-ms` widens how long a running tool may stay silent before the idle watchdog
-kills the job (default 1800000, 30 min; a model silent between tools gets 300000). On resume,
+kills the job (default 1800000, 30 min; a model silent between tools gets the `--idle-ms` window). On resume,
 it overrides the stored limit for the resumed job. This flag also bounds the gate.
 
-`--idle-ms` sets the model-idle window for one run, overriding the host-profile `idleMs`
-(default 300000); `muse/*` runs get 1800000 from `bin/tkt-job`. On resume, it overrides the
+`--idle-ms` sets the model-idle window for one run, overriding the host-profile `idleMs`.
+Without the flag the run uses the host-profile `idleMs`: 300000 when the key is absent, no limit
+when it is `null`. `bin/tkt-job` passes `--idle-ms` on every `delegate run`, 1800000 or `TKT_IDLE_MS`,
+so for tkt-job jobs it overrides a host-profile `idleMs`; its resume passes none, so the job keeps it. On resume, it overrides the
 stored value for the resumed job.
 
 `--wall-ms N` caps the whole run in milliseconds: agent, retry backoff and job-end gate.
