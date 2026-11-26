@@ -216,14 +216,20 @@ slot_owner() {
 # slot and that its exact pushed diff is the tree recorded by the job.
 blocked_tree_adoptable() {
   local id="$1" owner owner_num open_slot walked walk_id walk_record latest_record
-  local head_before files expected_paths actual_paths worktree_status
-  adopt_slot=""; adopt_before=""; adopt_head=""; adopt_record_id=""
+  local head_before files expected_paths actual_paths worktree_status state_head pr prhead actual
+  adopt_slot=""; adopt_before=""; adopt_head=""
   owner="$(slot_owner "$id" 2>/dev/null || true)"
   case "$owner" in fix[1-9]|fix[1-9][0-9]*) owner_num="${owner#fix}" ;; *) return 1 ;; esac
   [ "$owner_num" -le "$fixslot" ] || return 1
   open_slot="$(t get fixopen 2>/dev/null || printf '0')"
   case "$open_slot" in ''|*[!0-9]*) open_slot=0 ;; *) open_slot=$((10#$open_slot)) ;; esac
   [ "$open_slot" -eq 0 ] || [ "$open_slot" -ne "$owner_num" ] || return 1
+
+  pr="$(t get pr 2>/dev/null || true)"
+  state_head="$(t get head 2>/dev/null || true)"
+  [ -n "$pr" ] && [ -n "$state_head" ] || return 1
+  prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid 2>/dev/null)" || return 1
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || return 1
 
   walked="$(job_walk_superseded "$id" 2>/dev/null)" || return 1
   latest_record=""
@@ -240,7 +246,7 @@ blocked_tree_adoptable() {
     (.result.changeSet.headBefore | (type == "string" and length > 0))
   ' "$latest_record" >/dev/null 2>&1 || return 1
   head_before="$(jq -r '.result.changeSet.headBefore' "$latest_record" 2>/dev/null || true)"
-  [ -n "$head_before" ] && [ "$stored" = "$head_before" ] || return 1
+  [ -n "$head_before" ] && [ "$state_head" = "$head_before" ] || return 1
   [ -n "$prhead" ] && [ "$prhead" = "$actual" ] || return 1
   worktree_status="$(git -C "$worktree" status --porcelain --untracked-files=all 2>/dev/null)" || return 1
   [ -z "$worktree_status" ] || return 1
@@ -325,6 +331,8 @@ fixslot="$(t get fixslot 2>/dev/null || printf '0')"; case "$fixslot" in ''|*[!0
 part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
 if [ "$round" -gt "$fixslot" ]; then n=$((round + 1)); else n=$((fixslot + 1)); fi
 slot="fix$n"
+adopt_pending=0
+adopt_job=""
 if [ -n "$collect_fix_job" ]; then
   openfix="$(t get fixopen 2>/dev/null || printf '0')"
   case "$openfix" in ''|*[!0-9]*) openfix=0 ;; *) openfix=$((10#$openfix)) ;; esac
@@ -339,15 +347,54 @@ if [ -n "$resume" ]; then
   if owned="$(slot_owner "$resume")"; then [ -z "$owned" ] || slot="$owned"
   else echo "tkt-fix: unknown job id: $resume" >&2; exit 2
   fi
+  if [ "$verify" -eq 1 ] && blocked_tree_adoptable "$resume"; then
+    slot="$adopt_slot"
+    collect_fix_job="$resume"
+    stored_collect_job="$resume"
+    adopt_job="$resume"
+    adopt_pending=1
+    resume=""
+  fi
 fi
+if [ -n "$resume" ] && [ -z "$prompt" ]; then usage; fi
 knum="${slot#fix}"
 if [ -n "$collect_fix_job" ]; then
   stored_collect_job="$(t get "job.$slot" 2>/dev/null || true)"
-  if [ "$collect_fix_job" = "$stored_collect_job" ]; then
-    findings="$(t get "fix_round.$knum.findings" 2>/dev/null || true)"
-    [ -n "$findings" ] || { echo "tkt-fix: missing recorded round findings: fix_round.$knum.findings" >&2; exit 2; }
-    [ -r "$findings" ] || { echo "tkt-fix: cannot read recorded round findings: fix_round.$knum.findings=$findings" >&2; exit 2; }
+  if [ "$collect_fix_job" != "$stored_collect_job" ] && blocked_tree_adoptable "$collect_fix_job"; then
+    slot="$adopt_slot"
+    knum="${slot#fix}"
+    stored_collect_job="$collect_fix_job"
+    adopt_job="$collect_fix_job"
+    adopt_pending=1
   fi
+  if [ "$collect_fix_job" != "$stored_collect_job" ]; then
+    echo "tkt-fix: --collect-fix $collect_fix_job is not the job of open slot $slot (job.$slot=$stored_collect_job)" >&2
+    closed_owner="$(slot_owner "$collect_fix_job" 2>/dev/null || true)"
+    closed_slot_number="${closed_owner#fix}"
+    case "$closed_slot_number" in ''|*[!0-9]*) closed_slot_number="" ;; esac
+    if [ -n "$closed_slot_number" ] && [ "$closed_slot_number" -le "$fixslot" ]; then
+      collect_record="$(bash "$script_dir/job-record" "$collect_fix_job" 2>/dev/null || true)"
+      if [ -n "$collect_record" ] && [ -r "$collect_record" ]; then
+        collect_status="$(jq -r '.result.status // .status // ""' "$collect_record" 2>/dev/null || true)"
+        case "$collect_status" in
+          NEEDS_CONTEXT)
+            printf 'tkt-fix: job %s belongs to closed slot %s (NEEDS_CONTEXT); resume it with: tkt-fix %s --resume %s --prompt <answer file>\n' \
+              "$collect_fix_job" "$closed_owner" "$state" "$collect_fix_job" >&2
+            ;;
+          ASK|BLOCKED|ERROR|STALLED|CANCELLED)
+            printf 'Recovery: triage owning slot %s before deciding whether it may start a fresh job; the slot remains owned by %s.\n' \
+              "$closed_owner" "$collect_fix_job" >&2
+            ;;
+        esac
+      fi
+    fi
+    exit 2
+  fi
+  # A hand-set job.fix<n> alone does not prove a dispatch passed ROUND-LIMIT.
+  # record_round_findings records this key on the dispatch path after ROUND-LIMIT.
+  findings="$(t get "fix_round.$knum.findings" 2>/dev/null || true)"
+  [ -n "$findings" ] || { echo "tkt-fix: missing recorded round findings: fix_round.$knum.findings" >&2; exit 2; }
+  [ -r "$findings" ] || { echo "tkt-fix: cannot read recorded round findings: fix_round.$knum.findings=$findings" >&2; exit 2; }
 fi
 history_file="$(history_path "$knum")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
@@ -493,10 +540,90 @@ ruling_refuse() {
   emit "RULING-REFUSED reason=$reason comment=$comment" 2
 }
 
+if [ "${#ruling_requested[@]}" -gt 0 ]; then
+  ruling_history_source="$(t get findings_history 2>/dev/null || true)"
+  ruling_alt_pr="$(t get pr 2>/dev/null || true)"
+  for ruling_id in ${ruling_requested[@]+"${ruling_requested[@]}"}; do
+    case "$ruling_id" in
+      ''|*[!0-9]*) ruling_refuse bad-id "$ruling_id" ;;
+    esac
+    ruling_json="$tmp/ruling-$ruling_id.json"
+    ruling_error="$tmp/ruling-$ruling_id.err"
+    if ! fetch_issue_comment "$ruling_id" "$ruling_json" "$ruling_error" "$ruling_alt_pr"; then
+      ruling_refuse "$ruling_comment_failure" "$ruling_id"
+    fi
+    ruling_body="$tmp/ruling-$ruling_id.md"
+    jq -r '.body' "$ruling_json" >"$ruling_body" || ruling_refuse fetch "$ruling_id"
+    ruling_url="$(jq -r '.html_url // ""' "$ruling_json")"
+    ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body")
+    ruling_refutes_file="$tmp/ruling-$ruling_id.refutes"
+    ruling_grants_file="$tmp/ruling-$ruling_id.grants"
+    grep '^refutes:' "$ruling_body" >"$ruling_refutes_file" || true
+    grep '^grants:' "$ruling_body" >"$ruling_grants_file" || true
+    if [ -s "$ruling_refutes_file" ]; then
+      if ! jq -e --arg repo "$repo" --arg issue "$issue" '
+        (.issue_url | endswith("/repos/" + $repo + "/issues/" + $issue))
+      ' "$ruling_json" >/dev/null 2>&1; then
+        ruling_refuse issue "$ruling_id"
+      fi
+      [ "$noverify" -eq 0 ] || ruling_refuse refutes-need-verify "$ruling_id"
+    fi
+    if [ -s "$ruling_grants_file" ]; then
+      if [ -n "$collect_fix_job" ]; then
+        emit "RULING-REFUSED reason=bad-grant comment=$ruling_id" 2 \
+          "a collect needs no grant because the collected dispatch already passed the round limit"
+      fi
+      ruling_grant_ids+=("$ruling_id")
+      grant_comment_count=$((grant_comment_count + 1))
+    elif [ ! -s "$ruling_refutes_file" ]; then
+      ruling_refuse no-refutes "$ruling_id"
+    fi
+  done
+
+  round_grant_limited="$limited"
+  for grant_id in ${ruling_grant_ids[@]+"${ruling_grant_ids[@]}"}; do
+    grant_json="$tmp/ruling-$grant_id.json"
+    if ! check_round_grant "$grant_json" "$grant_id" "$round" t; then
+      if [ -n "$ruling_comment_hint" ]; then
+        emit "RULING-REFUSED reason=$ruling_comment_failure comment=$grant_id" 2 "$ruling_comment_hint"
+      fi
+      ruling_refuse "$ruling_comment_failure" "$grant_id"
+    fi
+    grant_accepted=1
+  done
+
+  for ruling_index in "${!ruling_ids[@]}"; do
+    if ! ruling_refutes_validate_file \
+      "${ruling_ids[$ruling_index]}" \
+      "${ruling_urls[$ruling_index]}" \
+      "$tmp/ruling-${ruling_ids[$ruling_index]}.refutes" \
+      history "$ruling_history_source" current "$findings"; then
+      ruling_refuse "$ruling_refutes_failure" "$ruling_refutes_failure_id" \
+        "$ruling_refutes_hint"
+    fi
+  done
+  if [ "$grant_accepted" -eq 1 ]; then
+    record_round_grant "$grant_id" "$grant_url" "$grant_round" t
+    limited=0
+    ruling_notes+=("Recorded ruling: $grant_url" "add this line to the PR body")
+  fi
+  for ruling_index in "${!ruling_refute_ids[@]}"; do
+    t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
+  done
+  for ruling_index in "${!ruling_ids[@]}"; do
+    ruling_notes+=("ruling: ${ruling_urls[$ruling_index]}")
+  done
+fi
 
 round_limit() {
   emit "ROUND-LIMIT round=$round" 1 "resume a job with: tkt-fix $state --verify --resume <job id> --prompt <file> (works with no open slot); otherwise post an owner ruling with grants: round $((round + 1)) and pass --ruling <comment id>, or send the open findings to triage"
 }
+# Two rounds have run: only a round-2 closed-slot recovery may pass without --resume.
+if [ "$limited" -eq 1 ]; then
+  limit_pr="$(t get pr 2>/dev/null || true)"
+  limit_head="$(t get head 2>/dev/null || true)"
+  if [ "$round" -ne 2 ] || [ -z "$limit_pr" ] || [ -z "$limit_head" ]; then round_limit; fi
+fi
 # Fill missing PR identity before checking entry drift or dispatching a fix.
 # pre_pr_resume_hint names the pre-PR resume on the no-PR refusals below.
 pre_pr_resume_hint() {
@@ -546,145 +673,18 @@ if [ -z "$pr" ] || [ -z "$stored" ]; then
   [ -n "$(t get pr 2>/dev/null || true)" ] || t set pr "$pr"
   [ -n "$(t get head 2>/dev/null || true)" ] || t set head "$stored"
 fi
-adopt_pending=0
-# Entry: state head, PR head and worktree HEAD must agree exactly, unless a
-# closed BLOCKED complete-tree job proves this pushed descendant is its work.
+# Entry: state head, PR head and worktree HEAD must agree exactly.
 if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
   prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)" || { echo "tkt-fix: cannot read PR head" >&2; exit 2; }
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
-  adopt_job=""
-  if [ -n "$collect_fix_job" ]; then
-    adopt_job="$collect_fix_job"
-  elif [ -n "$resume" ]; then
-    adopt_job="$resume"
-  fi
-  if [ -n "$adopt_job" ] && blocked_tree_adoptable "$adopt_job"; then
-    slot="$adopt_slot"
-    knum="${slot#fix}"
-    history_file="$(history_path "$knum")"
-    if [ -n "$resume" ]; then
-      collect_fix_job="$resume"
-      resume=""
-    fi
-    adopt_pending=1
-  elif [ -n "$resume" ] && [ -z "$prompt" ]; then
-    usage
-  fi
-  if [ -n "$collect_fix_job" ]; then
-    stored_collect_job="$(t get "job.$slot" 2>/dev/null || true)"
-    if [ "$collect_fix_job" != "$stored_collect_job" ]; then
-      echo "tkt-fix: --collect-fix $collect_fix_job is not the job of open slot $slot (job.$slot=$stored_collect_job)" >&2
-      closed_owner="$(slot_owner "$collect_fix_job" 2>/dev/null || true)"
-      closed_slot_number="${closed_owner#fix}"
-      case "$closed_slot_number" in ''|*[!0-9]*) closed_slot_number="" ;; esac
-      if [ -n "$closed_slot_number" ] && [ "$closed_slot_number" -le "$fixslot" ]; then
-        collect_record="$(bash "$script_dir/job-record" "$collect_fix_job" 2>/dev/null || true)"
-        if [ -n "$collect_record" ] && [ -r "$collect_record" ]; then
-          collect_status="$(jq -r '.result.status // .status // ""' "$collect_record" 2>/dev/null || true)"
-          case "$collect_status" in
-            NEEDS_CONTEXT)
-              printf 'tkt-fix: job %s belongs to closed slot %s (NEEDS_CONTEXT); resume it with: tkt-fix %s --resume %s --prompt <answer file>\n' \
-                "$collect_fix_job" "$closed_owner" "$state" "$collect_fix_job" >&2
-              ;;
-            ASK|BLOCKED|ERROR|STALLED|CANCELLED)
-              printf 'Recovery: triage owning slot %s before deciding whether it may start a fresh job; the slot remains owned by %s.\n' \
-                "$closed_owner" "$collect_fix_job" >&2
-              ;;
-          esac
-        fi
-      fi
-      exit 2
-    fi
-    # A hand-set job.fix<n> alone does not prove a dispatch passed ROUND-LIMIT.
-    # record_round_findings records this key on the dispatch path after ROUND-LIMIT.
-    findings="$(t get "fix_round.$knum.findings" 2>/dev/null || true)"
-    [ -n "$findings" ] || { echo "tkt-fix: missing recorded round findings: fix_round.$knum.findings" >&2; exit 2; }
-    [ -r "$findings" ] || { echo "tkt-fix: cannot read recorded round findings: fix_round.$knum.findings=$findings" >&2; exit 2; }
-  fi
-  if [ "${#ruling_requested[@]}" -gt 0 ]; then
-    ruling_history_source="$(t get findings_history 2>/dev/null || true)"
-    ruling_alt_pr="$(t get pr 2>/dev/null || true)"
-    for ruling_id in ${ruling_requested[@]+"${ruling_requested[@]}"}; do
-      case "$ruling_id" in
-        ''|*[!0-9]*) ruling_refuse bad-id "$ruling_id" ;;
-      esac
-      ruling_json="$tmp/ruling-$ruling_id.json"
-      ruling_error="$tmp/ruling-$ruling_id.err"
-      if ! fetch_issue_comment "$ruling_id" "$ruling_json" "$ruling_error" "$ruling_alt_pr"; then
-        ruling_refuse "$ruling_comment_failure" "$ruling_id"
-      fi
-      ruling_body="$tmp/ruling-$ruling_id.md"
-      jq -r '.body' "$ruling_json" >"$ruling_body" || ruling_refuse fetch "$ruling_id"
-      ruling_url="$(jq -r '.html_url // ""' "$ruling_json")"
-      ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body")
-      ruling_refutes_file="$tmp/ruling-$ruling_id.refutes"
-      ruling_grants_file="$tmp/ruling-$ruling_id.grants"
-      grep '^refutes:' "$ruling_body" >"$ruling_refutes_file" || true
-      grep '^grants:' "$ruling_body" >"$ruling_grants_file" || true
-      if [ -s "$ruling_refutes_file" ]; then
-        if ! jq -e --arg repo "$repo" --arg issue "$issue" '
-          (.issue_url | endswith("/repos/" + $repo + "/issues/" + $issue))
-        ' "$ruling_json" >/dev/null 2>&1; then
-          ruling_refuse issue "$ruling_id"
-        fi
-        [ "$noverify" -eq 0 ] || ruling_refuse refutes-need-verify "$ruling_id"
-      fi
-      if [ -s "$ruling_grants_file" ]; then
-        if [ -n "$collect_fix_job" ]; then
-          emit "RULING-REFUSED reason=bad-grant comment=$ruling_id" 2 \
-            "a collect needs no grant because the collected dispatch already passed the round limit"
-        fi
-        ruling_grant_ids+=("$ruling_id")
-        grant_comment_count=$((grant_comment_count + 1))
-      elif [ ! -s "$ruling_refutes_file" ]; then
-        ruling_refuse no-refutes "$ruling_id"
-      fi
-    done
-
-    round_grant_limited="$limited"
-    for grant_id in ${ruling_grant_ids[@]+"${ruling_grant_ids[@]}"}; do
-      grant_json="$tmp/ruling-$grant_id.json"
-      if ! check_round_grant "$grant_json" "$grant_id" "$round" t; then
-        if [ -n "$ruling_comment_hint" ]; then
-          emit "RULING-REFUSED reason=$ruling_comment_failure comment=$grant_id" 2 "$ruling_comment_hint"
-        fi
-        ruling_refuse "$ruling_comment_failure" "$grant_id"
-      fi
-      grant_accepted=1
-    done
-
-    for ruling_index in "${!ruling_ids[@]}"; do
-      if ! ruling_refutes_validate_file \
-        "${ruling_ids[$ruling_index]}" \
-        "${ruling_urls[$ruling_index]}" \
-        "$tmp/ruling-${ruling_ids[$ruling_index]}.refutes" \
-        history "$ruling_history_source" current "$findings"; then
-        ruling_refuse "$ruling_refutes_failure" "$ruling_refutes_failure_id" \
-          "$ruling_refutes_hint"
-      fi
-    done
-    if [ "$grant_accepted" -eq 1 ]; then
-      record_round_grant "$grant_id" "$grant_url" "$grant_round" t
-      limited=0
-      ruling_notes+=("Recorded ruling: $grant_url" "add this line to the PR body")
-    fi
-    for ruling_index in "${!ruling_refute_ids[@]}"; do
-      t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
-    done
-    for ruling_index in "${!ruling_ids[@]}"; do
-      ruling_notes+=("ruling: ${ruling_urls[$ruling_index]}")
-    done
-  fi
-  # Two rounds have run: only a round-2 closed-slot recovery may pass without --resume.
-  if [ "$limited" -eq 1 ]; then
-    limit_pr="$(t get pr 2>/dev/null || true)"
-    limit_head="$(t get head 2>/dev/null || true)"
-    if [ "$round" -ne 2 ] || [ -z "$limit_pr" ] || [ -z "$limit_head" ]; then round_limit; fi
-  fi
   if [ "$adopt_pending" -eq 1 ]; then
-    t set head "$adopt_head"
-    t journal "tkt-fix ADOPT $slot job=$adopt_job head=$adopt_before..$adopt_head"
-    stored="$adopt_head"
+    if [ "$prhead" = "$adopt_head" ] && [ "$actual" = "$adopt_head" ]; then
+      t set head "$adopt_head"
+      t journal "tkt-fix ADOPT $slot job=$adopt_job head=$adopt_before..$adopt_head"
+      stored="$adopt_head"
+    else
+      adopt_pending=0
+    fi
   fi
   if [ "$stored" = "$prhead" ] && [ "$prhead" = "$actual" ]; then :; else
     # Drift the open fix job's own push caused is accepted: the PR head
