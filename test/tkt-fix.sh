@@ -2135,6 +2135,19 @@ grep -q 'job|.*--slot fix2.*--resume j9' "$T/calls.log" || fail "grant did not d
 [ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "granted DONE resume did not count round 3"
 fi
 
+# A NEEDS_CONTEXT job that no slot of this state owns is limited at round 2.
+if want round-resume-unowned-needs-context; then
+setup_case round-resume-unowned-needs-context
+prepare_round_two_resume DONE
+write_job_record j8 "$OLD" "$OLD" "" NEEDS_CONTEXT
+printf 'resume brief\n' >"$CDIR/prompt.md"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j8 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "unowned NEEDS_CONTEXT round-2 resume exited $run_rc, want ROUND-LIMIT: $out $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix ROUND-LIMIT round=2' || fail "unowned NEEDS_CONTEXT resume returned the wrong verdict: $out"
+! grep -q '^job|' "$T/calls.log" || fail "unowned NEEDS_CONTEXT resume dispatched without a grant"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "refused unowned resume changed the round"
+fi
+
 # An unreadable or missing resume record fails closed at round 2.
 if want round-resume-unreadable-record; then
 setup_case round-resume-unreadable-record

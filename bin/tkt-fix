@@ -333,6 +333,7 @@ if [ "$round" -gt "$fixslot" ]; then n=$((round + 1)); else n=$((fixslot + 1)); 
 slot="fix$n"
 adopt_pending=0
 adopt_job=""
+resume_owner=""
 if [ -n "$collect_fix_job" ]; then
   openfix="$(t get fixopen 2>/dev/null || printf '0')"
   case "$openfix" in ''|*[!0-9]*) openfix=0 ;; *) openfix=$((10#$openfix)) ;; esac
@@ -344,7 +345,7 @@ if [ -n "$resume" ]; then
   # A resume reuses the slot that owns its id; an id no walk reaches falls
   # back to the fresh slot. An id with no record at all is refused only
   # when some slot already owns a job, so a first resume still dispatches.
-  if owned="$(slot_owner "$resume")"; then [ -z "$owned" ] || slot="$owned"
+  if owned="$(slot_owner "$resume")"; then [ -z "$owned" ] || slot="$owned"; resume_owner="$owned"
   else echo "tkt-fix: unknown job id: $resume" >&2; exit 2
   fi
   if [ "$verify" -eq 1 ] && blocked_tree_adoptable "$resume"; then
@@ -409,7 +410,8 @@ if [ "$round" -ge 2 ] && [ -z "$collect_verify_job" ] && [ -z "$collect_fix_job"
     if [ -n "$resume_record" ] && [ -r "$resume_record" ]; then
       resume_status="$(jq -r '.result.status // .status // ""' "$resume_record" 2>/dev/null || true)"
     fi
-    [ "$resume_status" = NEEDS_CONTEXT ] || limited=1
+    # Only a NEEDS_CONTEXT job owned by a slot of this state skips the limit (#2000).
+    [ "$resume_status" = NEEDS_CONTEXT ] && [ -n "$resume_owner" ] || limited=1
   fi
 fi
 
