@@ -235,6 +235,8 @@ if [ "$head_is_reviewed" -eq 1 ]; then
     ship_command="tkt-ship $(printf '%q' "$state")"
     emit "RULED unverified head=$head" 0 "$ship_command"
   fi
+  # NOTHING-TO-VERIFY records no grant, so emit must not print one.
+  grant_url=""
   emit "NOTHING-TO-VERIFY" 1 "HEAD=$head is already reviewed"
 fi
 if [ "$grant_accepted" -eq 1 ]; then
