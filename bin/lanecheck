@@ -96,6 +96,19 @@ def entry_is_retired(ticket, sess, jid, ts, done, done_sess):
                 (jid not in ("", "?") and (jid.startswith(key) or key.startswith(jid)))):
             cut = max(cut, done_at)
     return bool(cut and ts.split()[0] <= cut)
+
+
+def pr_row_for_number(rows, number):
+    """Return the PR row for an exact number, whether rows is a list or view object."""
+    wanted = str(number)
+    if isinstance(rows, dict):
+        rows = (rows,)
+    if not isinstance(rows, (list, tuple)):
+        return None
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("number")) == wanted:
+            return row
+    return None
 PY
 }
 
@@ -650,6 +663,24 @@ PY
     fi
     [ "$_all_prs_ok" = 1 ]
   }
+  pr_snapshot_field() {
+    local rows_json="$1" number="$2" field="$3"
+    python3 -I -c 'import json,sys
+helper,number,field=sys.argv[1:]
+namespace={}
+exec(compile(open(helper).read(),helper,"exec"),namespace)
+try:
+    rows=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+row=namespace["pr_row_for_number"](rows,number)
+if row is not None:
+    value=row if field == "__row" else row.get(field)
+    if field == "__row":
+        print(json.dumps(value))
+    elif isinstance(value,(int,str)):
+        print(value)' "$retirement_helper" "$number" "$field" <<<"$rows_json"
+  }
   # #1986 uses the same ticket-state lookup for the merged and open-PR guards.
   state_value_for_ticket() {
     local ticket="$1" key="$2" state_file value
@@ -958,10 +989,11 @@ PY
     # searched for the ticket number inside the holder name, which can never
     # find a `pr#` holder, because that name carries the PR number and not the
     # ticket's. So a `pr#` holder is resolved through its PR's head branch,
-    # which does carry the ticket. #1986 resolves holders from one all-state
-    # PR snapshot per run; a missing row stays unresolved, never guessed from
-    # the open-PR list built at the top of this script.
-    claims=$("$fc" list --repo "${FW_REPO:-aakshintala/fiber}" 2>/dev/null) || claims=""
+    # which does carry the ticket. #1986 checks the all-state PR snapshot when
+    # needed; a missing row gets one `gh pr view` in the same repo, never a
+    # guess from the open-PR list built at the top of this script.
+    claims_repo=${FW_REPO:-aakshintala/fiber}
+    claims=$("$fc" list --repo "$claims_repo" 2>/dev/null) || claims=""
     for h in $(printf '%s\n' "$claims" |
       awk -F'\t' -v t="$t" '$2 ~ ("^[A-Za-z0-9_.-]+/" t "-") { print $2 }' | sort -u); do
       n=$(printf '%s\n' "$claims" | awk -F'\t' -v h="$h" '$2 == h' | wc -l | tr -d ' ')
@@ -976,27 +1008,30 @@ PY
       awk -F'\t' '$2 ~ /^pr#[0-9]+$/ { print $2 }' | sort -u); do
       n=$(printf '%s\n' "$claims" | awk -F'\t' -v h="$h" '$2 == h' | wc -l | tr -d ' ')
       load_all_prs || true
-      br=$(python3 -I -c 'import json,sys
-number=sys.argv[1]
+      pr_number=${h#pr\#}
+      pr_row=$(pr_snapshot_field "$_all_prs" "$pr_number" __row)
+      if [ -z "$pr_row" ]; then
+        pr_row=$(python3 -I -c 'import os, subprocess, sys
 try:
-    prs=json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-if not isinstance(prs,list):
-    sys.exit(0)
-for pr in prs:
-    if isinstance(pr,dict) and str(pr.get("number")) == number:
-        head=pr.get("headRefName")
-        if isinstance(head,str):
-            print(head)
-        break' "${h#pr\#}" <<<"$_all_prs" 2>/dev/null) || br=""
+    result = subprocess.run(
+        sys.argv[1:], text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=float(os.environ.get("FW_LANECHECK_PR_VIEW_TIMEOUT", "30")))
+    if result.returncode == 0:
+        sys.stdout.write(result.stdout)
+except (OSError, subprocess.TimeoutExpired, ValueError):
+    pass
+' gh pr view "$pr_number" --repo "$claims_repo" \
+          --json number,headRefName,state,mergedAt 2>/dev/null) || pr_row=""
+      fi
+      br=$(pr_snapshot_field "$pr_row" "$pr_number" headRefName) || br=""
       if [ -z "$br" ]; then
         # An unresolved holder is reported, never skipped. Silence is the defect
         # this whole block exists to fix, and a gh failure here would otherwise
         # reintroduce it for exactly the shape that holds the most paths.
         echo "PR-SHAPED HOLDER UNRESOLVED: $h ($n path(s)) -- gh could not read its head branch,"
         echo "  so whether it belongs to #$t is unknown. Check it by hand:"
-        echo "  gh pr view ${h#pr\#} --repo ${FW_REPO:-aakshintala/fiber} --json headRefName"
+        echo "  gh pr view ${h#pr\#} --repo $claims_repo --json number,headRefName,state,mergedAt"
         continue
       fi
       case "$br" in
@@ -1558,11 +1593,23 @@ for owner_dir in glob.glob(os.path.join(tmp, "allprs", "*")):
             continue
         if not isinstance(rows, list):
             continue
-        all_prs_by_repo[repo] = {
-            str(row["number"]): row for row in rows
-            if isinstance(row, dict) and isinstance(row.get("number"), (int, str))
-        }
+        all_prs_by_repo[repo] = rows
         all_prs_ok.add(repo)
+pr_views = {}
+def view_pr_row(repo, number):
+    key = (repo, str(number))
+    if key not in pr_views:
+        try:
+            result = subprocess.run(
+                ["gh", "pr", "view", str(number), "--repo", repo,
+                 "--json", "number,headRefName,state,mergedAt"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=float(os.environ.get("FW_LANECHECK_PR_VIEW_TIMEOUT", "30")))
+            row = json.loads(result.stdout) if result.returncode == 0 else None
+            pr_views[key] = pr_row_for_number(row, number)
+        except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+            pr_views[key] = None
+    return pr_views[key]
 
 
 def launched(ts):
@@ -2159,9 +2206,9 @@ for ticket, report in reported.items():
             or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)
             or not pr.isdigit()):
         continue
-    if repo not in all_prs_ok:
-        continue
-    pr_data = all_prs_by_repo.get(repo, {}).get(pr, {})
+    pr_data = pr_row_for_number(all_prs_by_repo.get(repo), pr)
+    if pr_data is None:
+        pr_data = view_pr_row(repo, pr)
     if (isinstance(pr_data, dict) and pr_data.get("state") == "MERGED"
             and isinstance(pr_data.get("mergedAt"), str) and pr_data["mergedAt"]):
         retirement_lanes[(ticket, sess)] = (pr, repo)
