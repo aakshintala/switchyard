@@ -615,6 +615,13 @@ prepare_blocked_tree_case() {
   write_blocked_tree_record j1 "$status" "$gate_passed" "$files_json" '["fix.txt"]'
   BLOCKED_JOB_ID="$jobid"
   if [ "$jobid" = j0 ]; then printf '{"supersededBy":"j1"}\n' >"$TMPDIR/delegate-jobs/j0.json"; fi
+  if [ "$name" = blocked-adopt-gate-credit ]; then
+    # The record proves only the path set, not that the hand commit has gated content.
+    local cmd64 env64
+    cmd64="$(printf '%s' 'true' | jq -Rrs '@base64')"
+    env64="$(printf '%s' '' | jq -Rrs '@base64')"
+    bash "$TKT_STATE" "$S" journal "tkt-job gate slot=fix1 job=j1 cmd64=$cmd64 env64=$env64" >/dev/null
+  fi
   if [ "$name" = blocked-adopt-commits ]; then
     record="$(bash "$REAL_BIN/job-record" j1)"
     jq --arg after "$ADOPT_HEAD" '.result.changeSet.newCommits=[$after] | .result.changeSet.headAfter=$after' \
@@ -622,6 +629,16 @@ prepare_blocked_tree_case() {
   elif [ "$name" = blocked-adopt-dirty ]; then
     printf 'dirty\n' >>"$WT/fix.txt"
   fi
+}
+
+run_blocked_tree_gate_credit() {
+  local run_rc=0 out journal
+  prepare_blocked_tree_case blocked-adopt-gate-credit
+  out="$(bash "$TKT" "$S" --verify --collect-fix j1 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" -eq 0 ] || fail "blocked adopted head exited $run_rc: $out $(cat "$T/stderr")"
+  journal="${S%.state}.journal"
+  ! grep -Fq "tkt-fix gate PASS head=$ADOPT_HEAD" "$journal" || fail "adopted head received job-end gate credit: $(cat "$journal")"
+  grep -Fxq 'tkt-fix: gate not credited: job head does not match the PR head: j1' "$T/stderr" || fail "adopted head refused for the wrong reason: $(cat "$T/stderr")"
 }
 
 run_blocked_tree_adopt() {
@@ -664,6 +681,8 @@ run_blocked_tree_refusal() {
 
 case "${CASE:-}" in
   blocked-adopt-collect) run_blocked_tree_adopt collect; exit 0 ;;
+  blocked-adopt-resume) run_blocked_tree_adopt resume; exit 0 ;;
+  blocked-adopt-gate-credit) run_blocked_tree_gate_credit; exit 0 ;;
   blocked-adopt-superseded) run_blocked_tree_adopt superseded; exit 0 ;;
   blocked-adopt-failed-gate) run_blocked_tree_refusal blocked-adopt-failed-gate BLOCKED false '["fix.txt"]' yes; exit 0 ;;
   blocked-adopt-error) run_blocked_tree_refusal blocked-adopt-error ERROR true '["fix.txt"]' yes; exit 0 ;;
