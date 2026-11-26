@@ -795,6 +795,42 @@ if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && [ -z "$collect_fix_job" 
 fi
 [ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
 [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
+if [ "${#ruling_refute_ids[@]}" -gt 0 ] && [ -z "$resume" ] \
+  && [ -z "$collect_verify_job" ] && [ -z "$collect_fix_job" ] \
+  && [ "${recover_unpushed:-0}" -ne 1 ]; then
+  open_rows=0
+  all_open_rows_refuted=1
+  for ruling_source_kind in current history; do
+    if [ "$ruling_source_kind" = current ]; then
+      ruling_source="$findings"
+    else
+      ruling_source="$ruling_history_source"
+    fi
+    [ -n "$ruling_source" ] && [ -r "$ruling_source" ] || continue
+    while IFS= read -r ruling_row; do
+      ruling_row_base="$(findings_row_base "$ruling_row")"
+      ruling_row_base="$(normalize_finding_line "$ruling_row_base")"
+      case "$ruling_row_base" in P1\ *|P2\ *|P3\ *) ;; *) continue ;; esac
+      ruling_row_status=open
+      if [ "$ruling_source_kind" = history ]; then
+        ruling_row_status="$(findings_row_status "$ruling_row")"
+        [ -n "$ruling_row_status" ] || ruling_row_status=open
+      fi
+      [ "$ruling_row_status" = open ] || continue
+      open_rows=$((open_rows + 1))
+      if ! ruling_match_has "$ruling_row_base" "${ruling_refute_bases[@]}"; then
+        all_open_rows_refuted=0
+      fi
+    done <"$ruling_source"
+  done
+  if [ "$open_rows" -gt 0 ] && [ "$all_open_rows_refuted" -eq 1 ]; then
+    verify_command="tkt-verify $(printf '%q' "$state") --findings $(printf '%q' "$findings")"
+    for ruling_id in ${ruling_ids[@]+"${ruling_ids[@]}"}; do
+      verify_command="$verify_command --ruling $(printf '%q' "$ruling_id")"
+    done
+    ruling_refuse all-refuted "${ruling_ids[0]}" "$verify_command"
+  fi
+fi
 # A fresh dispatch needs a finding to fix (#1879); nothing before this point
 # writes fix_round.*, job.* or fixslot. Rows match the way tkt-verify and
 # the round-findings checks read them: column-0 `P[123] `.
