@@ -5,8 +5,9 @@
 # Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--collect-fix <job id>] [--findings <file>]
 #   [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>]
 #   [--fix-model <id>] [--verify-model <id>] [--collect-verify <job id>]
-#   --prompt appends orchestrator context to a fresh fix job; --resume requires --prompt.
+#   --prompt appends orchestrator context to a fresh fix job; --resume requires --prompt except for adoption below.
 #   --collect-fix watches the stored job in the open fix slot and records its round.
+#   --collect-fix and --verify --resume can adopt a BLOCKED passed-gate complete tree after its hand commit is pushed.
 #   An abnormal end (ASK, BLOCKED, ERROR, STALLED, CANCELLED) closes the slot without a round.
 #   --resume is how such a job continues.
 #   --collect-verify recollects the verify recorded for the latest tkt-fix round without adding a round.
@@ -16,8 +17,9 @@ set -euo pipefail
 usage() {
   echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify | --collect-verify <job id> | --verify [--since <sha>] --collect-fix <job id> | --no-verify --collect-fix <job id>) [--findings <file>] [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
   echo "  --collect-fix <job id> recollects the stored job in the open fix slot and continues the normal round; it does not dispatch another job." >&2
+  echo "  A BLOCKED passed-gate complete tree can be adopted after its hand commit is pushed; --verify --resume does not resume it." >&2
   echo "  An abnormal end (ASK, BLOCKED, ERROR, STALLED, CANCELLED) closes the slot without a round." >&2
-  echo "  --resume is how such a job continues." >&2
+  echo "  --resume continues an abnormal job except when adopting a BLOCKED complete tree." >&2
   echo "  --collect-verify <job id> recollects only the verify recorded for the latest tkt-fix round; it does not add a round." >&2
   echo "  --fix-model <id> overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model." >&2
   exit 2
@@ -55,7 +57,7 @@ elif [ -n "$collect_fix_job" ]; then
 else
   [ "$verify" -ne "$noverify" ] || usage
   [ -z "$since" ] || [ "$verify" -eq 1 ] || usage
-  [ -z "$resume" ] || [ -n "$prompt" ] || usage
+  [ -z "$resume" ] || [ -n "$prompt" ] || [ "$verify" -eq 1 ] || usage
 fi
 
 script_path="$0"
@@ -210,6 +212,62 @@ slot_owner() {
   return 0
 }
 
+# blocked_tree_adoptable ID: prove a BLOCKED complete-tree job owns a closed
+# slot and that its exact pushed diff is the tree recorded by the job.
+blocked_tree_adoptable() {
+  local id="$1" owner owner_num open_slot walked walk_id walk_record latest_record
+  local head_before files expected_paths actual_paths worktree_status state_head pr prhead actual
+  adopt_slot=""; adopt_before=""; adopt_head=""
+  owner="$(slot_owner "$id" 2>/dev/null || true)"
+  case "$owner" in fix[1-9]|fix[1-9][0-9]*) owner_num="${owner#fix}" ;; *) return 1 ;; esac
+  [ "$owner_num" -le "$fixslot" ] || return 1
+  open_slot="$(t get fixopen 2>/dev/null || printf '0')"
+  case "$open_slot" in ''|*[!0-9]*) open_slot=0 ;; *) open_slot=$((10#$open_slot)) ;; esac
+  [ "$open_slot" -eq 0 ] || [ "$open_slot" -ne "$owner_num" ] || return 1
+
+  pr="$(t get pr 2>/dev/null || true)"
+  state_head="$(t get head 2>/dev/null || true)"
+  [ -n "$pr" ] && [ -n "$state_head" ] || return 1
+  prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid 2>/dev/null)" || return 1
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || return 1
+
+  walked="$(job_walk_superseded "$id" 2>/dev/null)" || return 1
+  latest_record=""
+  while IFS=$'\t' read -r walk_id walk_record; do
+    [ -n "$walk_id" ] || continue
+    latest_record="$walk_record"
+  done <<<"$walked"
+  [ -n "$latest_record" ] && [ -r "$latest_record" ] || return 1
+  jq -e '
+    (.result.status // .status) == "BLOCKED" and
+    .result.gateResult.passed == true and
+    (.result.changeSet.newCommits | (type == "array" and length == 0)) and
+    (.result.changeSet.filesChanged | (type == "array" and length > 0)) and
+    (.result.changeSet.headBefore | (type == "string" and length > 0))
+  ' "$latest_record" >/dev/null 2>&1 || return 1
+  head_before="$(jq -r '.result.changeSet.headBefore' "$latest_record" 2>/dev/null || true)"
+  [ -n "$head_before" ] && [ "$state_head" = "$head_before" ] || return 1
+  [ -n "$prhead" ] && [ "$prhead" = "$actual" ] || return 1
+  worktree_status="$(git -C "$worktree" status --porcelain --untracked-files=all 2>/dev/null)" || return 1
+  [ -z "$worktree_status" ] || return 1
+  [ "$head_before" != "$actual" ] || return 1
+  git -C "$worktree" merge-base --is-ancestor "$head_before" "$actual" 2>/dev/null || return 1
+
+  files="$(jq -er '
+    .result.changeSet.filesChanged
+    | map(if type == "string" and length > 0 then .
+          elif type == "object" and (.path | type) == "string" and (.path | length) > 0 then .path
+          else error("invalid filesChanged path") end)
+    | .[]
+  ' "$latest_record" 2>/dev/null | LC_ALL=C sort -u)" || return 1
+  expected_paths="$files"
+  actual_paths="$(git -C "$worktree" diff --name-only "$head_before" "$actual" 2>/dev/null | LC_ALL=C sort -u)" || return 1
+  [ "$expected_paths" = "$actual_paths" ] || return 1
+
+  adopt_slot="$owner"; adopt_before="$head_before"; adopt_head="$actual"
+  return 0
+}
+
 # stale_locator_target ID: success only when a well-formed per-user locator
 # names a record file that no longer exists. Used to distinguish a lost resume
 # record from other delegate failures without changing the owning-slot guard.
@@ -273,6 +331,8 @@ fixslot="$(t get fixslot 2>/dev/null || printf '0')"; case "$fixslot" in ''|*[!0
 part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
 if [ "$round" -gt "$fixslot" ]; then n=$((round + 1)); else n=$((fixslot + 1)); fi
 slot="fix$n"
+adopt_pending=0
+adopt_job=""
 if [ -n "$collect_fix_job" ]; then
   openfix="$(t get fixopen 2>/dev/null || printf '0')"
   case "$openfix" in ''|*[!0-9]*) openfix=0 ;; *) openfix=$((10#$openfix)) ;; esac
@@ -287,10 +347,26 @@ if [ -n "$resume" ]; then
   if owned="$(slot_owner "$resume")"; then [ -z "$owned" ] || slot="$owned"
   else echo "tkt-fix: unknown job id: $resume" >&2; exit 2
   fi
+  if [ "$verify" -eq 1 ] && blocked_tree_adoptable "$resume"; then
+    slot="$adopt_slot"
+    collect_fix_job="$resume"
+    stored_collect_job="$resume"
+    adopt_job="$resume"
+    adopt_pending=1
+    resume=""
+  fi
 fi
+if [ -n "$resume" ] && [ -z "$prompt" ]; then usage; fi
 knum="${slot#fix}"
 if [ -n "$collect_fix_job" ]; then
   stored_collect_job="$(t get "job.$slot" 2>/dev/null || true)"
+  if [ "$collect_fix_job" != "$stored_collect_job" ] && blocked_tree_adoptable "$collect_fix_job"; then
+    slot="$adopt_slot"
+    knum="${slot#fix}"
+    stored_collect_job="$collect_fix_job"
+    adopt_job="$collect_fix_job"
+    adopt_pending=1
+  fi
   if [ "$collect_fix_job" != "$stored_collect_job" ]; then
     echo "tkt-fix: --collect-fix $collect_fix_job is not the job of open slot $slot (job.$slot=$stored_collect_job)" >&2
     closed_owner="$(slot_owner "$collect_fix_job" 2>/dev/null || true)"
@@ -612,6 +688,15 @@ fi
 if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
   prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)" || { echo "tkt-fix: cannot read PR head" >&2; exit 2; }
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
+  if [ "$adopt_pending" -eq 1 ]; then
+    if [ "$prhead" = "$adopt_head" ] && [ "$actual" = "$adopt_head" ]; then
+      t set head "$adopt_head"
+      t journal "tkt-fix ADOPT $slot job=$adopt_job head=$adopt_before..$adopt_head"
+      stored="$adopt_head"
+    else
+      adopt_pending=0
+    fi
+  fi
   if [ "$stored" = "$prhead" ] && [ "$prhead" = "$actual" ]; then :; else
     # Drift the open fix job's own push caused is accepted: the PR head
     # descends from the state head and the worktree matches the PR head,
@@ -1199,6 +1284,7 @@ else
     if ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
   fi
   t set fixopen "$knum" # this job's commits may land ahead of head
+  if [ "$adopt_pending" -eq 0 ]; then
   jrc=0; TKT_FIX_DISPATCH=1 "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
   gate_retry_note="$(sed -n '/^gateRetry=/p' "$tmp/job.out" | head -n 1)"
   if [[ "$gate_retry_note" == gateRetry=exit=0\ * ]]; then gate_retry_credited=1; fi
@@ -1241,6 +1327,7 @@ else
       *) pass tkt-job "$tmp/job.out" "$jrc" "$tmp/job.err" ;;
     esac
   fi
+  fi # the accepted BLOCKED job is already terminal and was validated above
 fi
 
 git -C "$worktree" fetch origin >/dev/null 2>&1 || { echo "tkt-fix: fetch failed in $worktree" >&2; exit 2; }
