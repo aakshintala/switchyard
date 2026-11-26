@@ -131,6 +131,28 @@ ruling_refuse() {
   emit "RULING-REFUSED reason=$reason comment=$comment" 2
 }
 
+absolute_findings_path() {
+  local path="$1" parent base
+  case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+  parent="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)" || return 1
+  base="$(basename "$path")"
+  if [ "$parent" = / ]; then printf '/%s\n' "$base"; else printf '%s/%s\n' "$parent" "$base"; fi
+}
+
+if [ "$head_is_reviewed" -eq 1 ]; then
+  state_findings="$(t get findings 2>/dev/null || true)"
+  if [ -z "$state_findings" ]; then
+    ruling_refuse findings-mismatch "${ruling_requested[0]}" \
+      "state findings path is missing; set the state's findings key and pass the same path with --findings"
+  fi
+  state_findings_abs="$(absolute_findings_path "$state_findings" 2>/dev/null || true)"
+  findings_abs="$(absolute_findings_path "$findings" 2>/dev/null || true)"
+  if [ -z "$state_findings_abs" ] || [ "$state_findings_abs" != "$findings_abs" ]; then
+    ruling_refuse findings-mismatch "${ruling_requested[0]}" \
+      "state findings path is $state_findings; pass --findings to this path"
+  fi
+fi
+
 for ruling_id in "${ruling_requested[@]+${ruling_requested[@]}}"; do
   case "$ruling_id" in
     ''|*[!0-9]*) ruling_refuse bad-id "$ruling_id" ;;
@@ -180,15 +202,21 @@ for ruling_index in "${!ruling_ids[@]}"; do
       "$ruling_refutes_hint"
   fi
 done
-for grant_id in "${ruling_grant_ids[@]+${ruling_grant_ids[@]}}"; do
-  ruling_json="$tmp/ruling-$grant_id.json"
-  if ! check_round_grant "$ruling_json" "$grant_id" "$round" t; then
-    ruling_refuse "$ruling_comment_failure" "$grant_id" "$ruling_comment_hint"
-  fi
-  grant_accepted=1
-done
+reviewed_all_refuted=0
+if [ "$head_is_reviewed" -eq 1 ] && ruling_refutes_all_open_rows "$findings" "$ruling_history_source"; then
+  reviewed_all_refuted=1
+fi
+if [ "$head_is_reviewed" -ne 1 ] || [ "$reviewed_all_refuted" -ne 1 ]; then
+  for grant_id in "${ruling_grant_ids[@]+${ruling_grant_ids[@]}}"; do
+    ruling_json="$tmp/ruling-$grant_id.json"
+    if ! check_round_grant "$ruling_json" "$grant_id" "$round" t; then
+      ruling_refuse "$ruling_comment_failure" "$grant_id" "$ruling_comment_hint"
+    fi
+    grant_accepted=1
+  done
+fi
 if [ "$head_is_reviewed" -eq 1 ]; then
-  if ruling_refutes_all_open_rows "$findings" "$ruling_history_source"; then
+  if [ "$reviewed_all_refuted" -eq 1 ]; then
     for ruling_index in "${!ruling_refute_ids[@]}"; do
       t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
     done
@@ -207,7 +235,6 @@ if [ "$head_is_reviewed" -eq 1 ]; then
     ship_command="tkt-ship $(printf '%q' "$state")"
     emit "RULED unverified head=$head" 0 "$ship_command"
   fi
-  grant_url=""
   emit "NOTHING-TO-VERIFY" 1 "HEAD=$head is already reviewed"
 fi
 if [ "$grant_accepted" -eq 1 ]; then
