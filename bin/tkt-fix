@@ -333,6 +333,7 @@ if [ "$round" -gt "$fixslot" ]; then n=$((round + 1)); else n=$((fixslot + 1)); 
 slot="fix$n"
 adopt_pending=0
 adopt_job=""
+resume_owner=""
 if [ -n "$collect_fix_job" ]; then
   openfix="$(t get fixopen 2>/dev/null || printf '0')"
   case "$openfix" in ''|*[!0-9]*) openfix=0 ;; *) openfix=$((10#$openfix)) ;; esac
@@ -344,7 +345,7 @@ if [ -n "$resume" ]; then
   # A resume reuses the slot that owns its id; an id no walk reaches falls
   # back to the fresh slot. An id with no record at all is refused only
   # when some slot already owns a job, so a first resume still dispatches.
-  if owned="$(slot_owner "$resume")"; then [ -z "$owned" ] || slot="$owned"
+  if owned="$(slot_owner "$resume")"; then [ -z "$owned" ] || slot="$owned"; resume_owner="$owned"
   else echo "tkt-fix: unknown job id: $resume" >&2; exit 2
   fi
   if [ "$verify" -eq 1 ] && blocked_tree_adoptable "$resume"; then
@@ -400,7 +401,19 @@ history_file="$(history_path "$knum")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 limited=0
-if [ "$round" -ge 2 ] && [ -z "$resume" ] && [ -z "$collect_verify_job" ] && [ -z "$collect_fix_job" ]; then limited=1; fi
+if [ "$round" -ge 2 ] && [ -z "$collect_verify_job" ] && [ -z "$collect_fix_job" ]; then
+  if [ -z "$resume" ]; then
+    limited=1
+  else
+    resume_record="$(bash "$script_dir/job-record" "$resume" 2>/dev/null || true)"
+    resume_status=""
+    if [ -n "$resume_record" ] && [ -r "$resume_record" ]; then
+      resume_status="$(jq -r '.result.status // .status // ""' "$resume_record" 2>/dev/null || true)"
+    fi
+    # Only a NEEDS_CONTEXT job owned by a slot of this state skips the limit (#2000).
+    [ "$resume_status" = NEEDS_CONTEXT ] && [ -n "$resume_owner" ] || limited=1
+  fi
+fi
 
 ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_notes=()
 ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
@@ -616,13 +629,13 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
 fi
 
 round_limit() {
-  emit "ROUND-LIMIT round=$round" 1 "resume a job with: tkt-fix $state --verify --resume <job id> --prompt <file> (works with no open slot); otherwise post an owner ruling with grants: round $((round + 1)) and pass --ruling <comment id>, or send the open findings to triage"
+  emit "ROUND-LIMIT round=$round" 1 "only a NEEDS_CONTEXT job may resume without a grant: tkt-fix $state --verify --resume <job id> --prompt <file>; otherwise post an owner ruling with grants: round $((round + 1)) and pass --ruling <comment id>, or send the open findings to triage"
 }
-# Two rounds have run: only a round-2 closed-slot recovery may pass without --resume.
+# Only a round-2 closed-slot recovery without --resume may pass without a grant.
 if [ "$limited" -eq 1 ]; then
   limit_pr="$(t get pr 2>/dev/null || true)"
   limit_head="$(t get head 2>/dev/null || true)"
-  if [ "$round" -ne 2 ] || [ -z "$limit_pr" ] || [ -z "$limit_head" ]; then round_limit; fi
+  if [ "$round" -ne 2 ] || [ -z "$limit_pr" ] || [ -z "$limit_head" ] || [ -n "$resume" ]; then round_limit; fi
 fi
 # Fill missing PR identity before checking entry drift or dispatching a fix.
 # pre_pr_resume_hint names the pre-PR resume on the no-PR refusals below.

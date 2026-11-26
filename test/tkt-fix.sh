@@ -511,16 +511,23 @@ set_closed_round() {
 }
 
 write_job_record() {
-  local id="$1" before="$2" after="$3" resumed_from="${4:-}" record cwd="$WT"
+  local id="$1" before="$2" after="$3" resumed_from="${4:-}" status="${5:-NEEDS_CONTEXT}" record cwd="$WT"
   mkdir -p "$TMPDIR/delegate-jobs"
   record="$TMPDIR/delegate-jobs/$id.json"
-  jq -n --arg hb "$before" --arg ha "$after" --arg cwd "$cwd" \
-    '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"recorded fix",changeSet:{headBefore:$hb,headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1,startedAtMs:1700000000000,endedAtMs:1700000001000,caller:"test",callerPid:1,callerCommand:"test",callerCwd:$cwd,resume:{model:"test-model",backend:"test",cwd:$cwd,sessionId:"test-session",gate:"",toolIdleMs:7200000,idleMs:null,wallMs:null,addDirs:[]}}' \
+  jq -n --arg hb "$before" --arg ha "$after" --arg cwd "$cwd" --arg status "$status" \
+    '{status:$status,result:{status:$status,text:"recorded fix",changeSet:{headBefore:$hb,headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1,startedAtMs:1700000000000,endedAtMs:1700000001000,caller:"test",callerPid:1,callerCommand:"test",callerCwd:$cwd,resume:{model:"test-model",backend:"test",cwd:$cwd,sessionId:"test-session",gate:"",toolIdleMs:7200000,idleMs:null,wallMs:null,addDirs:[]}}' \
     >"$record" || fail "write $id record"
   if [ -n "$resumed_from" ]; then
     jq --arg id "$resumed_from" '. + {resumedFrom:$id}' "$record" >"$record.tmp" \
       && mv "$record.tmp" "$record" || fail "write $id resumedFrom"
   fi
+}
+
+prepare_round_two_resume() {
+  local status="$1"
+  set_closed_round 2
+  bash "$TKT_STATE" "$S" set job.fix2 j9 >/dev/null
+  write_job_record j9 "$OLD" "$OLD" "" "$status"
 }
 
 run_collect_fix_needs_context() {
@@ -642,8 +649,10 @@ run_blocked_tree_gate_credit() {
 }
 
 run_blocked_tree_adopt() {
-  local entry="$1" run_rc=0 out
+  local entry="$1" run_rc=0 out want_round=1
   prepare_blocked_tree_case "blocked-adopt-$entry"
+  # #2000: adoption is a collect, not a resume, so it stays outside ROUND-LIMIT past round 2.
+  if [ "$entry" = resume-round2 ]; then bash "$TKT_STATE" "$S" set round 2 >/dev/null; want_round=3; fi
   case "$entry" in
     collect|superseded)
       out="$(bash "$TKT" "$S" --verify --collect-fix "$BLOCKED_JOB_ID" 2>"$T/stderr")" || run_rc=$? ;;
@@ -652,7 +661,7 @@ run_blocked_tree_adopt() {
   [ "$run_rc" = 0 ] || fail "blocked tree $entry exited $run_rc: $out $(cat "$T/stderr")"
   head -n 1 <<<"$out" | grep -Fq "TKT tkt-fix FIX-OK reviewed=$ADOPT_HEAD" || fail "blocked tree $entry did not finish normal scoped verify: $out"
   [ "$(bash "$TKT_STATE" "$S" get head)" = "$ADOPT_HEAD" ] || fail "blocked tree $entry did not adopt head"
-  [ "$(bash "$TKT_STATE" "$S" get round)" = 1 ] || fail "blocked tree $entry did not count one round"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = "$want_round" ] || fail "blocked tree $entry did not count one round"
   [ "$(bash "$TKT_STATE" "$S" get fixslot)" = 1 ] || fail "blocked tree $entry changed the closed fixslot"
   [ "$(bash "$TKT_STATE" "$S" get fixopen)" = 0 ] || fail "blocked tree $entry left fixopen set"
   [ "$(bash "$TKT_STATE" "$S" get fix_round.1.start)" = "$OLD" ] || fail "blocked tree $entry changed round start"
@@ -682,6 +691,7 @@ run_blocked_tree_refusal() {
 case "${CASE:-}" in
   blocked-adopt-collect) run_blocked_tree_adopt collect; exit 0 ;;
   blocked-adopt-resume) run_blocked_tree_adopt resume; exit 0 ;;
+  blocked-adopt-resume-round2) run_blocked_tree_adopt resume-round2; exit 0 ;;
   blocked-adopt-gate-credit) run_blocked_tree_gate_credit; exit 0 ;;
   blocked-adopt-superseded) run_blocked_tree_adopt superseded; exit 0 ;;
   blocked-adopt-failed-gate) run_blocked_tree_refusal blocked-adopt-failed-gate BLOCKED false '["fix.txt"]' yes; exit 0 ;;
@@ -698,6 +708,7 @@ esac
 if [ -z "${CASE:-}" ]; then
   run_blocked_tree_adopt collect
   run_blocked_tree_adopt resume
+  run_blocked_tree_adopt resume-round2
   run_blocked_tree_gate_credit
   run_blocked_tree_adopt superseded
   run_blocked_tree_refusal blocked-adopt-failed-gate BLOCKED false '["fix.txt"]' yes
@@ -1160,6 +1171,8 @@ repair_command="$(sed -n 's/^repair command: //p' <<<"$out")"
 [ -n "$repair_command" ] || fail "missing-round-findings omitted repair command: $out"
 grep -Fq -- "--resume j1 --prompt $REPAIR_PROMPT" <<<"$repair_command" || fail "missing-round-findings repair did not retain its supplied prompt: $repair_command"
 printf 'P1 fix.txt:1 — round one finding\n' >"$FIX_ROUND_FINDINGS"
+# This repair resumes a NEEDS_CONTEXT continuation after the round-2 boundary.
+write_job_record j1 "$ROUND1_HEAD" "$ROUND1_HEAD" "" NEEDS_CONTEXT
 repair_out="$(eval "$repair_command" 2>"$T/stderr")" || fail "printed missing-round-findings repair failed: $(head -n 3 <<<"$repair_out") $(cat "$T/stderr")"
 head -n 1 <<<"$repair_out" | grep -q 'TKT tkt-fix FIX-OK' || fail "printed missing-round-findings repair did not pass coverage: $(head -n 1 <<<"$repair_out")"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.findings)" = "$FIX_ROUND_FINDINGS" ] || fail "missing-round-findings repair did not record the restored file"
@@ -1231,6 +1244,8 @@ repair_command="$(sed -n 's/^repair command: //p' <<<"$out")"
 grep -Fq "tkt-state $S set fix_round.1.findings $new_path" <<<"$repair_command" || fail "no-p-round-findings repair command did not record the new file: $repair_command"
 grep -Fq -- "--resume j1 --prompt $REPAIR_PROMPT" <<<"$repair_command" || fail "no-p-round-findings repair did not retain its supplied prompt: $repair_command"
 printf 'P1 fix.txt:1 — replacement finding\n' >"$new_path"
+# The follow-up is a NEEDS_CONTEXT continuation, so it stays exempt at round 2.
+write_job_record j1 "$ROUND1_HEAD" "$ROUND1_HEAD" "" NEEDS_CONTEXT
 repair_out="$(eval "$repair_command" 2>"$T/stderr")" || fail "printed no-p-round-findings repair failed: $(head -n 3 <<<"$repair_out") $(cat "$T/stderr")"
 head -n 1 <<<"$repair_out" | grep -q 'TKT tkt-fix FIX-OK' || fail "printed no-p-round-findings repair did not pass coverage: $(head -n 1 <<<"$repair_out")"
 [ "$(cat "$ROUND1_FINDINGS")" = 'no open findings' ] || fail "no-p-round-findings modified the append-only original"
@@ -1342,6 +1357,7 @@ grep -Fq "write a prompt scoping the verify to the round's delta" <<<"$out" || f
 # A supplied prompt must survive the refusal and appear in the printed repair.
 REPAIR_PROMPT="$CDIR/round-two-delta.md"
 printf 'verify only the round two delta\n' >"$REPAIR_PROMPT"
+write_job_record j1 "$ROUND1_HEAD" "$HAND_HEAD" "" NEEDS_CONTEXT
 write_ruling_comment 99 'refutes: P1 fix.txt:1'
 run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$REPAIR_PROMPT" --ruling 99 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = "1" ] || fail "unknown-gap-round2 supplied-prompt exited $run_rc, want 1: $out $(cat "$T/stderr")"
@@ -2066,7 +2082,7 @@ grep -q "job|" "$T/calls.log" && fail "resume-gate-script dispatched a job"
 bash "$TKT" "$S" 2>"$T/stderr" && fail "bare flags exited 0"
 rc=$?; [ "$rc" = "2" ] || fail "bare flags exited $rc, want 2"
 grep -Fq -- '--fix-model <id> overrides the stored model on --resume' "$T/stderr" || fail "usage does not explain --fix-model on resume: $(cat "$T/stderr")"
-# 7a. Round 2 refuses a fresh fix before any slot or dispatch; --resume still runs.
+# 7a. Round 2 refuses a fresh fix before any slot or dispatch.
 if want R2; then
 setup_case round-limit
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
@@ -2074,21 +2090,74 @@ out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "round 2 fix exited 0"
 rc=$?; [ "$rc" = "1" ] || fail "round 2 fix exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "bad verdict: $(head -n 1 <<<"$out")"
 grep -q "tkt-fix .*--resume <job id> --prompt <file>" <<<"$out" || fail "ROUND-LIMIT names the resume command and prompt"
-grep -q "works with no open slot" <<<"$out" || fail "ROUND-LIMIT says resume needs no open slot"
+grep -q "NEEDS_CONTEXT" <<<"$out" || fail "ROUND-LIMIT does not limit the resume escape to NEEDS_CONTEXT jobs"
 grep -q "job|" "$T/calls.log" && fail "round 2 fix dispatched a job"
 [ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "round moved on ROUND-LIMIT"
 fi
 if want R6; then
 setup_case round-resume
-bash "$TKT_STATE" "$S" set round 2 >/dev/null
+prepare_round_two_resume NEEDS_CONTEXT
 printf 'resume brief\n' >"$CDIR/prompt.md"
-out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || true
-head -n 1 <<<"$out" | grep -q "ROUND-LIMIT" && fail "resume at round 2 is refused"
-grep -q "job|.*--slot fix3.*--resume j9" "$T/calls.log" || fail "resume at round 2 does not dispatch on fix3"
+out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "NEEDS_CONTEXT round-2 resume exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "ROUND-LIMIT" && fail "NEEDS_CONTEXT resume at round 2 is refused"
+grep -q "job|.*--slot fix2.*--resume j9" "$T/calls.log" || fail "NEEDS_CONTEXT resume at round 2 does not dispatch on its owned slot"
+[ "$(bash "$TKT_STATE" "$S" get grant.3 2>/dev/null || true)" = "" ] || fail "NEEDS_CONTEXT resume unexpectedly required or consumed a grant"
 # --resume without --prompt remains a usage error with exit 2.
 run_rc=0; bash "$TKT" "$S" --verify --resume j9 2>"$T/stderr" || run_rc=$?
 [ "$run_rc" = "2" ] || fail "resume without prompt exited $run_rc, want 2"
 grep -Fq 'usage: tkt-fix ' "$T/stderr" || fail "resume without prompt did not print usage: $(cat "$T/stderr")"
+fi
+
+# A DONE job resume at round 2 is limited and cannot dispatch without a grant.
+if want round-resume-done-refused; then
+setup_case round-resume-done-refused
+prepare_round_two_resume DONE
+printf 'resume brief\n' >"$CDIR/prompt.md"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "DONE round-2 resume exited $run_rc, want ROUND-LIMIT: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix ROUND-LIMIT round=2' || fail "DONE round-2 resume returned the wrong verdict: $out"
+! grep -q '^job|' "$T/calls.log" || fail "DONE round-2 resume dispatched without a grant"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "refused DONE resume changed the round"
+fi
+
+# A column-0 grant authorizes a limited DONE-job resume through --ruling.
+if want round-resume-done-grant; then
+setup_case round-resume-done-grant
+prepare_round_two_resume DONE
+write_ruling_comment 945 'grants: round 3'
+printf 'resume brief\n' >"$CDIR/prompt.md"
+out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" --ruling 945 2>"$T/stderr")" \
+  || fail "granted DONE round-2 resume exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "granted DONE resume did not finish: $out"
+grep -q 'job|.*--slot fix2.*--resume j9' "$T/calls.log" || fail "grant did not dispatch the DONE resume on its owned slot"
+! grep -q 'RULING-REFUSED reason=not-limited' <<<"$out" || fail "grant was rejected as not-limited"
+[ "$(bash "$TKT_STATE" "$S" get grant.3 | cut -d' ' -f1)" = 945 ] || fail "DONE resume did not record grant.3"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "granted DONE resume did not count round 3"
+fi
+
+# A NEEDS_CONTEXT job that no slot of this state owns is limited at round 2.
+if want round-resume-unowned-needs-context; then
+setup_case round-resume-unowned-needs-context
+prepare_round_two_resume DONE
+write_job_record j8 "$OLD" "$OLD" "" NEEDS_CONTEXT
+printf 'resume brief\n' >"$CDIR/prompt.md"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j8 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "unowned NEEDS_CONTEXT round-2 resume exited $run_rc, want ROUND-LIMIT: $out $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix ROUND-LIMIT round=2' || fail "unowned NEEDS_CONTEXT resume returned the wrong verdict: $out"
+! grep -q '^job|' "$T/calls.log" || fail "unowned NEEDS_CONTEXT resume dispatched without a grant"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "refused unowned resume changed the round"
+fi
+
+# An unreadable or missing resume record fails closed at round 2.
+if want round-resume-unreadable-record; then
+setup_case round-resume-unreadable-record
+set_closed_round 2
+bash "$TKT_STATE" "$S" set job.fix2 j9 >/dev/null
+printf 'resume brief\n' >"$CDIR/prompt.md"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "missing-record round-2 resume exited $run_rc, want ROUND-LIMIT: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix ROUND-LIMIT round=2' || fail "missing-record resume returned the wrong verdict: $out"
+! grep -q '^job|' "$T/calls.log" || fail "missing-record resume dispatched without a grant"
 fi
 
 # R1: round 2 recovers and pushes a closed-slot commit owned by its job record.
@@ -3258,12 +3327,15 @@ printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
 bash "$TKT_STATE" "$S" set round 4 >/dev/null
 bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
 printf 'resume slot five\\n' >"$CDIR/prompt.md"
+write_job_record j1 "$OLD" "$OLD" "" NEEDS_CONTEXT
+# No slot owns j1 yet, so this round-4 resume is limited (#2000) and needs a grant.
+write_ruling_comment 951 'grants: round 5'
 cat >"$CDIR/origin.git/hooks/pre-receive" <<'EOF'
 #!/usr/bin/env bash
 exit 1
 EOF
 chmod +x "$CDIR/origin.git/hooks/pre-receive"
-run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || run_rc=$?
+run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" --ruling 951 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = "1" ] || fail "recover-skipped-slot first run exited $run_rc, want PUSH-FAIL 1: $(head -n 1 <<<"$out")"
 head -n 1 <<<"$out" | grep -q 'TKT tkt-fix PUSH-FAIL' || fail "recover-skipped-slot first verdict missing: $(head -n 1 <<<"$out")"
 grep -q 'job|.*--slot fix5' "$T/calls.log" || fail "recover-skipped-slot did not dispatch fix5"

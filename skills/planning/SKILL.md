@@ -89,7 +89,7 @@ The round-limit exits name their next command:
 | Tool and verdict | Meaning | Next command |
 | --- | --- | --- |
 | `tkt-build ROUND-LIMIT` | `tkt-build` is the wrong phase after round one, not a spent review budget | continue with `tkt-fix <state> --verify` or `tkt-ship <state>` |
-| `tkt-fix ROUND-LIMIT` | two rounds have run; a fresh fix is refused | resume with `tkt-fix <state> --verify --resume <job id> --prompt <file>`; this works without an open slot |
+| `tkt-fix ROUND-LIMIT` | the round limit is reached; a fresh fix or any resume except a NEEDS_CONTEXT job needs a grant | resume a NEEDS_CONTEXT job without a grant; otherwise pass a ruling with `grants: round <next round>` through `--ruling` before another fix round |
 | `tkt-plan verify QUESTIONS` | The plan lists unanswered design or acceptance choices | Record one ruling comment answering every question with `tkt-plan <state> rule-questions --comment <id>`, then rerun `verify` |
 | `tkt-plan verify ROUND-LIMIT` | two Verifier rounds ran without a confirm | run `tkt-plan <state> confirm --edits <file>`, or triage open lines and record answers with `tkt-plan <state> triaged --comment <id>` |
 | `tkt-plan confirm ROUND-LIMIT` | the confirm was used and no grant is pending | run `tkt-plan <state> grant-round --by <who> --comment <id>`, then confirm; or triage and record answers; or, after a non-converging confirm, record a steward ruling with `tkt-plan <state> rule-ok --by <flywheel\|surveyor> --ruling <RULING-id> --comment <id>` |
