@@ -3328,12 +3328,14 @@ bash "$TKT_STATE" "$S" set round 4 >/dev/null
 bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
 printf 'resume slot five\\n' >"$CDIR/prompt.md"
 write_job_record j1 "$OLD" "$OLD" "" NEEDS_CONTEXT
+# No slot owns j1 yet, so this round-4 resume is limited (#2000) and needs a grant.
+write_ruling_comment 951 'grants: round 5'
 cat >"$CDIR/origin.git/hooks/pre-receive" <<'EOF'
 #!/usr/bin/env bash
 exit 1
 EOF
 chmod +x "$CDIR/origin.git/hooks/pre-receive"
-run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || run_rc=$?
+run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" --ruling 951 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = "1" ] || fail "recover-skipped-slot first run exited $run_rc, want PUSH-FAIL 1: $(head -n 1 <<<"$out")"
 head -n 1 <<<"$out" | grep -q 'TKT tkt-fix PUSH-FAIL' || fail "recover-skipped-slot first verdict missing: $(head -n 1 <<<"$out")"
 grep -q 'job|.*--slot fix5' "$T/calls.log" || fail "recover-skipped-slot did not dispatch fix5"
