@@ -1573,6 +1573,8 @@ show_merge_failure() {
   fi
 }
 
+# merge_attempt runs inside `if merge_attempt`, so errexit is off for its whole
+# body: every callee must guard its own failure.
 merge_attempt() {
   fetch_retry origin +refs/heads/main:refs/remotes/origin/main \
     || die_after_ready 1 "git fetch origin main failed"
@@ -1660,6 +1662,26 @@ retries=0 unverified_posted="" lost_race_done=""
 # lost_race_die exits 1 naming the lost race and the command that reruns it.
 lost_race_die() {
   die_after_ready 1 "gh pr merge failed: lost the race to origin/main ($1); rerun: $rerun_cmd"
+}
+# lost_race_retry: after a strict merge lost the race to origin/main, return 0
+# when the caller should merge again, 1 when the PR merged anyway, and die
+# otherwise. The caller does the `continue`: bash only honours `continue`
+# inside a function by accident. Callers run it inside `if`, so errexit is off
+# here and each step guards its own failure.
+lost_race_retry() {
+  state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || state=""
+  [ "$state" != "MERGED" ] || return 1
+  fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die_after_ready 1 "git fetch origin main failed"
+  if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
+    lost_race_die "origin/main has not moved past ${pin:0:8}"
+  fi
+  [ -z "$lost_race_done" ] || lost_race_die "the merged head lost the race again"
+  [ "$retries" -lt 3 ] || lost_race_die "no retries left"
+  lost_race_done=1
+  retries=$((retries + 1))
+  merge_attempted=0
+  say "origin/main moved before the merge; merging again (retry $retries of 3)"
+  return 0
 }
 # The outer loop re-enters the merge when it loses the race to origin/main,
 # sharing the 3 retries; every other path breaks out of it.
@@ -1907,20 +1929,7 @@ while :; do
       [ "$strict" = 1 ] && lost_race=1 ;;
   esac
   if [ -n "$lost_race" ]; then
-    state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || state=""
-    if [ "$state" != "MERGED" ]; then
-      fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die_after_ready 1 "git fetch origin main failed"
-      if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
-        lost_race_die "origin/main has not moved past ${pin:0:8}"
-      fi
-      [ -z "$lost_race_done" ] || lost_race_die "the merged head lost the race again"
-      [ "$retries" -lt 3 ] || lost_race_die "no retries left"
-      lost_race_done=1
-      retries=$((retries + 1))
-      merge_attempted=0
-      say "origin/main moved before the merge; merging again (retry $retries of 3)"
-      continue
-    fi
+    if lost_race_retry; then continue; fi
   else
     case "$merge_err" in
       *"Base branch was modified"*|*"GraphQL"*)
@@ -1938,20 +1947,7 @@ while :; do
             [ "$strict" = 1 ] && lost_race2=1 ;;
         esac
         if [ -n "$lost_race2" ]; then
-          state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || state=""
-          if [ "$state" != "MERGED" ]; then
-            fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die_after_ready 1 "git fetch origin main failed"
-            if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
-              lost_race_die "origin/main has not moved past ${pin:0:8}"
-            fi
-            [ -z "$lost_race_done" ] || lost_race_die "the merged head lost the race again"
-            [ "$retries" -lt 3 ] || lost_race_die "no retries left"
-            lost_race_done=1
-            retries=$((retries + 1))
-            merge_attempted=0
-            say "origin/main moved before the merge; merging again (retry $retries of 3)"
-            continue
-          fi
+          if lost_race_retry; then continue; fi
         else
           merge_failed=1
         fi
