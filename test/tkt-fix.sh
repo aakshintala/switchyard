@@ -574,6 +574,123 @@ prepare_legacy_collect_case() {
 # Selector for the new cases below: empty or unset runs all of them.
 want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
 
+write_blocked_tree_record() {
+  local id="$1" status="$2" gate_passed="$3" files_json="$4" uncommitted_json="$5" record
+  mkdir -p "$TMPDIR/delegate-jobs"
+  record="$TMPDIR/delegate-jobs/$id.json"
+  jq -n --arg before "$OLD" --arg status "$status" \
+    --argjson gate_passed "$gate_passed" --argjson files "$files_json" --argjson uncommitted "$uncommitted_json" \
+    '{status:$status,supervisorPid:1,caller:"synthetic",startedAtMs:1700000000000,endedAtMs:1700000001000,
+      result:{status:$status,text:"synthetic blocked text",jobId:"j1",
+        gateResult:{exitCode:(if $gate_passed then 0 else 1 end),passed:$gate_passed,startedAtMs:1700000000000,durationMs:1,outputTail:"ok",outputPath:"gate.log"},
+        changeSet:{headBefore:$before,headAfter:$before,newCommits:[],uncommittedFiles:$uncommitted,filesChanged:$files,diffstat:"1 file changed",dirtyAfter:true}}}' \
+    >"$record" || fail "write $id blocked tree record"
+}
+
+prepare_blocked_tree_case() {
+  local name="$1" status="${2:-BLOCKED}" gate_passed="${3:-true}" files_json="${4:-[\"fix.txt\"]}" publish="${5:-yes}" record jobid=j1
+  setup_case "$name"
+  if [ "$name" = blocked-adopt-non-descendant ]; then
+    git -C "$WT" checkout -q --orphan divergent || fail "create non-descendant branch"
+    git -C "$WT" rm -rf -q . || fail "clear non-descendant tree"
+    printf 'divergent\n' >"$WT/fix.txt"
+    git -C "$WT" add fix.txt
+    git -C "$WT" -c user.email=t@t -c user.name=t commit -qm "fix: divergent tree"
+  else
+    if [ "$name" = blocked-adopt-head-mismatch ]; then
+      fixture_commit base.txt "stored head advanced" "base: stored head mismatch"
+      bash "$TKT_STATE" "$S" set head "$OLD" >/dev/null
+      OLD="$(git -C "$WT" rev-parse HEAD)"
+    fi
+    fixture_commit fix.txt "hand committed complete tree" "fix: hand committed tree"
+  fi
+  ADOPT_HEAD="$(git -C "$WT" rev-parse HEAD)"
+  if [ "$publish" = yes ]; then git -C "$WT" push -q -f origin HEAD:tkt-529 || fail "push blocked tree fixture"; fi
+  printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+  if [ "$name" = blocked-adopt-superseded ]; then jobid=j0; fi
+  bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+  bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
+  bash "$TKT_STATE" "$S" set job.fix1 "$jobid" >/dev/null
+  record_test_round 1 "$OLD"
+  write_blocked_tree_record j1 "$status" "$gate_passed" "$files_json" '["fix.txt"]'
+  BLOCKED_JOB_ID="$jobid"
+  if [ "$jobid" = j0 ]; then printf '{"supersededBy":"j1"}\n' >"$TMPDIR/delegate-jobs/j0.json"; fi
+  if [ "$name" = blocked-adopt-commits ]; then
+    record="$(bash "$REAL_BIN/job-record" j1)"
+    jq --arg after "$ADOPT_HEAD" '.result.changeSet.newCommits=[$after] | .result.changeSet.headAfter=$after' \
+      "$record" >"$record.tmp" && mv "$record.tmp" "$record" || fail "add committed delta to BLOCKED record"
+  elif [ "$name" = blocked-adopt-dirty ]; then
+    printf 'dirty\n' >>"$WT/fix.txt"
+  fi
+}
+
+run_blocked_tree_adopt() {
+  local entry="$1" run_rc=0 out
+  prepare_blocked_tree_case "blocked-adopt-$entry"
+  case "$entry" in
+    collect|superseded)
+      out="$(bash "$TKT" "$S" --verify --collect-fix "$BLOCKED_JOB_ID" 2>"$T/stderr")" || run_rc=$? ;;
+    *) out="$(bash "$TKT" "$S" --verify --resume "$BLOCKED_JOB_ID" 2>"$T/stderr")" || run_rc=$? ;;
+  esac
+  [ "$run_rc" = 0 ] || fail "blocked tree $entry exited $run_rc: $out $(cat "$T/stderr")"
+  head -n 1 <<<"$out" | grep -Fq "TKT tkt-fix FIX-OK reviewed=$ADOPT_HEAD" || fail "blocked tree $entry did not finish normal scoped verify: $out"
+  [ "$(bash "$TKT_STATE" "$S" get head)" = "$ADOPT_HEAD" ] || fail "blocked tree $entry did not adopt head"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = 1 ] || fail "blocked tree $entry did not count one round"
+  [ "$(bash "$TKT_STATE" "$S" get fixslot)" = 1 ] || fail "blocked tree $entry changed the closed fixslot"
+  [ "$(bash "$TKT_STATE" "$S" get fixopen)" = 0 ] || fail "blocked tree $entry left fixopen set"
+  [ "$(bash "$TKT_STATE" "$S" get fix_round.1.start)" = "$OLD" ] || fail "blocked tree $entry changed round start"
+  [ "$(bash "$TKT_STATE" "$S" get fix_round.1.head)" = "$ADOPT_HEAD" ] || fail "blocked tree $entry did not use normal round-head recording"
+  grep -Fq "tkt-fix ADOPT fix1 job=$BLOCKED_JOB_ID head=$OLD..$ADOPT_HEAD" "${S%.state}.journal" || fail "blocked tree $entry omitted adopt journal line"
+  grep -Fq 'review-pr|run 7 --repo switchyard' "$T/calls.log" || fail "blocked tree $entry did not dispatch scoped verify: $(cat "$T/calls.log")"
+  ! grep -Fq -- '--resume j1' "$T/calls.log" || fail "blocked tree $entry resumed the BLOCKED job"
+  ! grep -q '^job|' "$T/calls.log" || fail "blocked tree $entry dispatched or recollected the BLOCKED job"
+}
+
+run_blocked_tree_refusal() {
+  local name="$1" status="$2" gate_passed="$3" files_json="$4" publish="$5" run_rc=0 out state_head
+  prepare_blocked_tree_case "$name" "$status" "$gate_passed" "$files_json" "$publish"
+  state_head="$(bash "$TKT_STATE" "$S" get head)"
+  out="$(bash "$TKT" "$S" --verify --collect-fix j1 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "$name exited $run_rc, want refusal 2: $out $(cat "$T/stderr")"
+  grep -Fq 'is not the job of open slot fix2 (job.fix2=)' "$T/stderr" || fail "$name changed the closed-slot refusal: $(cat "$T/stderr")"
+  [ "$(bash "$TKT_STATE" "$S" get head)" = "$state_head" ] || fail "$name moved state head"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] || fail "$name moved round"
+  if [ -r "${S%.state}.journal" ]; then
+    ! grep -Fq 'tkt-fix ADOPT ' "${S%.state}.journal" || fail "$name journaled an invalid adoption"
+  fi
+  ! grep -q '^review-pr|run ' "$T/calls.log" || fail "$name dispatched scoped verification"
+  ! grep -q '^job|' "$T/calls.log" || fail "$name dispatched/recollected a fix job"
+}
+
+case "${CASE:-}" in
+  blocked-adopt-collect) run_blocked_tree_adopt collect; exit 0 ;;
+  blocked-adopt-superseded) run_blocked_tree_adopt superseded; exit 0 ;;
+  blocked-adopt-failed-gate) run_blocked_tree_refusal blocked-adopt-failed-gate BLOCKED false '["fix.txt"]' yes; exit 0 ;;
+  blocked-adopt-error) run_blocked_tree_refusal blocked-adopt-error ERROR true '["fix.txt"]' yes; exit 0 ;;
+  blocked-adopt-ask) run_blocked_tree_refusal blocked-adopt-ask ASK true '["fix.txt"]' yes; exit 0 ;;
+  blocked-adopt-non-descendant) run_blocked_tree_refusal blocked-adopt-non-descendant BLOCKED true '["fix.txt"]' yes; exit 0 ;;
+  blocked-adopt-file-mismatch) run_blocked_tree_refusal blocked-adopt-file-mismatch BLOCKED true '["different.txt"]' yes; exit 0 ;;
+  blocked-adopt-unpushed) run_blocked_tree_refusal blocked-adopt-unpushed BLOCKED true '["fix.txt"]' no; exit 0 ;;
+  blocked-adopt-commits) run_blocked_tree_refusal blocked-adopt-commits BLOCKED true '["fix.txt"]' yes; exit 0 ;;
+  blocked-adopt-dirty) run_blocked_tree_refusal blocked-adopt-dirty BLOCKED true '["fix.txt"]' yes; exit 0 ;;
+  blocked-adopt-head-mismatch) run_blocked_tree_refusal blocked-adopt-head-mismatch BLOCKED true '["fix.txt"]' yes; exit 0 ;;
+esac
+
+if [ -z "${CASE:-}" ]; then
+  run_blocked_tree_adopt collect
+  run_blocked_tree_adopt resume
+  run_blocked_tree_adopt superseded
+  run_blocked_tree_refusal blocked-adopt-failed-gate BLOCKED false '["fix.txt"]' yes
+  run_blocked_tree_refusal blocked-adopt-error ERROR true '["fix.txt"]' yes
+  run_blocked_tree_refusal blocked-adopt-ask ASK true '["fix.txt"]' yes
+  run_blocked_tree_refusal blocked-adopt-non-descendant BLOCKED true '["fix.txt"]' yes
+  run_blocked_tree_refusal blocked-adopt-file-mismatch BLOCKED true '["different.txt"]' yes
+  run_blocked_tree_refusal blocked-adopt-unpushed BLOCKED true '["fix.txt"]' no
+  run_blocked_tree_refusal blocked-adopt-commits BLOCKED true '["fix.txt"]' yes
+  run_blocked_tree_refusal blocked-adopt-dirty BLOCKED true '["fix.txt"]' yes
+  run_blocked_tree_refusal blocked-adopt-head-mismatch BLOCKED true '["fix.txt"]' yes
+fi
+
 if [ "${CASE:-}" = collect-fix-needs-context ]; then
   run_collect_fix_needs_context
   echo "tkt-fix: collect-fix-needs-context passed"
