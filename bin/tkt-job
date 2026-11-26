@@ -149,6 +149,19 @@ bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 if [ -n "${TKT_BIN:-}" ]; then delegate="$TKT_BIN/delegate"; else delegate=delegate; fi
 fillbrief="$bin_dir/fill-brief"
 plangate="$bin_dir/plan-gate"
+# TKT_IDLE_MS overrides the 30 min --idle-ms every dispatch passes; set but empty is refused.
+idle_ms=1800000
+if [ -n "${TKT_IDLE_MS+x}" ]; then
+  case "$TKT_IDLE_MS" in
+    *[1-9]*) case "$TKT_IDLE_MS" in *[!0-9]*) bad=1 ;; *) bad=0 ;; esac ;;
+    *) bad=1 ;;
+  esac
+  if [ "$bad" -eq 1 ]; then
+    echo "tkt-job: TKT_IDLE_MS must be a positive integer of milliseconds, got '$TKT_IDLE_MS'" >&2
+    exit 2
+  fi
+  idle_ms="$TKT_IDLE_MS"
+fi
 
 # rec_of ID: print the winning job-record path, or nothing; it never fails,
 # so a missing record reads as "no record" under set -e.
@@ -570,11 +583,12 @@ else
       exit 2
     }
   fi
-  # The tool-idle window (30 min by default) bounds one silent tool call and the job-end gate, on every
-  # model: a full gate on a loaded box can run past 30 min, so every job gets 2 h. For muse it is also
-  # the whole-run wall cap. Muse reports no running_tool phase, so a silent bash call gets --idle-ms instead.
-  tool_idle=(--tool-idle-ms 7200000)
-  case "$model" in muse/*) tool_idle+=(--idle-ms 1800000) ;; esac
+  # The tool-idle window bounds one silent tool call and the job-end gate, on every model: a full
+  # gate on a loaded box can run past 30 min, so every job gets 2 h. For muse it is also the
+  # whole-run wall cap. --idle-ms (30 min, or TKT_IDLE_MS) bounds a silent model stream between
+  # tool calls on every model; delegate leaves it off while the phase is running_tool, and muse
+  # reports no running_tool phase, so there it also bounds a silent bash call.
+  tool_idle=(--tool-idle-ms 7200000 --idle-ms "$idle_ms")
   # Only a Verifier gets a wall cap: a lane legitimately runs for hours.
   wall=()
   case "$slot" in verifier-r*) wall=(--wall-ms 10800000) ;; esac

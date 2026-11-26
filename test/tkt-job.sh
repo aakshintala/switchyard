@@ -25,7 +25,7 @@ export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
 mkdir -p "$T/home/.agents/bin"
 printf '{"providers":[]}\n' >"$T/quota.json"
 export QUOTA_FEED="file://$T/quota.json"
-unset DELEGATE_JOBS_DIR TKT_FIX_DISPATCH
+unset DELEGATE_JOBS_DIR TKT_FIX_DISPATCH TKT_IDLE_MS
 
 [ -x "$REAL_BIN/fill-brief" ] || fail "real fill-brief missing"
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
@@ -1803,7 +1803,7 @@ grep -q "^run|model=muse/muse-spark-1.3-contributor|.*|gate=bash " "$T/stub.log"
 grep -qx "idle=7200000" "$T/stub.log" || fail "muse with gate passes --tool-idle-ms 7200000"
 grep -qx "idleMs=1800000" "$T/stub.log" || fail "muse with gate passes --idle-ms 1800000"
 
-# --- a non-muse model gets the 2-hour tool-idle limit but no idle flag, gated and ungated ---
+# --- a non-muse model gets the 2-hour tool-idle limit and the 30-minute idle limit, gated and ungated ---
 # The tool-idle window also bounds the job-end gate, and a full gate on a loaded box can run past 30 min.
 setup_case plain-idle-nogate
 reset_stub
@@ -1812,7 +1812,7 @@ run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "non-muse without gate exits 0"
 grep -q "^run|" "$T/stub.log" || fail "non-muse without gate dispatches"
 grep -qx "idle=7200000" "$T/stub.log" || fail "non-muse without gate passes --tool-idle-ms 7200000"
-grep -q "^idleMs=" "$T/stub.log" && fail "non-muse without gate passes no idle flag"
+grep -qx "idleMs=1800000" "$T/stub.log" || fail "non-muse without gate passes --idle-ms 1800000"
 
 setup_case plain-idle-gate
 reset_stub
@@ -1822,7 +1822,39 @@ run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
 [ "$RC" -eq 0 ] || fail "non-muse with gate exits 0"
 grep -q "gate=bash " "$T/stub.log" || fail "non-muse with gate dispatches the gate"
 grep -qx "idle=7200000" "$T/stub.log" || fail "non-muse with gate passes --tool-idle-ms 7200000"
-grep -q "^idleMs=" "$T/stub.log" && fail "non-muse with gate passes no idle flag"
+grep -qx "idleMs=1800000" "$T/stub.log" || fail "non-muse with gate passes --idle-ms 1800000"
+
+# --- a named non-muse model gets the same idle limits ---
+setup_case codex-idle
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md" --model codex/gpt-6-luna:xhigh
+[ "$RC" -eq 0 ] || fail "codex model exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "^run|model=codex/gpt-6-luna:xhigh|" "$T/stub.log" || fail "codex model dispatches"
+grep -qx "idle=7200000" "$T/stub.log" || fail "codex model passes --tool-idle-ms 7200000"
+grep -qx "idleMs=1800000" "$T/stub.log" || fail "codex model passes --idle-ms 1800000"
+
+# --- TKT_IDLE_MS overrides --idle-ms for any model; tool-idle and the Verifier wall cap stay ---
+for m in codex/gpt-6-luna:xhigh muse/muse-spark-1.3-contributor; do
+  setup_case "idle-override-${m%%/*}"
+  reset_stub
+  make_record stub-1 DONE none 0 1 0
+  OUT="$(TKT_IDLE_MS=600000 bash "$TKT" "$S" --slot verifier-r1 --template "$T/tmpl-basic.md" --model "$m" 2>"$CDIR/stderr.txt")"; RC=$?
+  [ "$RC" -eq 0 ] || fail "$m with TKT_IDLE_MS exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  grep -qx "idleMs=600000" "$T/stub.log" || fail "$m with TKT_IDLE_MS=600000 passes --idle-ms 600000"
+  grep -qx "idle=7200000" "$T/stub.log" || fail "$m with TKT_IDLE_MS keeps --tool-idle-ms 7200000"
+  grep -qx "wallMs=10800000" "$T/stub.log" || fail "$m with TKT_IDLE_MS keeps --wall-ms 10800000"
+done
+
+# --- an empty, non-numeric or zero TKT_IDLE_MS is refused before any dispatch ---
+for v in "" abc 12x -5 0 00; do
+  setup_case idle-bad
+  reset_stub
+  OUT="$(TKT_IDLE_MS="$v" bash "$TKT" "$S" --slot lane --template "$T/tmpl-basic.md" 2>"$CDIR/stderr.txt")"; RC=$?
+  [ "$RC" -eq 2 ] || fail "TKT_IDLE_MS='$v' exits 2 (rc=$RC)"
+  grep -q "TKT_IDLE_MS must be a positive integer" "$CDIR/stderr.txt" || fail "TKT_IDLE_MS='$v' names the bad value: $(cat "$CDIR/stderr.txt")"
+  grep -q . "$T/stub.log" && fail "TKT_IDLE_MS='$v' does not call delegate"
+done
 
 # --- verifier-r* slots pass --wall-ms 10800000, gated and ungated ---
 setup_case wall-verifier-ungated
