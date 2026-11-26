@@ -22,8 +22,9 @@
 # Every gate built from the plan first absorbs untracked root run/ files.
 # Tools: TKT_BIN holds fill-brief and plan-gate (default ~/.agents/bin) and delegate
 # when set; without TKT_BIN, delegate comes from PATH. tkt-state still sits next to
-# the script. No --timeout ever reaches delegate watch: the driver's wait owns
-# the bound.
+# the script. TKT_IDLE_MS sets the --idle-ms every delegate run gets (default
+# 1800000; a resume keeps the stored value). No --timeout ever reaches delegate
+# watch: the driver's wait owns the bound.
 set -euo pipefail
 
 usage() {
@@ -149,13 +150,12 @@ bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 if [ -n "${TKT_BIN:-}" ]; then delegate="$TKT_BIN/delegate"; else delegate=delegate; fi
 fillbrief="$bin_dir/fill-brief"
 plangate="$bin_dir/plan-gate"
-# TKT_IDLE_MS overrides the 30 min --idle-ms every dispatch passes; set but empty is refused.
+# TKT_IDLE_MS overrides the 30 min --idle-ms every delegate run gets; set but empty is refused.
 idle_ms=1800000
 if [ -n "${TKT_IDLE_MS+x}" ]; then
-  case "$TKT_IDLE_MS" in
-    *[1-9]*) case "$TKT_IDLE_MS" in *[!0-9]*) bad=1 ;; *) bad=0 ;; esac ;;
-    *) bad=1 ;;
-  esac
+  bad=0
+  case "$TKT_IDLE_MS" in ''|*[!0-9]*) bad=1 ;; esac
+  case "$TKT_IDLE_MS" in *[1-9]*) ;; *) bad=1 ;; esac
   if [ "$bad" -eq 1 ]; then
     echo "tkt-job: TKT_IDLE_MS must be a positive integer of milliseconds, got '$TKT_IDLE_MS'" >&2
     exit 2
