@@ -38,6 +38,7 @@ cat > "$T/stub/gh" <<'EOF'
 printf '%s\n' "$*" >> "$STUBD/gh.log"
 if [ -n "${GH_BOOM:-}" ]; then echo "HTTP 502" >&2; exit 1; fi
 if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  if [ -n "${GH_VIEW_SLEEP:-}" ]; then sleep "$GH_VIEW_SLEEP"; fi
   if [ -f "$STUBD/pr-view-${3:-}" ]; then
     cat "$STUBD/pr-view-${3:-}"
   elif [ -f "$STUBD/prbranch-${3:-}" ]; then
@@ -1234,19 +1235,6 @@ else
 fi
 printf '{"ok":true,"sessions":[]}' > "$T/dsess"
 
-# A scan without a RETIRE row has no reason to fetch any all-state PR snapshot.
-r=$(newrun lazy-all-pr-snapshot); lane "$r" 4196 fiber-4196-build jid-4196
-printf 'repo=example/switchyard\nissue=4196\npr=5099\n' > "$r/fiber-4196.state"
-printf '{"ok":true,"sessions":[{"id":"jid-4196","status":"idle","activeTurnId":null}]}' > "$T/dsess"
-printf '[]' > "$T/cagents"
-: > "$T/pending"; : > "$T/asking"; : > "$T/prs"; : > "$T/gh.log"
-out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
-if [ "$grc" = 0 ] && ! grep -q ' --state all ' "$T/gh.log"; then
-  ok scan-without-pr-dependent-row-skips-all-state-snapshot
-else
-  fail "scan-without-pr-dependent-row-skips-all-state-snapshot (rc=$grc; $out; $(cat "$T/gh.log"))"
-fi
-
 # A RETIRE report whose PR is outside the snapshot falls back to one PR view.
 r=$(newrun retire-pr-view-fallback); lane "$r" 4197 fiber-4197-build jid-4197
 printf 'repo=example/switchyard\nissue=4197\npr=5100\n' > "$r/fiber-4197.state"
@@ -1263,6 +1251,23 @@ if [ "$grc" = 0 ] \
   ok retire-report-pr-missing-from-snapshot-auto-retires-via-view
 else
   fail "retire-report-pr-missing-from-snapshot-auto-retires-via-view (rc=$grc; $out; $(cat "$T/gh.log"); $(cat "$r/roster-done"))"
+fi
+
+# A RETIRE fallback timeout must not retire the lane based on a partial lookup.
+r=$(newrun retire-pr-view-timeout); lane "$r" 4198 fiber-4198-build jid-4198
+printf 'repo=example/switchyard\nissue=4198\npr=5101\n' > "$r/fiber-4198.state"
+printf 'RETIRE issue=4198\n' > "$r/fiber-4198-report.md"
+printf '{"ok":true,"sessions":[{"id":"jid-4198","status":"idle","activeTurnId":null}]}' > "$T/dsess"
+printf '[]\n' > "$T/all-prs"
+rm -f "$T/pr-view-5101"; : > "$T/gh.log"
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 GH_VIEW_SLEEP=3 \
+  FW_LANECHECK_PR_VIEW_TIMEOUT=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+if [ "$grc" = 0 ] \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ] \
+  && [ "$(grep -c '^pr view 5101 ' "$T/gh.log" || true)" = 1 ]; then
+  ok retire-pr-view-timeout-does-not-auto-retire
+else
+  fail "retire-pr-view-timeout-does-not-auto-retire (rc=$grc; $out; $(cat "$T/gh.log"); $(cat "$r/roster-done"))"
 fi
 
 ruling() { # ruling <run> <ticket> <n> [age in minutes, default 1]
@@ -1869,6 +1874,22 @@ if printf '%s' "$out" | grep -q 'PR-SHAPED HOLDER UNRESOLVED: pr#4328 (1 path(s)
   ok pr-shaped-holder-that-cannot-be-resolved-is-reported
 else
   fail "pr-shaped-holder-that-cannot-be-resolved-is-reported ($out)"
+fi
+
+# A PR view timeout is reported as an unresolved holder, never silence.
+r=$(newrun C9-timeout); lane "$r" 4162 fiber-4162-build h11t; grant "$r" 4162
+: > "$T/fclog"; : > "$T/fcheld"; : > "$T/gh.log"; rm -f "$T/prbranch-4328" "$T/pr-view-4328"
+printf '[]\n' > "$T/all-prs"
+held pr#4328 crates/contract/src/kind.rs
+out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fcheld \
+  GH_VIEW_SLEEP=3 FW_LANECHECK_PR_VIEW_TIMEOUT=1 \
+  bash "$BIN/lanecheck" done 4162 2>&1); grc=$?
+if [ "$grc" = 0 ] \
+  && printf '%s' "$out" | grep -q 'PR-SHAPED HOLDER UNRESOLVED: pr#4328 (1 path(s))' \
+  && [ "$(grep -c '^pr view 4328 ' "$T/gh.log" || true)" = 1 ]; then
+  ok pr-view-timeout-keeps-claims-holder-unresolved
+else
+  fail "pr-view-timeout-keeps-claims-holder-unresolved (rc=$grc; $out; $(cat "$T/gh.log"))"
 fi
 
 # A PR omitted by the capped snapshot is looked up once, then resolved through its head.

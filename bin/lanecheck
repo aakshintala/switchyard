@@ -1011,7 +1011,17 @@ PY
       pr_number=${h#pr\#}
       pr_row=$(pr_snapshot_field "$_all_prs" "$pr_number" __row)
       if [ -z "$pr_row" ]; then
-        pr_row=$(gh pr view "$pr_number" --repo "$claims_repo" \
+        pr_row=$(python3 -I -c 'import os, subprocess, sys
+try:
+    result = subprocess.run(
+        sys.argv[1:], text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=float(os.environ.get("FW_LANECHECK_PR_VIEW_TIMEOUT", "30")))
+    if result.returncode == 0:
+        sys.stdout.write(result.stdout)
+except (OSError, subprocess.TimeoutExpired, ValueError):
+    pass
+' gh pr view "$pr_number" --repo "$claims_repo" \
           --json number,headRefName,state,mergedAt 2>/dev/null) || pr_row=""
       fi
       br=$(pr_snapshot_field "$pr_row" "$pr_number" headRefName) || br=""
@@ -1262,37 +1272,20 @@ else
   rm -f "$tmp/openprs.ok"
 fi
 # #1986 batches PR state once per repository, not once per reported lane.
-# Fetch only repos for tickets with a RETIRE report and a state-recorded PR;
-# ordinary scans do not need an all-state snapshot.
 pr_repos=$(python3 -I - "$R" <<'PY'
 import glob, os, re, sys
 root = sys.argv[1]
-tickets = set()
-reports = (glob.glob(os.path.join(root, "inbox", "*.md"))
-           + glob.glob(os.path.join(root, "inbox", "read", "*.md"))
-           + glob.glob(os.path.join(root, "fiber-*-report.md")))
-for path in reports:
-    try:
-        for line in open(path, errors="replace"):
-            match = re.fullmatch(r"RETIRE issue=(\d{3,5})", line.strip())
-            if match:
-                tickets.add(match.group(1))
-    except OSError:
-        pass
 repos = set()
 for path in glob.glob(os.path.join(root, "*.state")):
-    values = {}
     try:
         for line in open(path, errors="replace"):
-            key, sep, value = line.rstrip("\n").partition("=")
-            if sep:
-                values.setdefault(key, value)
+            if line.startswith("repo="):
+                repo = line.rstrip("\n").split("=", 1)[1]
+                if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+                    repos.add(repo)
+                break
     except OSError:
-        continue
-    repo = values.get("repo", "")
-    if (values.get("issue") in tickets and values.get("pr", "").isdigit()
-            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)):
-        repos.add(repo)
+        pass
 print("\n".join(sorted(repos)))
 PY
 )
@@ -1610,10 +1603,11 @@ def view_pr_row(repo, number):
             result = subprocess.run(
                 ["gh", "pr", "view", str(number), "--repo", repo,
                  "--json", "number,headRefName,state,mergedAt"],
-                text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=float(os.environ.get("FW_LANECHECK_PR_VIEW_TIMEOUT", "30")))
             row = json.loads(result.stdout) if result.returncode == 0 else None
             pr_views[key] = pr_row_for_number(row, number)
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
             pr_views[key] = None
     return pr_views[key]
 
