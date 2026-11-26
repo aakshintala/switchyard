@@ -797,6 +797,49 @@ expect_fix_grant_refused() {
   refused_out="$out"
 }
 
+run_ruling_refutes_all() {
+  local run_rc=0 out expected_hint findings_file history_file
+  setup_case ruling-refutes-all
+  findings_file="$CDIR/findings.md"
+  history_file="$CDIR/findings-history.md"
+  printf 'P1 fix.txt:1 — a\nP2 fix.txt:2 — b\n' >"$findings_file"
+  printf '# Findings history\nP3 old.txt:3 — c [tkt-history: raised=raised in review round 0; status=open; unverified=none]\n' >"$history_file"
+  bash "$TKT_STATE" "$S" set findings "$findings_file" >/dev/null
+  bash "$TKT_STATE" "$S" set findings_history "$history_file" >/dev/null
+  write_ruling_comment 99 $'refutes: P1 fix.txt:1\nrefutes: P3 old.txt:3'
+  write_ruling_comment 100 'refutes: P2 fix.txt:2'
+  mkdir -p "$HOME/.agents/skills/review-loop/briefs"
+  printf 'Synthetic fix prompt.\n' >"$HOME/.agents/skills/review-loop/briefs/fix.md"
+
+  cat >"$T/bin/delegate" <<EOF
+#!/usr/bin/env bash
+printf 'delegate|%s\\n' "\$*" >>"$T/delegate-calls.log"
+case "\${1:-}" in
+  run) printf 'synthetic-job\\n' ;;
+  watch) ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod +x "$T/bin/delegate"
+  : >"$T/delegate-calls.log"
+  rm "$T/bin/tkt-job"
+  ln -s "$REAL_BIN/tkt-job" "$T/bin/tkt-job" || fail "ruling-refutes-all: link real tkt-job"
+
+  out="$(bash "$TKT" "$S" --verify --findings "$findings_file" --ruling 99 --ruling 100 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "ruling-refutes-all exited $run_rc, want refusal 2: $out $(cat "$T/stderr")"
+  grep -Fq 'TKT tkt-fix RULING-REFUSED reason=all-refuted comment=99' <<<"$out" \
+    || fail "ruling-refutes-all did not refuse: $out"
+  expected_hint="tkt-verify $(printf '%q' "$S") --findings $(printf '%q' "$findings_file") --ruling 99 --ruling 100"
+  grep -Fxq "$expected_hint" <<<"$out" || fail "ruling-refutes-all omitted tkt-verify hint '$expected_hint': $out"
+  ! grep -q '^delegate|run ' "$T/delegate-calls.log" \
+    || fail "ruling-refutes-all called delegate run: $(cat "$T/delegate-calls.log")"
+
+  rm "$T/bin/tkt-job" "$T/bin/delegate"
+  cp "$T/tkt-job-stub" "$T/bin/tkt-job"
+}
+
+if want ruling-refutes-all; then run_ruling_refutes_all; fi
+
 # A ruling closes only the named finding, and is passed as recorded context.
 if want ruling-refutes-one; then
 setup_case ruling-refutes-one
@@ -878,7 +921,7 @@ setup_case ruling-refutes-reopened
 ROUND1_FINDINGS="$CDIR/round1-findings.md"
 ROUND2_FINDINGS="$CDIR/round2-findings.md"
 printf 'P1 **fix.txt:1** — a\n' >"$ROUND1_FINDINGS"
-printf 'P1 fix.txt:1 — a\n' >"$ROUND2_FINDINGS"
+printf 'P1 fix.txt:1 — a\nP2 other.txt:2 — remains open\n' >"$ROUND2_FINDINGS"
 bash "$TKT_STATE" "$S" set findings "$ROUND1_FINDINGS" >/dev/null
 fixture_commit fix.txt 'round one fix' 'fix: round one'
 ROUND1_HEAD="$(git -C "$WT" rev-parse HEAD)"

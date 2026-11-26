@@ -25,6 +25,36 @@ ruling_match_has() {
   return 1
 }
 
+# Succeed when the validated rulings refute every open P1-P3 row in the
+# current findings file and posted findings history. The caller owns the
+# behavior when no rows are open; this helper returns false in that case.
+ruling_refutes_all_open_rows() {
+  local findings_file="$1" history_file="$2"
+  local source_kind source row base status
+  ruling_open_rows=0
+  ruling_all_open_rows_refuted=1
+  for source_kind in current history; do
+    if [ "$source_kind" = current ]; then source="$findings_file"; else source="$history_file"; fi
+    [ -n "$source" ] && [ -r "$source" ] || continue
+    while IFS= read -r row; do
+      base="$(findings_row_base "$row")"
+      base="$(normalize_finding_line "$base")"
+      case "$base" in P1\ *|P2\ *|P3\ *) ;; *) continue ;; esac
+      status=open
+      if [ "$source_kind" = history ]; then
+        status="$(findings_row_status "$row")"
+        [ -n "$status" ] || status=open
+      fi
+      [ "$status" = open ] || continue
+      ruling_open_rows=$((ruling_open_rows + 1))
+      if ! ruling_match_has "$base" "${ruling_refute_bases[@]+${ruling_refute_bases[@]}}"; then
+        ruling_all_open_rows_refuted=0
+      fi
+    done <"$source"
+  done
+  [ "$ruling_open_rows" -gt 0 ] && [ "$ruling_all_open_rows_refuted" -eq 1 ]
+}
+
 ruling_match_file() {
   local prefix="$1" path="$2" kind="$3" row base status entry candidate_source boundary_match
   # A ruling may copy the row's markup; compare both sides without it.
