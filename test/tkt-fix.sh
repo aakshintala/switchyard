@@ -649,8 +649,10 @@ run_blocked_tree_gate_credit() {
 }
 
 run_blocked_tree_adopt() {
-  local entry="$1" run_rc=0 out
+  local entry="$1" run_rc=0 out want_round=1
   prepare_blocked_tree_case "blocked-adopt-$entry"
+  # #2000: adoption is a collect, not a resume, so it stays outside ROUND-LIMIT past round 2.
+  if [ "$entry" = resume-round2 ]; then bash "$TKT_STATE" "$S" set round 2 >/dev/null; want_round=3; fi
   case "$entry" in
     collect|superseded)
       out="$(bash "$TKT" "$S" --verify --collect-fix "$BLOCKED_JOB_ID" 2>"$T/stderr")" || run_rc=$? ;;
@@ -659,7 +661,7 @@ run_blocked_tree_adopt() {
   [ "$run_rc" = 0 ] || fail "blocked tree $entry exited $run_rc: $out $(cat "$T/stderr")"
   head -n 1 <<<"$out" | grep -Fq "TKT tkt-fix FIX-OK reviewed=$ADOPT_HEAD" || fail "blocked tree $entry did not finish normal scoped verify: $out"
   [ "$(bash "$TKT_STATE" "$S" get head)" = "$ADOPT_HEAD" ] || fail "blocked tree $entry did not adopt head"
-  [ "$(bash "$TKT_STATE" "$S" get round)" = 1 ] || fail "blocked tree $entry did not count one round"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = "$want_round" ] || fail "blocked tree $entry did not count one round"
   [ "$(bash "$TKT_STATE" "$S" get fixslot)" = 1 ] || fail "blocked tree $entry changed the closed fixslot"
   [ "$(bash "$TKT_STATE" "$S" get fixopen)" = 0 ] || fail "blocked tree $entry left fixopen set"
   [ "$(bash "$TKT_STATE" "$S" get fix_round.1.start)" = "$OLD" ] || fail "blocked tree $entry changed round start"
@@ -689,6 +691,7 @@ run_blocked_tree_refusal() {
 case "${CASE:-}" in
   blocked-adopt-collect) run_blocked_tree_adopt collect; exit 0 ;;
   blocked-adopt-resume) run_blocked_tree_adopt resume; exit 0 ;;
+  blocked-adopt-resume-round2) run_blocked_tree_adopt resume-round2; exit 0 ;;
   blocked-adopt-gate-credit) run_blocked_tree_gate_credit; exit 0 ;;
   blocked-adopt-superseded) run_blocked_tree_adopt superseded; exit 0 ;;
   blocked-adopt-failed-gate) run_blocked_tree_refusal blocked-adopt-failed-gate BLOCKED false '["fix.txt"]' yes; exit 0 ;;
@@ -705,6 +708,7 @@ esac
 if [ -z "${CASE:-}" ]; then
   run_blocked_tree_adopt collect
   run_blocked_tree_adopt resume
+  run_blocked_tree_adopt resume-round2
   run_blocked_tree_gate_credit
   run_blocked_tree_adopt superseded
   run_blocked_tree_refusal blocked-adopt-failed-gate BLOCKED false '["fix.txt"]' yes
