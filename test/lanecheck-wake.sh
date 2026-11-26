@@ -64,6 +64,9 @@ esac
 EOF
 cat >"$T/stub/gh" <<'EOF'
 #!/usr/bin/env bash
+case " $* " in
+  *" --state all "*) cat "$STUBD/all-prs" 2>/dev/null || echo '[]'; exit 0;;
+esac
 if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   cat "$STUBD/pr-view-${3:-}" 2>/dev/null || exit 1
   exit 0
@@ -1019,6 +1022,7 @@ lane "$r" 8101 fiber-8101-build sid-8101
 printf 'repo=example/switchyard\nissue=8101\npr=81\n' >"$r/fiber-8101.state"
 printf 'RETIRE issue=8101\n' >"$r/fiber-8101-report.md"
 printf '{"state":"MERGED","mergedAt":"2026-11-15T00:00:00Z"}\n' >"$T/pr-view-81"
+printf '[{"number":81,"headRefName":"fiber-8101-build","state":"MERGED","mergedAt":"2026-11-15T00:00:00Z"}]\n' >"$T/all-prs"
 set_session sid-8101 8101 turn-retire-merged completed 8100000
 set_logs turn-retire-merged 8000000 8100000 'The ship is complete.'
 set_processes
@@ -1038,6 +1042,7 @@ lane "$r" 8102 fiber-8102-build sid-8102
 printf 'repo=example/switchyard\nissue=8102\npr=82\n' >"$r/fiber-8102.state"
 printf 'RETIRE issue=8102\n' >"$r/fiber-8102-report.md"
 printf '{"state":"OPEN","mergedAt":null}\n' >"$T/pr-view-82"
+printf '[{"number":82,"headRefName":"fiber-8102-build","state":"OPEN","mergedAt":null}]\n' >"$T/all-prs"
 set_session sid-8102 8102 turn-retire-unmerged completed 8200000
 set_logs turn-retire-unmerged 8100000 8200000 'The ship is complete.'
 set_processes
