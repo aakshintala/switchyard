@@ -698,6 +698,7 @@ esac
 if [ -z "${CASE:-}" ]; then
   run_blocked_tree_adopt collect
   run_blocked_tree_adopt resume
+  run_blocked_tree_gate_credit
   run_blocked_tree_adopt superseded
   run_blocked_tree_refusal blocked-adopt-failed-gate BLOCKED false '["fix.txt"]' yes
   run_blocked_tree_refusal blocked-adopt-error ERROR true '["fix.txt"]' yes
