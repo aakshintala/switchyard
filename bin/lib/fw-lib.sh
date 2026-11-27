@@ -458,7 +458,7 @@ fw_has_nonempty_grant() {
   return "$found"
 }
 
-# fw_self_grant <launcher> <n> <run> [refresh-empty] [phase]: record the fence from the ticket's
+# fw_self_grant <launcher> <n> <run> [refresh-empty] [phase] [host]: record the fence from the ticket's
 # posted plan. With no posted plan, only plan may record an empty grant. Reads the last comment carrying a `## Files` section;
 # a bullet that opens with a backticked path is a write, unless it is marked
 # `(read)` or sits under a "Reads" line, which go to --reads. Optional path
@@ -468,8 +468,11 @@ fw_has_nonempty_grant() {
 # Returns 1 when GitHub/fence-grant fails or no grant file appears in the shared run directory.
 # FW_GH and FW_FENCE_GRANT override gh and fence-grant (tests).
 fw_self_grant() {
-  local who=$1 n=$2 run=$3 refresh_existing=${4:-0} phase=${5:-} body lists w r rg fg nw g found what grant_run
+  local who=$1 n=$2 run=$3 refresh_existing=${4:-0} phase=${5:-} body lists w r rg fg nw g found what grant_run grant_host=${6:-}
   local -a a=()
+  if [ -z "$grant_host" ]; then
+    if [ "$(uname -s 2>/dev/null)" = Darwin ]; then grant_host=mac; else grant_host=box; fi
+  fi
   grant_run=$(ticket_states_shared_run_dir "$run")
   fg=$(_fw_fence_grant)
   _fw_grant_ssh=${FW_SSH:-}
@@ -519,7 +522,7 @@ print(",".join(w)); print(",".join(r)); print(",".join(rg))') || return 1
     else
       echo "$who: #$n's plan has no write path; recording an empty grant" >&2
     fi
-    a=(--empty)
+    a=(--host "$grant_host" --empty)
     [ -n "$r" ] && a+=(--reads "$r")
     FW_SSH="$_fw_grant_ssh" FW_RUN=$grant_run bash "$fg" "$n" "${a[@]}" >&2 || return 1
     found=0
@@ -531,10 +534,10 @@ print(",".join(w)); print(",".join(r)); print(",".join(rg))') || return 1
   fi
   # A path the plan creates is not on main yet, and fence-grant wants it under
   # --new as well as --paths: ask a --dry probe, which names each one MISSING.
-  nw=$(FW_SSH="$_fw_grant_ssh" FW_RUN=$grant_run bash "$fg" "$n" --repo aakshintala/fiber --paths "$w" --dry 2>&1 \
+  nw=$(FW_SSH="$_fw_grant_ssh" FW_RUN=$grant_run bash "$fg" "$n" --host "$grant_host" --repo aakshintala/fiber --paths "$w" --dry 2>&1 \
     | sed -n 's/^MISSING //p' | paste -sd, -)
   echo "$who: no fence grant for #$n; granting from the posted plan: $w${nw:+ (new: $nw)}${rg:+ (ranges: $rg)}" >&2
-  a=(--paths "$w")
+  a=(--host "$grant_host" --paths "$w")
   [ -n "$nw" ] && a+=(--new "$nw")
   [ -n "$rg" ] && a+=(--ranges "$rg")
   [ -n "$r" ] && a+=(--reads "$r")

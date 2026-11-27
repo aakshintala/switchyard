@@ -11,6 +11,18 @@ fail() {
 }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-fence-grant.XXXXXX")"
+# fence-grant names the running host from `uname -s`; its grant calls pin it to
+# the Mac so the suite reads the same on CI's Linux runner. A case sets
+# TEST_UNAME to differ. The pin stays off the file-wide PATH: lanecheck and the
+# other tools here pick their date/stat and local-box branches from uname.
+mkdir -p "$T/uname-pin"
+cat >"$T/uname-pin/uname" <<'UNAME_PIN_STUB'
+#!/usr/bin/env bash
+[ "${1:-}" != -s ] || { printf '%s\n' "${TEST_UNAME:-Darwin}"; exit 0; }
+exec /usr/bin/uname "$@"
+UNAME_PIN_STUB
+chmod +x "$T/uname-pin/uname"
+UNAME_PIN="$T/uname-pin"
 ORIGINAL_PATH=$PATH
 export T
 PI_PID=""
@@ -377,7 +389,17 @@ write_delegate_job() {
 }
 
 run_fg() {
-  bash "$FG" "$@" >"$T/out" 2>"$T/err"
+  local add_host=1 arg
+  [ "$#" -gt 0 ] || add_host=0
+  [ "${1:-}" != --require ] || add_host=0
+  for arg in "$@"; do
+    case "$arg" in --host|--host=*) add_host=0;; esac
+  done
+  if [ "$add_host" -eq 1 ]; then
+    PATH="$UNAME_PIN:$PATH" bash "$FG" "$@" --host mac >"$T/out" 2>"$T/err"
+  else
+    PATH="$UNAME_PIN:$PATH" bash "$FG" "$@" >"$T/out" 2>"$T/err"
+  fi
   RC=$?
 }
 
@@ -420,7 +442,7 @@ assert_no_ticket_state_probe() {
 assert_usage() {
   assert_rc 2 "$1"
   assert_out '' "$1 stdout"
-  assert_stderr "$(printf 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--empty] [--dry] | --require <ticket> --phase plan|build|ship\n       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive')" "$1 usage"
+  assert_stderr "$(printf 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--empty] [--host mac|box] [--dry] | --require <ticket> --phase plan|build|ship\n       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive')" "$1 usage"
   assert_no_probes "$1"
   assert_no_grant "$1"
 }
@@ -443,6 +465,135 @@ set_pr() {
   printf '%s\n' "$path" >"$T/pr/$number.names"
   printf 'diff --git a/%s b/%s\nindex 1111111..2222222 100644\n' "$path" "$path" >"$T/pr/$number.diff"
 }
+
+# Host routing regression cases run in the default suite. The remote probe is
+# entirely stubbed; no test can contact a real host.
+HOST_SIM_BIN="$T/host-sim-bin"
+mkdir -p "$HOST_SIM_BIN"
+cat >"$HOST_SIM_BIN/hostname" <<'HOSTNAME_SIM_STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf '%s\n' "${TEST_HOSTNAME_SHORT:-${TEST_HOSTNAME%%.*}}";;
+  *) printf '%s\n' "${TEST_HOSTNAME:-unknown-host}";;
+esac
+HOSTNAME_SIM_STUB
+chmod +x "$HOST_SIM_BIN/hostname"
+cat >"$HOST_SIM_BIN/uname" <<'UNAME_SIM_STUB'
+#!/usr/bin/env bash
+[ "${1:-}" != -s ] || { printf '%s\n' "${TEST_UNAME:-Darwin}"; exit 0; }
+exec /usr/bin/uname "$@"
+UNAME_SIM_STUB
+chmod +x "$HOST_SIM_BIN/uname"
+BOX_PROBE_OUTPUT=$(cat <<'BOX_PROBE'
+FWSEC=UPTIME
+up
+FWSEC=AGENTS
+[]
+FWSEC=DELEGATE
+DELEGATEOK
+FWSEC=DSESS
+{"ok":true,"sessions":[]}
+DSESSJSONOK
+FWSEC=PILANES
+PILANESOK
+FWSEC=END
+BOX_PROBE
+)
+BOX_LANE_PROBE_OUTPUT=$(cat <<'BOX_LANE_PROBE'
+FWSEC=UPTIME
+up
+FWSEC=AGENTS
+[{"name":"fiber-2013","status":"busy"}]
+FWSEC=DELEGATE
+DELEGATEOK
+FWSEC=DSESS
+{"ok":true,"sessions":[]}
+DSESSJSONOK
+FWSEC=PILANES
+PILANESOK
+FWSEC=END
+BOX_LANE_PROBE
+)
+export BOX_PROBE_OUTPUT BOX_LANE_PROBE_OUTPUT
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  SSH_OUT="$BOX_LANE_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2013 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 3 'Mac refuses to write a live box lane grant'
+  assert_out '' 'Mac refusal does not print GRANT'
+  grep -qF "Run on box: ssh $FW_BOX_HOST '$FG 2013 --paths docs/tui.md'" "$T/err" \
+    || fail 'Mac refusal prints the exact box command'
+  assert_no_grant 'Mac refuses box grant without writing locally'
+  bash "$FG" 2013 --paths docs/tui.md --dry >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 3 'Mac dry run refuses a live box lane'
+  assert_out '' 'refused dry run does not predict a grant'
+  grep -qF 'Run on box:' "$T/err" || fail 'refused dry run names the box command'
+  assert_no_grant 'refused dry run writes no grant locally'
+) || exit 1
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  run_fg 2014 --host box --paths docs/events.md
+  assert_rc 0 'box grants for a box lane'
+  assert_line GRANT 'box grant prints GRANT'
+  [ -f "$FW_RUN/fiber-2014-fence-grant-1.md" ] || fail 'box grant writes its grant file'
+) || exit 1
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2015 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 3 'unknown lane host is refused'
+  assert_out '' 'unknown-host refusal does not print GRANT'
+  grep -qF "Run on Mac: $FG 2015 --paths docs/tui.md" "$T/err" || fail 'unknown-host refusal names the Mac route'
+  grep -qF "Run on box: ssh $FW_BOX_HOST '$FG 2015 --paths docs/tui.md'" "$T/err" || fail 'unknown-host refusal names the box route'
+  assert_no_grant 'unknown lane host refuses without writing'
+) || exit 1
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=unknown.local
+  TEST_UNAME=Linux
+  export PATH TEST_HOSTNAME TEST_UNAME
+  run_fg 2017 --host box --paths docs/tui.md
+  assert_rc 3 'unrecognized local host refuses a box grant'
+  assert_out '' 'unrecognized local host refusal does not print GRANT'
+  grep -qF 'Run on Mac:' "$T/err" || fail 'unrecognized local host refusal names the Mac route'
+  grep -qF "Run on box: ssh $FW_BOX_HOST '" "$T/err" || fail 'unrecognized local host refusal names the box route'
+  assert_no_grant 'unrecognized local host writes no grant'
+) || exit 1
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  export PATH TEST_HOSTNAME
+  run_fg 2016 --empty --host box
+  assert_rc 3 'Mac refuses an empty box-lane grant'
+  assert_out '' 'empty box-lane refusal does not print GRANT'
+  assert_no_grant 'empty box-lane refusal writes no local grant'
+) || exit 1
 
 # A hunk-disjoint grant must not reap when the other lane's PR merges.
 reset_case
@@ -825,7 +976,7 @@ cp "$(dirname "$FG")/lib/ticket-state.sh" "$T/realbin/lib/ticket-state.sh"
 cp "$T/stubs/file-claim" "$T/realbin/file-claim"
 cp "$(dirname "$FG")/fw-sess-lanes" "$T/realbin/fw-sess-lanes"
 ln -sf ../realbin/fence-grant "$T/linkbin/fence-grant"
-(unset FW_FILE_CLAIM; bash "$T/linkbin/fence-grant" 77 --paths docs/tui.md --dry >"$T/out" 2>"$T/err"); RC=$?
+(unset FW_FILE_CLAIM; PATH="$UNAME_PIN:$PATH" bash "$T/linkbin/fence-grant" 77 --paths docs/tui.md --dry --host mac >"$T/out" 2>"$T/err"); RC=$?
 assert_rc 0 'symlinked caller finds file-claim'
 grep -q '^list' "$T/file-claim.log" || fail "symlinked caller: file-claim not called; log=$(cat "$T/file-claim.log")"
 
@@ -1676,7 +1827,7 @@ assert_not_contains 'NOSYMBOL' 'valid expect accepted'
 assert_line 'OVERLAP docs/tui.md PR #11' 'valid expect overlap'
 
 # --- Exit 2: bad arguments -----------------------------------------------------
-USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--empty] [--dry] | --require <ticket> --phase plan|build|ship
+USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--empty] [--host mac|box] [--dry] | --require <ticket> --phase plan|build|ship
        non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive'
 reset_case
 run_fg
@@ -2520,7 +2671,7 @@ chmod +x "$HOST_BIN"/* "$DEFAULT_HOME/.local/bin/delegate"
   export HOME="$DEFAULT_HOME" PATH="$HOST_BIN:$PATH" FW_BOX_HOST=roundhouse-7010-plus-1.local
   unset FW_RUN FW_SSH
   export TEST_HOSTNAME=roundhouse-7010-plus-1.other TEST_HOSTNAME_SHORT=roundhouse-7010-plus-1
-  run_fg 88 --paths docs/tui.md --dry
+  run_fg 88 --paths docs/tui.md --dry --host box
   assert_rc 0 'box host probe succeeds locally'
   [ -s "$T/local-probe.log" ] || fail 'box host executes the one-round-trip probe locally'
   [ "$(cat "$T/local-delegate-count")" = 2 ] || fail 'box host retries malformed delegate sessions locally'
@@ -2548,7 +2699,7 @@ chmod +x "$HOST_BIN"/* "$DEFAULT_HOME/.local/bin/delegate"
 ) || exit 1
 
 # Empty self-grants keep the standard file layout and satisfy phase checks.
-FW_RUN="$T/run" bash "$FG" 9876 --empty >"$T/empty.out" 2>"$T/empty.err"
+FW_RUN="$T/run" PATH="$UNAME_PIN:$PATH" bash "$FG" 9876 --empty --host mac >"$T/empty.out" 2>"$T/empty.err"
 empty_grant="$T/run/fiber-9876-fence-grant-1.md"
 [ -f "$empty_grant" ] || fail 'empty grant writer creates the standard grant file'
 grep -q '^Paths:$' "$empty_grant" || fail 'empty grant has a Paths block'
@@ -2614,7 +2765,7 @@ assert_rc 0 'nested-run dry probe reads shared holder grant'
 assert_contains 'OVERLAP docs/tui.md lane #66' 'shared grant holder is visible from nested run'
 FILE_CLAIM_LIST="$(printf 'docs/tui.md\tsweep-1798-holder\tplan\t0\tt:stub\t\n')"
 export FILE_CLAIM_LIST
-if fw_self_grant tkt-job 1798 "$state_run" 1 build >"$T/nested-overlap.out" 2>&1; then
+if PATH="$UNAME_PIN:$PATH" fw_self_grant tkt-job 1798 "$state_run" 1 build >"$T/nested-overlap.out" 2>&1; then
   fail 'nested-run self-grant refuses an exclusive overlapping holder'
 fi
 grep -qF 'HELD docs/tui.md by lane sweep-1798-holder' "$T/nested-overlap.out" \
@@ -2641,7 +2792,7 @@ cat >"$T/self-grant-plan.md" <<'PLAN'
 
 - `docs/events.md`
 PLAN
-fw_self_grant tkt-job 1798 "$state_run" 1 build >"$T/nested-free.out" 2>&1 \
+PATH="$UNAME_PIN:$PATH" fw_self_grant tkt-job 1798 "$state_run" 1 build >"$T/nested-free.out" 2>&1 \
   || fail "nested-run self-grant grants a non-overlapping path: $(cat "$T/nested-free.out")"
 [ -f "$shared_run/fiber-1798-fence-grant-1.md" ] || fail 'nested-run self-grant writes its grant in shared run'
 [ ! -e "$state_run/fiber-1798-fence-grant-1.md" ] || fail 'nested-run self-grant does not hide its grant in state directory'

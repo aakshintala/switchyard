@@ -382,8 +382,8 @@ FW_GH="$T/bin/gh-self-grant" FW_FENCE_GRANT="$T/bin/fence-grant-self" \
 [ "$RC" -eq 0 ] || fail "lane without a prior grant self-grants (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q '^run|' "$T/stub.log" || fail "self-granted lane dispatches"
 [ -f "$CDIR/run/fiber-502-fence-grant-1.md" ] || fail "self-granted lane writes a grant file"
-grep -q '^502 --repo [^ ]* --paths src/tkt-job.c --dry$' "$SELF_GRANT_LOG" || fail "self-grant probes the plan path"
-grep -q '^502 --repo [^ ]* --paths src/tkt-job.c$' "$SELF_GRANT_LOG" || fail "self-grant grants path without line ranges"
+grep -Eq '^502 --host (mac|box) --repo [^ ]* --paths src/tkt-job.c --dry$' "$SELF_GRANT_LOG" || fail "self-grant probes the plan path"
+grep -Eq '^502 --repo [^ ]* --host (mac|box) --paths src/tkt-job.c$' "$SELF_GRANT_LOG" || fail "self-grant grants path without line ranges"
 ! grep -q -- '--ranges' "$SELF_GRANT_LOG" || fail "self-grant does not require line ranges"
 
 # --- an empty plan grant is refreshed when the build plan now has writes ----
@@ -467,7 +467,7 @@ FW_GH="$T/bin/gh-self-grant" FW_FENCE_GRANT="$T/bin/fence-grant-self" \
   run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "unrelated-grant lane self-grants (rc=$RC): $(cat "$CDIR/stderr.txt")"
 [ -f "$CDIR/run/fiber-426-fence-grant-1.md" ] || fail "unrelated-grant ignores #4260 and writes #426's grant"
-grep -q '^426 --repo [^ ]* --paths src/tkt-job.c$' "$SELF_GRANT_LOG" || fail "unrelated-grant self-grants from #426's plan"
+grep -Eq '^426 --repo [^ ]* --host (mac|box) --paths src/tkt-job.c$' "$SELF_GRANT_LOG" || fail "unrelated-grant self-grants from #426's plan"
 
 
 setup_case plan-slot-no-fence

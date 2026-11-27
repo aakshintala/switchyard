@@ -220,7 +220,8 @@ if launch_box phase-plan >"$T/plan-self-grant-launch.out" 2>&1; then :; else
   fail "plan phase self-grants before launch ($(cat "$T/plan-self-grant-launch.out"))"
 fi
 [ -f "$run/fiber-2465-fence-grant-1.md" ] || fail "plan phase writes a grant file"
-grep -q '^2465 --empty$' "$SELF_GRANT_LOG" || fail "plan phase records an empty grant when no plan is posted"
+# boxlaunch writes the grant in this host's run dir and copies it to the box below.
+grep -Eq '^2465 --host (mac|box) --empty$' "$SELF_GRANT_LOG" || fail "plan phase records an empty grant for this host's run dir"
 grep -q '^Paths:$' "$run/fiber-2465-fence-grant-1.md" || fail "plan phase empty grant has a Paths block"
 cat >"$SELF_GRANT_PLAN" <<'PLAN'
 ## Files

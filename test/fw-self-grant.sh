@@ -7,6 +7,10 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/run" "$T/stubs"
 export FW_RUN="$T/run" PLAN_BODY="$T/plan.md" FG_LOG="$T/fence-grant.log"
 export FW_GH="$T/stubs/gh" FW_FENCE_GRANT="$T/stubs/fence-grant"
+# fw_self_grant picks its default --host from uname; pin it so CI's Linux runner sees the Mac.
+printf '#!/bin/sh\necho Darwin\n' >"$T/stubs/uname"
+chmod +x "$T/stubs/uname"
+export PATH="$T/stubs:$PATH"
 
 cat >"$FW_GH" <<'GH'
 #!/usr/bin/env bash
@@ -53,8 +57,8 @@ cat >"$PLAN_BODY" <<'PLAN'
 PLAN
 fw_self_grant test 1607 "$FW_RUN" 2>"$T/paths.stderr" || fail "plan with a path self-grants"
 [ -f "$FW_RUN/fiber-1607-fence-grant-1.md" ] || fail "path plan writes a grant"
-grep -q '^1607 --repo [^ ]* --paths src/main.c --dry$' "$FG_LOG" || fail "self-grant probes the path"
-grep -q '^1607 --repo [^ ]* --paths src/main.c$' "$FG_LOG" || fail "path without a line range is granted whole"
+grep -q '^1607 --host mac --repo [^ ]* --paths src/main.c --dry$' "$FG_LOG" || fail "self-grant probes the path"
+grep -q '^1607 --repo [^ ]* --host mac --paths src/main.c$' "$FG_LOG" || fail "path without a line range is granted whole"
 ! grep -q -- '--ranges' "$FG_LOG" || fail "path without a line range does not invent one"
 grep -q '^- src/main.c$' "$FW_RUN/fiber-1607-fence-grant-1.md" || fail "whole-file path is in grant Paths"
 grep -q '^Ranges: none$' "$FW_RUN/fiber-1607-fence-grant-1.md" || fail "whole-file grant has no line ranges"
@@ -64,7 +68,7 @@ rm -f "$FW_RUN/fiber-1607-fence-grant-1.md"
 : >"$FG_LOG"
 fw_self_grant test 1608 "$FW_RUN" 0 plan 2>"$T/empty.stderr" || fail "missing plan self-grants empty"
 [ -f "$FW_RUN/fiber-1608-fence-grant-1.md" ] || fail "missing plan writes an empty grant"
-grep -q '^1608 --empty$' "$FG_LOG" || fail "missing plan requests an empty grant"
+grep -q '^1608 --host mac --empty$' "$FG_LOG" || fail "missing plan requests an empty grant"
 grep -q '^Paths:$' "$FW_RUN/fiber-1608-fence-grant-1.md" || fail "empty grant uses the standard Paths block"
 grep -q '^Ranges: none$' "$FW_RUN/fiber-1608-fence-grant-1.md" || fail "empty grant uses the standard Ranges line"
 # A missing posted plan cannot grant a build fence, even with refresh-empty and an existing grant.
