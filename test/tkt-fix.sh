@@ -1133,7 +1133,9 @@ printf 'incomplete' >"$T/vermode"
 run_rc=0; out="$(bash "$TKT_VERIFY" "$S" --findings "$CDIR/findings.md" 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = "1" ] || fail "standalone incomplete verify exited $run_rc, want 1: $out $(cat "$T/stderr")"
 grep -q 'TKT tkt-verify FIX-INCOMPLETE' <<<"$out" || fail "standalone verify did not return FIX-INCOMPLETE: $out calls=$(cat "$T/calls.log")"
-[ "$(cat "$T/gh-count")" = 1 ] || fail "standalone verify made unexpected gh calls: $(cat "$T/calls.log")"
+# One PR-head read plus the PR-body read that records verify.body_hash (#2026).
+[ "$(grep -c '^gh|.*--json headRefOid' "$T/calls.log")" = 1 ] && [ "$(grep -c '^gh|.*--json body' "$T/calls.log")" = 1 ] \
+  && [ "$(cat "$T/gh-count")" = 2 ] || fail "standalone verify made unexpected gh calls: $(cat "$T/calls.log")"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.start)" = "$OLD" ] || fail "standalone verify did not record round 1 start"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.head)" = "$VERIFY_HEAD" ] || fail "standalone verify did not record round 1 head"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.findings)" = "$CDIR/findings.md" ] || fail "standalone verify did not record its input findings"
