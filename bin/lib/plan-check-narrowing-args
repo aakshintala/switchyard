@@ -1,0 +1,3 @@
+# One task-gate argument per line that narrows the project's full check script.
+--since
+--rules-by-path

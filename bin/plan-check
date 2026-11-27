@@ -7,7 +7,12 @@
 #        current directory). Callers pass --base
 #        origin/main to check against the fresh base.
 #        Reads the single-backtick tokens outside fenced blocks and the `## Gate`
-#        section. Skipped: a token with `<`, `>` or a space, a token with `*`
+#        section. Task gates may not repeat that command after environment
+#        assignments are stripped, or run the same check script without a
+#        configured narrowing argument. The full check script comes from the
+#        first command in `## Gate` (including the script path after bash or sh).
+#        Narrowing arguments live one per line in lib/plan-check-narrowing-args.
+#        Skipped: a token with `<`, `>` or a space, a token with `*`
 #        outside `## Files` (a `*` token in `## Files` is kept as a cover
 #        pattern, never reported), and `/`, `.`,
 #        `..` or a bare extension. A token with one `{a,b}` group is checked once
@@ -296,6 +301,116 @@ check_line_citations() {
   ' "$plan")
 }
 
+# strip_env_prefix COMMAND: remove leading NAME=VALUE words without evaluating them.
+strip_env_prefix() {
+  local command="$1" word name
+  while :; do
+    command="${command#"${command%%[![:space:]]*}"}"
+    [ -n "$command" ] || break
+    word="${command%%[[:space:]]*}"
+    case "$word" in
+      *=*)
+        name="${word%%=*}"
+        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || break
+        [ "$word" != "$command" ] || { command=""; break; }
+        command="${command#"$word"}"
+        ;;
+      *) break ;;
+    esac
+  done
+  command="${command#"${command%%[![:space:]]*}"}"
+  command="${command%"${command##*[![:space:]]}"}"
+  printf '%s' "$command"
+}
+
+# command_script COMMAND: identify its first command, including an interpreter's script path.
+command_script() {
+  local command="$1" first rest second
+  first="${command%%[[:space:]]*}"
+  case "$first" in
+    bash|sh)
+      rest="${command#"$first"}"
+      rest="${rest#"${rest%%[![:space:]]*}"}"
+      second="${rest%%[[:space:]]*}"
+      printf '%s %s' "$first" "$second"
+      ;;
+    *) printf '%s' "$first" ;;
+  esac
+}
+
+# has_configured_narrowing COMMAND CONFIG: true when COMMAND contains a configured option token.
+has_configured_narrowing() {
+  local command=" $1 " config="$2" option
+  while IFS= read -r option || [ -n "$option" ]; do
+    case "$option" in ''|\#*) continue ;; esac
+    case "$command" in *" $option "*) return 0 ;; esac
+  done <"$config"
+  return 1
+}
+
+# task_gate_records PLAN: emit task number, source line and Gate command from ## Tasks.
+task_gate_records() {
+  awk '
+    function trim(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    /^[[:space:]]*```/ { in_fence = !in_fence; next }
+    in_fence { next }
+    /^## / {
+      in_tasks = ($0 ~ /^## Tasks([[:space:]]|$)/)
+      next
+    }
+    !in_tasks { next }
+    {
+      text = $0
+      sub(/^[[:space:]]+/, "", text)
+      if (text ~ /^[0-9]+[.)][[:space:]]/) {
+        task = text
+        sub(/[.)].*/, "", task)
+      }
+      at = index($0, "Gate:")
+      if (at) {
+        command = trim(substr($0, at + 5))
+        if (task == "") task = "?"
+        printf "%s\t%d\t%s\n", task, NR, command
+      }
+    }
+  ' "$1"
+}
+
+# check_task_gates: refuse a task gate that repeats or reruns the plan's full gate.
+check_task_gates() {
+  local records full_gate normalized_full full_script task_no line task_command normalized_task task_script config
+  records="$(task_gate_records "$plan")"
+  [ -n "$records" ] || return 0
+  config="$script_dir/lib/plan-check-narrowing-args"
+  if [ ! -r "$config" ]; then
+    echo "plan-check: cannot read narrowing-argument config: $config" >&2
+    exit 2
+  fi
+  full_gate="$(bash "$script_dir/plan-gate" "$plan" 2>/dev/null || true)"
+  [ -n "$full_gate" ] || return 0
+  normalized_full="$(strip_env_prefix "$full_gate")"
+  full_script="$(command_script "$normalized_full")"
+  while IFS=$'\t' read -r task_no line task_command; do
+    [ -n "$task_command" ] || continue
+    if [ "${#task_command}" -ge 2 ] && [ "${task_command:0:1}" = '`' ] && [ "${task_command: -1}" = '`' ]; then
+      task_command="${task_command:1:${#task_command}-2}"
+    fi
+    normalized_task="$(strip_env_prefix "$task_command")"
+    if [ "$normalized_task" = "$normalized_full" ]; then
+      problem "task $task_no (line $line): repeats plan Gate command after environment assignments are removed: $normalized_task"
+      continue
+    fi
+    task_script="$(command_script "$normalized_task")"
+    if [ "$task_script" = "$full_script" ] && ! has_configured_narrowing "$normalized_task" "$config"; then
+      problem "task $task_no (line $line): runs the project's full check script without a configured narrowing argument: $normalized_task"
+    fi
+  done <<<"$records"
+}
+
 # handle_token KIND VALUE: the expand_token callback replacing check_token's dispatch.
 # A glob is already recorded as a cover pattern by expand_token itself.
 # Standalone symbols are collected only for the advisory completeness sweep.
@@ -407,6 +522,8 @@ while IFS= read -r symbol; do
     fi
   done <<<"$(git -C "$dir" grep -l -F -w -e "$symbol" "$rev" -- || true)"
 done <<<"$SYMBOLS"
+
+check_task_gates
 
 # The Outcome line names the ticket's end state: pr (the default when the line
 # is absent) or measurement. Any other value is a problem on its own line.
