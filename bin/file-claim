@@ -72,10 +72,10 @@ cleanup() {
 }
 trap cleanup EXIT
 new_workdir() { W="$(mktemp -d "${TMPDIR:-/tmp}/file-claim.XXXXXX")"; git init -q --bare "$W" || die 2 "cannot init temp dir"; }
-valid_path() { case "$1" in ""|*[[:space:]]*|/*|./*|../*|*/../*|*/..|..|*//*|*/|.|*/.|*/./*) return 1;; esac; }
+valid_path() { case "$1" in ""|*[[:space:]]*|/*|./*|../*|*/../*|*/..|..|*//*|.|*/.|*/./*) return 1;; esac; }
 # valid_release_path: the pre-whitespace rule (tabs and newlines only) so rows
 # already stored with a composite path stay removable.
-valid_release_path() { case "$1" in ""|*"$TAB"*|*"$NL"*|/*|./*|../*|*/../*|*/..|..|*//*|*/|.|*/.|*/./*) return 1;; esac; }
+valid_release_path() { case "$1" in ""|*"$TAB"*|*"$NL"*|/*|./*|../*|*/../*|*/..|..|*//*|.|*/.|*/./*) return 1;; esac; }
 valid_field() { case "$1" in ""|*"$TAB"*|*"$NL"*) return 1;; esac; }
 # Split tab-separated claims without IFS whitespace collapsing empty PR fields.
 parse_claim_line() {
@@ -333,6 +333,12 @@ claim_paths_overlap() {
   local rs re hs he
   request_base="$(claim_path_base "$requested")"
   held_base="$(claim_path_base "$held")"
+  if [[ "$request_base" == */ ]]; then
+    case "$held_base" in "$request_base"*) return 0;; esac
+  fi
+  if [[ "$held_base" == */ ]]; then
+    case "$request_base" in "$held_base"*) return 0;; esac
+  fi
   [ "$request_base" = "$held_base" ] || return 1
   request_range="$(claim_path_range "$requested")"
   held_range="$(claim_path_range "$held")"
