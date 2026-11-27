@@ -10,7 +10,8 @@
 #        section. Task gates may not repeat that command after environment
 #        assignments are stripped, or run the same check script without a
 #        configured narrowing argument. The full check script comes from the
-#        first command in `## Gate` (including the script path after bash or sh).
+#        first command in `## Gate`: the script path after bash or sh, or a
+#        first word holding `/`; a tool name such as cargo is no script.
 #        Narrowing arguments live one per line in lib/plan-check-narrowing-args.
 #        Skipped: a token with `<`, `>` or a space, a token with `*`
 #        outside `## Files` (a `*` token in `## Files` is kept as a cover
@@ -323,7 +324,9 @@ strip_env_prefix() {
   printf '%s' "$command"
 }
 
-# command_script COMMAND: identify its first command, including an interpreter's script path.
+# command_script COMMAND: name the check script COMMAND starts with (`bash <script>`,
+# `sh <script>`, or a path holding `/`). A tool such as `cargo` is not a script:
+# print nothing, so task gates that run the same tool are not refused.
 command_script() {
   local command="$1" first rest second
   first="${command%%[[:space:]]*}"
@@ -332,9 +335,9 @@ command_script() {
       rest="${command#"$first"}"
       rest="${rest#"${rest%%[![:space:]]*}"}"
       second="${rest%%[[:space:]]*}"
-      printf '%s %s' "$first" "$second"
+      case "$second" in ''|-*) ;; *) printf '%s %s' "$first" "$second" ;; esac
       ;;
-    *) printf '%s' "$first" ;;
+    */*) printf '%s' "$first" ;;
   esac
 }
 
@@ -343,7 +346,7 @@ has_configured_narrowing() {
   local command=" $1 " config="$2" option
   while IFS= read -r option || [ -n "$option" ]; do
     case "$option" in ''|\#*) continue ;; esac
-    case "$command" in *" $option "*) return 0 ;; esac
+    case "$command" in *" $option "* | *" $option="*) return 0 ;; esac
   done <"$config"
   return 1
 }
@@ -373,6 +376,11 @@ task_gate_records() {
       at = index($0, "Gate:")
       if (at) {
         command = trim(substr($0, at + 5))
+        # A backticked command may be followed by prose: keep only the span.
+        if (substr(command, 1, 1) == "`") {
+          end = index(substr(command, 2), "`")
+          if (end) command = substr(command, 2, end - 1)
+        }
         if (task == "") task = "?"
         printf "%s\t%d\t%s\n", task, NR, command
       }
@@ -405,7 +413,7 @@ check_task_gates() {
       continue
     fi
     task_script="$(command_script "$normalized_task")"
-    if [ "$task_script" = "$full_script" ] && ! has_configured_narrowing "$normalized_task" "$config"; then
+    if [ -n "$full_script" ] && [ "$task_script" = "$full_script" ] && ! has_configured_narrowing "$normalized_task" "$config"; then
       problem "task $task_no (line $line): runs the project's full check script without a configured narrowing argument: $normalized_task"
     fi
   done <<<"$records"

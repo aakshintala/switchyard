@@ -384,5 +384,12 @@ expect_clean "task gate uses configured --since narrowing" \
   "$(mkplan task_gate_since '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run --since abc`\n\n## Gate\n`CARGO_BUILD_JOBS=3 bash test/run`\n')"
 expect_clean "task gate uses configured --rules-by-path narrowing" \
   "$(mkplan task_gate_rules '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run --rules-by-path src/lib.rs`\n\n## Gate\n`CARGO_BUILD_JOBS=3 bash test/run`\n')"
+expect_clean "task gate uses --since=REV narrowing" \
+  "$(mkplan task_gate_since_eq '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run --since=abc`\n\n## Gate\n`bash test/run`\n')"
+expect_problems "task gate runs a path-named check script with prose after it" \
+  "$(mkplan task_gate_path '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `scripts/check --quick` (the fast mode).\n\n## Gate\n`CARGO_BUILD_JOBS=3 scripts/check`\n')" \
+  'task 1 (line 9): runs the project\x27s full check script without a configured narrowing argument: scripts/check --quick'
+expect_clean "task gate sharing a tool with a tool-only Gate is not a full-script run" \
+  "$(mkplan task_gate_tool '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `cargo nextest run -p main --test foo`\n\n## Gate\n`cargo fmt --check && cargo nextest run -p main`\n')"
 
 echo "plan-check: all cases passed"
