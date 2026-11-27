@@ -76,6 +76,10 @@ chmod +x "$T/bin/cargo"
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
 case " \$* " in
+  *" pr list "*)
+    [ ! -e "$T/gh-pr-list-fail" ] || exit 1
+    if [ -f "$T/pr-list" ]; then cat "$T/pr-list"; else printf '[]\\n'; fi
+    exit 0 ;;
   *" --json headRefOid "*) cat "$T/pr-head" 2>/dev/null; exit 0 ;;
   *" --json body "*) cat "$T/pr-body" 2>/dev/null; exit 0 ;;
   *" pr edit "*)
@@ -166,7 +170,10 @@ setup_from_job_case() {
   H="$(git -C "$WT" rev-parse HEAD)"
   printf '%s\n' "$H" >"$T/pr-head"
   : >"$T/pr-body"
-  bash "$TKT_STATE" "$S" set pr 7 || fail "from-job set PR"
+  rm -f "$T/pr-list" "$T/gh-pr-list-fail"
+  if [ "${2:-}" != "no-pr" ]; then
+    bash "$TKT_STATE" "$S" set pr 7 || fail "from-job set PR"
+  fi
   mkdir -p "$DELEGATE_JOBS_DIR"
 }
 
@@ -196,7 +203,8 @@ journal_job_gate() {
 
 expect_from_job_refusal() {
   local id="$1" check="$2"
-  run_gate --from-job "$id"
+  shift 2
+  run_gate --from-job "$id" "$@"
   [ "$RC" -ne 0 ] || fail "--from-job $check refusal exits nonzero"
   grep -Fq -- "--from-job check failed: $check" "$CDIR/stderr.txt" || fail "--from-job refusal names $check: $(cat "$CDIR/stderr.txt")"
   cmp -s "$CDIR/journal-before" "$CDIR/tkt.journal" || fail "--from-job $check refusal writes no journal lines"
@@ -1570,6 +1578,77 @@ OUT="$(bash "$SHIP" "$S" 2>"$CDIR/ship-stderr.txt")"; RC=$?
 [ "$RC" -eq 0 ] || fail "tkt-ship accepts --from-job PASS (rc=$RC): $(cat "$CDIR/ship-stderr.txt")"
 case "$(head -n 1 <<<"$OUT")" in "TKT tkt-ship MERGED "*) ;; *) fail "tkt-ship passes GATE-STALE check: $(head -n 1 <<<"$OUT")" ;; esac
 ! grep -q 'GATE-STALE' <<<"$OUT" || fail "tkt-ship does not report GATE-STALE after --from-job PASS"
+
+# --- --from-job with no state PR and no branch PR validates the local/tip head ---
+setup_from_job_case from-job-no-pr no-pr
+plant_job_record job-no-pr present 0 "$H" false
+journal_job_gate job-no-pr gate-ok
+run_gate --from-job job-no-pr
+[ "$RC" -eq 0 ] || fail "--from-job without PR PASS exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "--from-job without PR"
+! grep -q '^pr=' "$S" || fail "--from-job without PR does not add a PR to state"
+grep -q " tkt-gate from-job id=job-no-pr head=$H pr=none$" "$CDIR/tkt.journal" || fail "--from-job records that no PR head was checked"
+[ "$(tail -n 1 "$CDIR/tkt.journal" | cut -d' ' -f2-)" = "tkt-gate PASS head=$H tip=pushed" ] || fail "no-PR --from-job keeps the PASS tip format"
+
+# --- --from-job without a PR still refuses a job head different from HEAD ---
+setup_from_job_case from-job-no-pr-head no-pr
+wrong_head=0000000000000000000000000000000000000000
+plant_job_record job-no-pr-head present 0 "$wrong_head" false
+journal_job_gate job-no-pr-head gate-ok
+expect_from_job_refusal job-no-pr-head "head check failed: job head=$wrong_head worktree HEAD=$H"
+
+# --- --from-job --expect-head accepts matching evidence ---
+setup_from_job_case from-job-expect-match no-pr
+plant_job_record job-expect-match present 0 "$H" false
+journal_job_gate job-expect-match gate-ok
+run_gate --from-job job-expect-match --expect-head "$H"
+[ "$RC" -eq 0 ] || fail "--from-job --expect-head match exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "--from-job --expect-head match"
+
+# --- --from-job cannot be combined with --checks-only ---
+setup_from_job_case from-job-checks-only no-pr
+plant_job_record job-checks-only present 0 "$H" false
+journal_job_gate job-checks-only gate-ok
+run_gate --from-job job-checks-only --checks-only
+[ "$RC" -eq 2 ] || fail "--from-job --checks-only is refused with usage (rc=$RC)"
+grep -Fq 'usage: tkt-gate ' "$CDIR/stderr.txt" || fail "--from-job --checks-only refusal prints usage"
+cmp -s "$CDIR/journal-before" "$CDIR/tkt.journal" || fail "--from-job --checks-only refusal writes no journal lines"
+
+# --- --from-job --expect-head requires headAfter to match the expected SHA ---
+setup_from_job_case from-job-expect-mismatch no-pr
+wrong_head=0000000000000000000000000000000000000000
+plant_job_record job-expect-mismatch present 0 "$wrong_head" false
+journal_job_gate job-expect-mismatch gate-ok
+expect_from_job_refusal job-expect-mismatch "head check failed: job head=$wrong_head expect=$H" --expect-head "$H"
+
+# --- a branch PR is checked when state has no PR key ---
+setup_from_job_case from-job-branch-pr no-pr
+printf '[{"number":42,"headRefOid":"%s"}]\n' "$H" >"$T/pr-list"
+plant_job_record job-branch-pr present 0 "$H" false
+journal_job_gate job-branch-pr gate-ok
+run_gate --from-job job-branch-pr
+[ "$RC" -eq 0 ] || fail "--from-job branch PR match exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "--from-job branch PR match"
+
+# --- a branch PR whose head differs from the job head is refused ---
+setup_from_job_case from-job-branch-pr-head no-pr
+branch_pr_head=0000000000000000000000000000000000000001
+printf '[{"number":42,"headRefOid":"%s"}]\n' "$branch_pr_head" >"$T/pr-list"
+plant_job_record job-branch-pr-head present 0 "$H" false
+journal_job_gate job-branch-pr-head gate-ok
+expect_from_job_refusal job-branch-pr-head "head check failed: job head=$H worktree HEAD=$H PR head=$branch_pr_head"
+
+# --- a failed or malformed branch-PR lookup cannot fall through to no-PR ---
+setup_from_job_case from-job-branch-pr-failed no-pr
+touch "$T/gh-pr-list-fail"
+plant_job_record job-branch-pr-failed present 0 "$H" false
+journal_job_gate job-branch-pr-failed gate-ok
+expect_from_job_refusal job-branch-pr-failed 'PR head check failed: cannot look up branch PR'
+setup_from_job_case from-job-branch-pr-invalid no-pr
+printf 'not-json\n' >"$T/pr-list"
+plant_job_record job-branch-pr-invalid present 0 "$H" false
+journal_job_gate job-branch-pr-invalid gate-ok
+expect_from_job_refusal job-branch-pr-invalid 'PR head check failed: branch PR lookup returned invalid JSON'
 
 # --- --from-job refuses a model-reported gate result without journaling ---
 setup_from_job_case from-job-model-reported
