@@ -189,8 +189,9 @@ case "\$(cat "$T/jobmode")" in
     commit_as_job fix.txt "fix committed without pushing"
     echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   write-body-anyway)
-    run_dir="\$("$TKT_STATE" "\$state" get run)"
-    printf 'Unauthorized replacement body\n' >"\$run_dir/switchyard-529-fix-round-1-pr-body.md"
+    body_file="\$(cat "$T/write-body-file")"
+    [ -n "\$body_file" ] || exit 2
+    printf 'Unauthorized replacement body\n' >"\$body_file"
     commit_as_job fix.txt "fix committed without pushing"
     echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   done|stray-run)
@@ -2069,14 +2070,57 @@ __EXTRA__
 EOF
   bash "$TKT_STATE" "$S" set body.locked 1 >/dev/null
   printf 'write-body-anyway' >"$T/jobmode"
+  body_file="$CDIR/run/switchyard-529-fix-round-1-pr-body.md"
+  printf '%s' "$body_file" >"$T/write-body-file"
   out="$(bash "$TKT" "$S" --no-verify 2>"$T/stderr")" \
     || fail "no-body-skips-publish exited $?: $(cat "$T/stderr")"
-  body_file="$CDIR/run/switchyard-529-fix-round-1-pr-body.md"
   [ -s "$body_file" ] || fail "fixture job did not write the locked body file"
   ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "locked body file invoked gh pr edit"
   grep -Fq 'tkt-fix BODY-SKIPPED locked' "${S%.state}.journal" || fail "locked body file was not journaled as skipped"
   grep -Fq "body-skipped=locked file=$body_file" <<<"$out" || fail "locked body file is missing from the report: $out"
   ! grep -Fq 'Write the full new PR body to:' "$T/job-prompt.md" || fail "locked dispatch prompt names a body file"
+fi
+
+if want no-body-collect; then
+  setup_case no-body-collect
+  run_wrapper_death no-body-collect-wrapper
+  body_file="$CDIR/run/switchyard-529-fix-round-1-pr-body.md"
+  printf 'Unauthorized replacement body\n' >"$body_file"
+  printf '%s' "$body_file" >"$T/write-body-file"
+  : >"$T/calls.log"
+  out="$(bash "$TKT" "$S" --no-verify --collect-fix j1 --no-body 2>"$T/stderr")" \
+    || fail "no-body-collect exited $?: $(cat "$T/stderr")"
+  [ -s "$body_file" ] || fail "collect fixture body file is empty"
+  ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "collect with --no-body invoked gh pr edit"
+  grep -Fq 'tkt-fix BODY-SKIPPED locked' "${S%.state}.journal" || fail "collect with --no-body did not journal BODY-SKIPPED"
+  grep -Fq "body-skipped=locked file=$body_file" <<<"$out" || fail "collect report omitted the body file: $out"
+  [ "$(bash "$TKT_STATE" "$S" get body.locked)" = 1 ] || fail "collect with --no-body did not persist body.locked=1"
+fi
+
+if want no-body-persists; then
+  setup_case no-body-persists
+  mkdir -p "$HOME/.agents/skills/review-loop/briefs"
+  cat >"$HOME/.agents/skills/review-loop/briefs/fix.md" <<'EOF'
+Synthetic fix prompt.
+
+__EXTRA__
+EOF
+  printf 'handoff' >"$T/jobmode"
+  out="$(bash "$TKT" "$S" --no-verify --no-body 2>"$T/stderr")" \
+    || fail "no-body-persists initial run exited $?: $(cat "$T/stderr")"
+  [ "$(bash "$TKT_STATE" "$S" get body.locked)" = 1 ] || fail "initial --no-body run did not persist the lock"
+  body_file="$CDIR/run/switchyard-529-fix-round-2-pr-body.md"
+  printf '%s' "$body_file" >"$T/write-body-file"
+  printf 'write-body-anyway' >"$T/jobmode"
+  out="$(bash "$TKT" "$S" --no-verify 2>"$T/stderr")" \
+    || fail "no-body-persists follow-up exited $?: $(cat "$T/stderr")"
+  grep -Fq 'Do not run `gh pr edit`.' "$T/job-prompt.md" || fail "later locked prompt lost gh pr edit prohibition"
+  grep -Fq 'This round must not change the PR body.' "$T/job-prompt.md" || fail "later locked prompt omitted the no-body instruction"
+  ! grep -Fq 'Write the full new PR body to:' "$T/job-prompt.md" || fail "later locked prompt names a body file"
+  [ -s "$body_file" ] || fail "later job did not write the body file anyway"
+  ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "later locked run invoked gh pr edit"
+  grep -Fq 'tkt-fix BODY-SKIPPED locked' "${S%.state}.journal" || fail "later locked run did not journal BODY-SKIPPED"
+  grep -Fq "body-skipped=locked file=$body_file" <<<"$out" || fail "later locked report omitted the body file: $out"
 fi
 
 # 4. A stop-list breach after the fix passes through with the gate's verdict.
