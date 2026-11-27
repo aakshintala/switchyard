@@ -1847,6 +1847,50 @@ def state_path_from_args(args):
     return None
 
 
+def ruling_comment_answers(ticket, report):
+    """A ticket RULING comment answers by report identity, else by time."""
+    values = state_values_for(state_path_for(ticket))
+    repo = values.get("repo", "")
+    if (values.get("issue") != ticket
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)):
+        return False
+    try:
+        result = subprocess.run(
+            ["gh", "api", "--paginate", "--slurp",
+             f"repos/{repo}/issues/{ticket}/comments"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=float(os.environ.get("FW_LANECHECK_PR_VIEW_TIMEOUT", "30")))
+        if result.returncode != 0:
+            return False
+        pages = json.loads(result.stdout)
+        if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+            return False
+        comments = [comment for page in pages for comment in page]
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+        return False
+
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        body = comment.get("body")
+        if (not isinstance(body, str)
+                or not re.search(r"RULING-" + re.escape(ticket) + r"-\d+\b", body)):
+            continue
+        if report[3] in body:
+            return True
+        created = comment.get("createdAt") or comment.get("created_at")
+        if not isinstance(created, str):
+            continue
+        try:
+            stamp = datetime.datetime.fromisoformat(
+                created.replace("Z", "+00:00")).timestamp()
+        except (ValueError, OverflowError):
+            continue
+        if stamp > report[0]:
+            return True
+    return False
+
+
 def state_job_ids(ticket):
     values = state_values_for(state_path_for(ticket))
     return {value.strip() for key, value in values.items()
@@ -2431,6 +2475,8 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         else:
             unanswered = ruled.get(n, 0.0) <= rep[0] if fresh else False
             why = "no archived ruling postdates that report"
+        if fresh and rep[2] and unanswered and ruling_comment_answers(n, rep):
+            unanswered = False
         open_ask = bool(fresh and rep[2] and unanswered)
         newest_lane = newest_roster.get(n)
         planned_handoff = bool(

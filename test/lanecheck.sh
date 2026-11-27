@@ -37,6 +37,13 @@ cat > "$T/stub/gh" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$STUBD/gh.log"
 if [ -n "${GH_BOOM:-}" ]; then echo "HTTP 502" >&2; exit 1; fi
+case " $* " in
+  *" repos/example/switchyard/issues/4271/comments "*)
+    [ "${GH_COMMENTS_BOOM:-0}" != 1 ] || { echo "HTTP 502" >&2; exit 1; }
+    cat "$STUBD/issue-comments-4271" 2>/dev/null || echo '[]'
+    exit 0
+    ;;
+esac
 if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   if [ -n "${GH_VIEW_SLEEP:-}" ]; then sleep "$GH_VIEW_SLEEP"; fi
   if [ -f "$STUBD/pr-view-${3:-}" ]; then
@@ -2035,6 +2042,51 @@ if printf '%s' "$out" | grep -q '^STALL 4271' \
   ok a-claude-lanes-wake-is-sendmessage-not-delegate-session-send
 else
   fail "a-claude-lanes-wake-is-sendmessage-not-delegate-session-send ($out)"
+fi
+# Ticket comments from any role use the same report-identity/time answer rule
+# as archived rulings. The comment must be fetched only for an open ask, and a
+# failed fetch must leave that ask visible.
+askopen_state() {
+  printf 'repo=example/switchyard\nissue=4271\n' > "$1/fiber-4271.state"
+}
+write_ruling_comment() { # createdAt
+  printf '[[{"body":"RULING-4271-7: continue with the current plan.","createdAt":"%s","author":{"login":"surveyor"}}]]\n' "$1" > "$T/issue-comments-4271"
+}
+
+r=$(newrun H4); boxlane "$r" 4271 fiber-4271-build
+printf '[{"name":"fiber-4271-build","state":"working","status":"busy"}]' > "$T/cagents"
+rep "$r" 4271 'STATUS: BLOCKED on the current plan.'
+askopen_state "$r"; write_ruling_comment "$(old 5M)"; : > "$T/gh.log"
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+if [ "$grc" = 0 ] && ! printf '%s' "$out" | grep -q 'ASK-OPEN' \
+   && [ "$(grep -c 'repos/example/switchyard/issues/4271/comments' "$T/gh.log" || true)" = 1 ]; then
+  ok a-surveyor-ruling-comment-that-postdates-the-report-answers-the-ask
+else
+  fail "a-surveyor-ruling-comment-that-postdates-the-report-answers-the-ask (rc=$grc; $out; $(cat "$T/gh.log"))"
+fi
+
+r=$(newrun H5); boxlane "$r" 4271 fiber-4271-build
+printf '[{"name":"fiber-4271-build","state":"working","status":"busy"}]' > "$T/cagents"
+rep "$r" 4271 'STATUS: BLOCKED on the current plan.'
+askopen_state "$r"; write_ruling_comment "$(old 20M)"; : > "$T/gh.log"
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -q 'ASK-OPEN' \
+   && [ "$(grep -c 'repos/example/switchyard/issues/4271/comments' "$T/gh.log" || true)" = 1 ]; then
+  ok a-surveyor-ruling-comment-that-predates-the-report-does-not-answer-the-ask
+else
+  fail "a-surveyor-ruling-comment-that-predates-the-report-does-not-answer-the-ask (rc=$grc; $out; $(cat "$T/gh.log"))"
+fi
+
+r=$(newrun H6); boxlane "$r" 4271 fiber-4271-build
+printf '[{"name":"fiber-4271-build","state":"working","status":"busy"}]' > "$T/cagents"
+rep "$r" 4271 'STATUS: BLOCKED on the current plan.'
+askopen_state "$r"; write_ruling_comment "$(old 5M)"; : > "$T/gh.log"
+out=$(FW_RUN=$r GH_COMMENTS_BOOM=1 FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -q 'ASK-OPEN' \
+   && [ "$(grep -c 'repos/example/switchyard/issues/4271/comments' "$T/gh.log" || true)" = 1 ]; then
+  ok a-failed-comment-read-keeps-ask-open
+else
+  fail "a-failed-comment-read-keeps-ask-open (rc=$grc; $out; $(cat "$T/gh.log"))"
 fi
 printf '[]' > "$T/cagents"
 
