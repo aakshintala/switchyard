@@ -390,7 +390,7 @@ task_gate_records() {
 
 # check_task_gates: refuse a task gate that repeats or reruns the plan's full gate.
 check_task_gates() {
-  local records full_gate normalized_full full_script task_no line task_command normalized_task task_script config
+  local records full_gate normalized_full full_script task_no line task_command normalized_task segments segment config
   records="$(task_gate_records "$plan")"
   [ -n "$records" ] || return 0
   config="$script_dir/lib/plan-check-narrowing-args"
@@ -404,18 +404,24 @@ check_task_gates() {
   full_script="$(command_script "$normalized_full")"
   while IFS=$'\t' read -r task_no line task_command; do
     [ -n "$task_command" ] || continue
-    if [ "${#task_command}" -ge 2 ] && [ "${task_command:0:1}" = '`' ] && [ "${task_command: -1}" = '`' ]; then
-      task_command="${task_command:1:${#task_command}-2}"
-    fi
     normalized_task="$(strip_env_prefix "$task_command")"
     if [ "$normalized_task" = "$normalized_full" ]; then
       problem "task $task_no (line $line): repeats plan Gate command after environment assignments are removed: $normalized_task"
       continue
     fi
-    task_script="$(command_script "$normalized_task")"
-    if [ -n "$full_script" ] && [ "$task_script" = "$full_script" ] && ! has_configured_narrowing "$normalized_task" "$config"; then
-      problem "task $task_no (line $line): runs the project's full check script without a configured narrowing argument: $normalized_task"
-    fi
+    [ -n "$full_script" ] || continue
+    # Each command of a chain runs on its own, so each needs its own narrowing.
+    segments="${task_command//&&/$'\n'}"
+    segments="${segments//||/$'\n'}"
+    segments="${segments//;/$'\n'}"
+    segments="${segments//|/$'\n'}"
+    while IFS= read -r segment; do
+      segment="$(strip_env_prefix "$segment")"
+      [ -n "$segment" ] || continue
+      if [ "$(command_script "$segment")" = "$full_script" ] && ! has_configured_narrowing "$segment" "$config"; then
+        problem "task $task_no (line $line): runs the project's full check script without a configured narrowing argument: $segment"
+      fi
+    done <<<"$segments"
   done <<<"$records"
 }
 
