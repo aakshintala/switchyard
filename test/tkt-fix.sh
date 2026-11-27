@@ -35,7 +35,11 @@ cat >"$T/bin/git" <<EOF
 #!/usr/bin/env bash
 if [ -e "$T/log-git-pushes" ]; then
   for arg in "\$@"; do
-    if [ "\$arg" = push ]; then printf '%s\\n' "\$*" >>"$T/git-pushes.log"; break; fi
+    if [ "\$arg" = push ]; then
+      printf '%s\\n' "\$*" >>"$T/git-pushes.log"
+      printf 'git-push\\n' >>"$T/handoff-order.log"
+      break
+    fi
   done
 fi
 exec "$REAL_GIT" "\$@"
@@ -80,13 +84,35 @@ printf '0' >"$T/jobcount"
 cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
 printf 'job|%s|fix-dispatch=%s\n' "\$*" "\${TKT_FIX_DISPATCH:-unset}" >>"$T/calls.log"
-prompt_file=""; previous=""
+state="\$1"
+prompt_file=""; previous=""; template_file=""; extra_file=""
 for a in "\$@"; do
   case "\$a" in FINDINGS=@*) cp "\${a#FINDINGS=@}" "$T/job-findings.md" || exit 2;; esac
   [ "\$previous" != "--prompt" ] || prompt_file="\$a"
+  [ "\$previous" != "--template" ] || template_file="\$a"
+  case "\$a" in EXTRA=@*) extra_file="\${a#EXTRA=@}";; esac
   previous="\$a"
 done
 [ -z "\$prompt_file" ] || cp "\$prompt_file" "$T/job-prompt.md" || exit 2
+if [ "\$(cat "$T/jobmode")" = handoff ] || [ "\$(cat "$T/jobmode")" = body-write-fail ]; then
+  if [ -z "\$extra_file" ]; then
+    state_extra="\$("$TKT_STATE" "\$state" get extra 2>/dev/null || true)"
+    case "\$state_extra" in
+      @*) extra_file="\${state_extra#@}";;
+      *) printf '%s' "\$state_extra" >"$T/job-state-extra"; extra_file="$T/job-state-extra";;
+    esac
+  fi
+  [ -r "\$template_file" ] && [ -r "\$extra_file" ] || { echo 'missing fixture template or EXTRA file' >&2; exit 2; }
+  "$T/bin/fill-brief" --out "$T/job-prompt.md" "\$template_file" "EXTRA=@\$extra_file" >/dev/null || exit 2
+  body_file="\$(sed -n 's/^Write the full new PR body to: \`\\(.*\\)\`$/\\1/p' "$T/job-prompt.md" | head -n 1)"
+  if [ -n "\$body_file" ]; then
+    mkdir -p "\$(dirname "\$body_file")"
+    top=Users
+    raw_home_path="/\$top/somebody/x"
+    printf 'Full replacement body\\nHost path: %s\\n' "\$raw_home_path" >"\$body_file"
+    printf '%s' "\$raw_home_path" >"$T/raw-home-path"
+  fi
+fi
 state="\$1"
 slot=""; jobid="j1"; prev=""; gate_arg=""; gate_from_plan=0
 for a in "\$@"; do
@@ -159,6 +185,9 @@ if [ "\$(cat "$T/jobmode")" = wrapper-death ]; then
   exit 0
 fi
 case "\$(cat "$T/jobmode")" in
+  handoff|body-write-fail)
+    commit_as_job fix.txt "fix committed without pushing"
+    echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   done|stray-run)
     n="\$((\$(cat "$T/jobcount") + 1))"
     printf '%s' "\$n" >"$T/jobcount"
@@ -340,6 +369,17 @@ printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 case " \$* " in *" pr list "*)
   cat "$T/prlist"
   exit "\$(cat "$T/prlistrc")";;
+  *" pr edit "*)
+  body_file=""; previous=""
+  for arg in "\$@"; do
+    [ "\$previous" != "--body-file" ] || body_file="\$arg"
+    previous="\$arg"
+  done
+  [ -n "\$body_file" ] || { echo 'missing --body-file' >&2; exit 2; }
+  printf 'gh-pr-edit\\n' >>"$T/handoff-order.log"
+  if [ -e "$T/gh-edit-fail" ]; then echo 'fake gh: edit failed' >&2; exit 1; fi
+  cp "\$body_file" "$T/published-pr-body" || exit 2
+  exit 0;;
   *" api repos/"*"/issues/comments/"*)
   comment_id="\${2##*/}"
   [ -r "$T/comment-\$comment_id.json" ] || exit 1
@@ -1764,7 +1804,7 @@ NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
 record_test_round 1 "$NEW"
 printf 'pushed' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "verify OK exited $?"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "verify OK exited $?: $(cat "$T/stderr")"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "bad verdict: $(head -n 1 <<<"$out")"
 expect_slot fix1
 grep -q "gh-ci|" "$T/calls.log" && fail "gh-ci wait ran on a pushed head"
@@ -1909,6 +1949,78 @@ grep -F -q 'OVERLAP fix.txt lane:fiber-999' "$T/stderr" || fail "overlapping cla
 grep -q "failing: nightly" <<<"$out" || fail "failed CI jobs missing from digest"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
 
+# Fresh and resumed fix prompts own the commit/push and PR-body handoff.
+if want commit-only-handoff; then
+  setup_case commit-only-handoff
+  mkdir -p "$HOME/.agents/skills/review-loop/briefs"
+  cat >"$HOME/.agents/skills/review-loop/briefs/fix.md" <<'EOF'
+Synthetic fix prompt.
+
+__EXTRA__
+EOF
+  bash "$TKT_STATE" "$S" set extra 'Keep the existing extra instructions.' >/dev/null
+  printf 'handoff' >"$T/jobmode"
+  touch "$T/log-git-pushes"
+  : >"$T/git-pushes.log"
+  : >"$T/handoff-order.log"
+  run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" -eq 0 ] || fail "commit-only-handoff exited $run_rc: $out $(cat "$T/stderr")"
+  grep -Fq 'Commit only; do not push, do not run `gh-ci wait`, and report `ready, not pushed`.' "$T/job-prompt.md" \
+    || fail "dispatched prompt omits the commit-only instruction: $(cat "$T/job-prompt.md")"
+  grep -Fq 'Do not run `gh pr edit`.' "$T/job-prompt.md" || fail "dispatched prompt does not forbid gh pr edit"
+  grep -Fq 'Keep the existing extra instructions.' "$T/job-prompt.md" || fail "dispatch dropped state extra content"
+  body_file="$CDIR/run/switchyard-529-fix-round-1-pr-body.md"
+  grep -Fq "Write the full new PR body to: \`$body_file\`" "$T/job-prompt.md" \
+    || fail "dispatched prompt does not name the round body file"
+  grep -Fq -- "-C $WT push origin tkt-529" "$T/git-pushes.log" || fail "tkt-fix did not push the commit-only job HEAD"
+  [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "commit-only job HEAD did not reach origin"
+  [ "$(head -n 1 "$T/handoff-order.log")" = git-push ] || fail "body publish did not follow tkt-fix push: $(cat "$T/handoff-order.log")"
+  [ "$(tail -n 1 "$T/handoff-order.log")" = gh-pr-edit ] || fail "tkt-fix did not publish the body after pushing: $(cat "$T/handoff-order.log")"
+  raw_home_path="$(cat "$T/raw-home-path")"
+  ! grep -Fq "$raw_home_path" "$T/published-pr-body" || fail "published PR body contains the unredacted home path"
+  grep -Fq 'Host path: ~/x' "$T/published-pr-body" || fail "published body did not use the shared path redaction"
+  rm -f "$T/log-git-pushes"
+
+  setup_case commit-only-no-body
+  touch "$T/log-git-pushes"
+  : >"$T/handoff-order.log"
+  out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "commit-only-no-body exited $?: $(cat "$T/stderr")"
+  ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "missing body file invoked gh pr edit"
+  [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "no-body round did not push"
+  rm -f "$T/log-git-pushes"
+
+  setup_case commit-only-resume
+  printf 'Resume context.\n' >"$CDIR/prompt.md"
+  out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" \
+    || fail "commit-only-resume exited $?: $(cat "$T/stderr")"
+  grep -Fq 'Commit only; do not push, do not run `gh-ci wait`, and report `ready, not pushed`.' "$T/job-prompt.md" \
+    || fail "resume prompt omits the commit-only instruction: $(cat "$T/job-prompt.md")"
+  grep -Fq 'Do not run `gh pr edit`.' "$T/job-prompt.md" || fail "resume prompt does not forbid gh pr edit"
+  grep -Fq "Write the full new PR body to: \`$CDIR/run/switchyard-529-fix-round-1-pr-body.md\`" "$T/job-prompt.md" \
+    || fail "resume prompt does not name the round body file"
+
+  setup_case commit-only-edit-fail
+  mkdir -p "$HOME/.agents/skills/review-loop/briefs"
+  cat >"$HOME/.agents/skills/review-loop/briefs/fix.md" <<'EOF'
+Synthetic fix prompt.
+
+__EXTRA__
+EOF
+  printf 'body-write-fail' >"$T/jobmode"
+  : >"$T/handoff-order.log"
+  : >"$T/git-pushes.log"
+  touch "$T/log-git-pushes" "$T/gh-edit-fail"
+  run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" -eq 0 ] || fail "failed PR body edit changed successful tkt-fix status ($run_rc): $out $(cat "$T/stderr")"
+  grep -Fq 'tkt-fix: warning: cannot update PR 7 body; leaving it unchanged' "$T/stderr" \
+    || fail "failed PR body edit did not warn: $(cat "$T/stderr")"
+  [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$(git -C "$WT" rev-parse HEAD)" ] \
+    || fail "failed PR body edit undid the push"
+  [ "$(head -n 1 "$T/handoff-order.log")" = git-push ] || fail "failed body edit preceded the push"
+  [ "$(tail -n 1 "$T/handoff-order.log")" = gh-pr-edit ] || fail "failed body edit was not attempted after the push"
+  rm -f "$T/log-git-pushes" "$T/gh-edit-fail"
+fi
+
 # 4. A stop-list breach after the fix passes through with the gate's verdict.
 setup_case fence
 printf 'stop-list' >"$T/jobmode"
@@ -1938,7 +2050,10 @@ grep -q "gh-ci|" "$T/calls.log" && fail "push ran after ASK"
 setup_case resume
 printf 'resume brief\n' >"$CDIR/prompt.md"
 out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "resume exited $?"
-grep -q "job|.*--resume j9.*--prompt $CDIR/prompt.md.*--gate-from-plan" "$T/calls.log" || fail "resume args not forwarded with --gate-from-plan"
+resume_call="$(grep '^job|' "$T/calls.log" | head -n 1)"
+[[ "$resume_call" == *"--resume j9"* && "$resume_call" == *"--prompt $T/tmp/tkt-fix."* \
+  && "$resume_call" == *"/resume-prompt.md"* && "$resume_call" == *"--gate-from-plan"* ]] \
+  || fail "resume args not forwarded with --gate-from-plan: $resume_call"
 grep -q 'job|.*--model' "$T/calls.log" && fail "resume without --fix-model passed a model"
 
 # A fresh --prompt is appended to the findings value delivered to tkt-job.
@@ -2101,7 +2216,11 @@ if want RESUME-MODEL; then
 setup_case resume-model
 printf 'resume brief\n' >"$CDIR/prompt.md"
 out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" --fix-model requested-model 2>"$T/stderr")" || fail "resume-model exited $?"
-grep -q "job|.*--resume j9.*--prompt $CDIR/prompt.md.*--model requested-model.*--gate-from-plan" "$T/calls.log" || fail "resume-model did not forward --fix-model to tkt-job: $(cat "$T/calls.log")"
+resume_call="$(grep '^job|' "$T/calls.log" | head -n 1)"
+[[ "$resume_call" == *"--resume j9"* && "$resume_call" == *"--prompt $T/tmp/tkt-fix."* \
+  && "$resume_call" == *"/resume-prompt.md"* && "$resume_call" == *"--model requested-model"* \
+  && "$resume_call" == *"--gate-from-plan"* ]] \
+  || fail "resume-model did not forward the fix model and generated prompt: $resume_call"
 fi
 
 # A backend switch refusal keeps delegate's message and points to a fresh fix job.
@@ -2529,7 +2648,10 @@ bash "$TKT_STATE" "$S" add fence fix.txt >/dev/null
 bash "$TKT_STATE" "$S" set env 'FOO=1 BAR=2' >/dev/null
 printf 'resume brief\n' >"$CDIR/prompt.md"
 out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "takeover resume exited $? (stderr: $(cat "$T/stderr"))"
-grep -F -q -- "--resume j9 --prompt $CDIR/prompt.md --gate FOO=1 BAR=2 bash test/run && bash bin/check-pack" "$T/calls.log" || fail "takeover resume did not pass the stored gate directly with state env"
+resume_call="$(grep '^job|' "$T/calls.log" | head -n 1)"
+[[ "$resume_call" == *"--resume j9"* && "$resume_call" == *"--prompt $T/tmp/tkt-fix."* \
+  && "$resume_call" == *"/resume-prompt.md"* && "$resume_call" == *"--gate FOO=1 BAR=2 bash test/run && bash bin/check-pack"* ]] \
+  || fail "takeover resume did not pass the stored gate with its generated prompt: $resume_call"
 grep -q 'job|.*--gate-from-plan' "$T/calls.log" && fail "takeover resume requested a nonexistent plan gate"
 
 # Ordinary states without a plan, bare takeover values, and takeover without a

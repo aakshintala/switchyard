@@ -119,6 +119,13 @@ if [ ! -r "$local_gate_body_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$local_gate_body_lib"
+pr_body_lib="$script_dir/lib/pr-body.sh"
+if [ ! -r "$pr_body_lib" ]; then
+  echo "tkt-gate: cannot read shared lib: $pr_body_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$pr_body_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 plangate="$bin_dir/plan-gate"
 
@@ -688,13 +695,9 @@ if [ "$checks_only" -eq 0 ] && gate_pr="$(tkt get pr 2>/dev/null)"; then
       new_body="$(tkt_local_gate_body_insert "$pr_body" "$gate_line" "$attr" "$attr_mode")"
     fi
     tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-gate-body.XXXXXX")"
-    tmp_redacted="$(mktemp "${TMPDIR:-/tmp}/tkt-gate-redacted.XXXXXX")"
     printf '%s\n' "$new_body" >"$tmp_body"
-    if ! "$script_dir/lib/redact-paths" <"$tmp_body" >"$tmp_redacted" \
-      || ! gh pr edit "$gate_pr" --repo "$gate_pr_repo" --body-file "$tmp_redacted" 2>/dev/null; then
-      echo "tkt-gate: warning: cannot update PR $gate_pr body; leaving it unchanged" >&2
-    fi
-    rm -f "$tmp_body" "$tmp_redacted"
+    tkt_publish_pr_body_file "$tmp_body" "$gate_pr" "$gate_pr_repo" tkt-gate || true
+    rm -f "$tmp_body"
   else
     echo "tkt-gate: warning: cannot read PR $gate_pr body; leaving it unchanged" >&2
   fi
