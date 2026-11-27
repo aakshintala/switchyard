@@ -416,6 +416,11 @@ check_task_gates() {
     segments="${segments//;/$'\n'}"
     segments="${segments//|/$'\n'}"
     while IFS= read -r segment; do
+      # A subshell or brace group runs the command inside it: unwrap it.
+      segment="${segment#"${segment%%[![:space:]]*}"}"
+      segment="${segment#[(\{]}"
+      segment="${segment%"${segment##*[![:space:]]}"}"
+      segment="${segment%[)\}]}"
       segment="$(strip_env_prefix "$segment")"
       [ -n "$segment" ] || continue
       if [ "$(command_script "$segment")" = "$full_script" ] && ! has_configured_narrowing "$segment" "$config"; then
