@@ -94,7 +94,7 @@ for a in "\$@"; do
   previous="\$a"
 done
 [ -z "\$prompt_file" ] || cp "\$prompt_file" "$T/job-prompt.md" || exit 2
-if [ "\$(cat "$T/jobmode")" = handoff ] || [ "\$(cat "$T/jobmode")" = body-write-fail ]; then
+if [ "\$(cat "$T/jobmode")" = handoff ] || [ "\$(cat "$T/jobmode")" = body-write-fail ] || [ "\$(cat "$T/jobmode")" = write-body-anyway ]; then
   if [ -z "\$extra_file" ]; then
     state_extra="\$("$TKT_STATE" "\$state" get extra 2>/dev/null || true)"
     case "\$state_extra" in
@@ -2030,6 +2030,13 @@ fi
 # A round can lock the PR body from dispatch or from state, including resumes.
 if want no-body-dispatch; then
   setup_case no-body-dispatch
+  mkdir -p "$HOME/.agents/skills/review-loop/briefs"
+  cat >"$HOME/.agents/skills/review-loop/briefs/fix.md" <<'EOF'
+Synthetic fix prompt.
+
+__EXTRA__
+EOF
+  printf 'handoff' >"$T/jobmode"
   run_rc=0; out="$(bash "$TKT" "$S" --no-verify --no-body 2>"$T/stderr")" || run_rc=$?
   [ "$run_rc" -eq 0 ] || fail "no-body-dispatch exited $run_rc: $out $(cat "$T/stderr")"
   grep -Fq 'Do not run `gh pr edit`.' "$T/job-prompt.md" || fail "locked dispatch lost the gh pr edit prohibition"
@@ -2054,6 +2061,12 @@ fi
 
 if want no-body-skips-publish; then
   setup_case no-body-skips-publish
+  mkdir -p "$HOME/.agents/skills/review-loop/briefs"
+  cat >"$HOME/.agents/skills/review-loop/briefs/fix.md" <<'EOF'
+Synthetic fix prompt.
+
+__EXTRA__
+EOF
   bash "$TKT_STATE" "$S" set body.locked 1 >/dev/null
   printf 'write-body-anyway' >"$T/jobmode"
   out="$(bash "$TKT" "$S" --no-verify 2>"$T/stderr")" \
