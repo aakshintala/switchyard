@@ -855,7 +855,7 @@ fi
 # every axis this round routes nowhere, whatever the counts say.
 missing=""
 for ax in standards spec overbuild; do
-  grep -qE "^VERDICT $ax: (APPROVE|CHANGES)$" <<<"$collect_out" || missing="${missing:+$missing }$ax"
+  grep -qE "^VERDICT $ax: (APPROVE|CHANGES)\.?$" <<<"$collect_out" || missing="${missing:+$missing }$ax"
 done
 if [ -n "$missing" ]; then
   n=0; for ax in standards spec overbuild; do
