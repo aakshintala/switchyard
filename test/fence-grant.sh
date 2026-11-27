@@ -11,8 +11,10 @@ fail() {
 }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-fence-grant.XXXXXX")"
-# fence-grant names the running host from `uname -s`; pin it to the Mac so the
-# suite reads the same on CI's Linux runner. A case sets TEST_UNAME to differ.
+# fence-grant names the running host from `uname -s`; its grant calls pin it to
+# the Mac so the suite reads the same on CI's Linux runner. A case sets
+# TEST_UNAME to differ. The pin stays off the file-wide PATH: lanecheck and the
+# other tools here pick their date/stat and local-box branches from uname.
 mkdir -p "$T/uname-pin"
 cat >"$T/uname-pin/uname" <<'UNAME_PIN_STUB'
 #!/usr/bin/env bash
@@ -20,7 +22,7 @@ cat >"$T/uname-pin/uname" <<'UNAME_PIN_STUB'
 exec /usr/bin/uname "$@"
 UNAME_PIN_STUB
 chmod +x "$T/uname-pin/uname"
-PATH="$T/uname-pin:$PATH"
+UNAME_PIN="$T/uname-pin"
 ORIGINAL_PATH=$PATH
 export T
 PI_PID=""
@@ -394,9 +396,9 @@ run_fg() {
     case "$arg" in --host|--host=*) add_host=0;; esac
   done
   if [ "$add_host" -eq 1 ]; then
-    bash "$FG" "$@" --host mac >"$T/out" 2>"$T/err"
+    PATH="$UNAME_PIN:$PATH" bash "$FG" "$@" --host mac >"$T/out" 2>"$T/err"
   else
-    bash "$FG" "$@" >"$T/out" 2>"$T/err"
+    PATH="$UNAME_PIN:$PATH" bash "$FG" "$@" >"$T/out" 2>"$T/err"
   fi
   RC=$?
 }
@@ -974,7 +976,7 @@ cp "$(dirname "$FG")/lib/ticket-state.sh" "$T/realbin/lib/ticket-state.sh"
 cp "$T/stubs/file-claim" "$T/realbin/file-claim"
 cp "$(dirname "$FG")/fw-sess-lanes" "$T/realbin/fw-sess-lanes"
 ln -sf ../realbin/fence-grant "$T/linkbin/fence-grant"
-(unset FW_FILE_CLAIM; bash "$T/linkbin/fence-grant" 77 --paths docs/tui.md --dry --host mac >"$T/out" 2>"$T/err"); RC=$?
+(unset FW_FILE_CLAIM; PATH="$UNAME_PIN:$PATH" bash "$T/linkbin/fence-grant" 77 --paths docs/tui.md --dry --host mac >"$T/out" 2>"$T/err"); RC=$?
 assert_rc 0 'symlinked caller finds file-claim'
 grep -q '^list' "$T/file-claim.log" || fail "symlinked caller: file-claim not called; log=$(cat "$T/file-claim.log")"
 
@@ -2697,7 +2699,7 @@ chmod +x "$HOST_BIN"/* "$DEFAULT_HOME/.local/bin/delegate"
 ) || exit 1
 
 # Empty self-grants keep the standard file layout and satisfy phase checks.
-FW_RUN="$T/run" bash "$FG" 9876 --empty --host mac >"$T/empty.out" 2>"$T/empty.err"
+FW_RUN="$T/run" PATH="$UNAME_PIN:$PATH" bash "$FG" 9876 --empty --host mac >"$T/empty.out" 2>"$T/empty.err"
 empty_grant="$T/run/fiber-9876-fence-grant-1.md"
 [ -f "$empty_grant" ] || fail 'empty grant writer creates the standard grant file'
 grep -q '^Paths:$' "$empty_grant" || fail 'empty grant has a Paths block'
