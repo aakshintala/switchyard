@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# tkt-gate: pre-push checks and the gate on the remote tip, or validates a
+# tkt-gate: pre-push checks and the gate on the local branch tip, or validates a
 # delegate job's gate evidence after the stored-head, fetch, tip, fence and
-# history checks. The normal path checks origin/<branch> (and --expect-head),
-# checks git diff --name-only --no-renames origin/main...HEAD against the plan's
-# Files or the state's fence list, then runs the plan gate. From-job evidence
-# uses cmd64=/env64= jq base64 fields and requires the newest job's own journal
+# history checks. The normal path passes when origin/<branch> is missing or an
+# ancestor of HEAD (and checks --expect-head against HEAD), checks git diff
+# --name-only --no-renames origin/main...HEAD against the plan's Files or the
+# state's fence list, then runs the plan gate. From-job evidence uses
+# cmd64=/env64= jq base64 fields and requires the newest job's own journal
 # line before sharing the normal head update and PASS path.
 # For takeovers, the gate comes from state key `gate` when the plan value is
 # `takeover <ref>`, and the file fence comes from the state's `fence` list.
@@ -311,23 +312,34 @@ git -C "$worktree" fetch origin >/dev/null 2>&1 || {
 hist=""
 digest=""
 
-# Tip: origin/<branch> equals the local HEAD, and equals --expect-head.
+# Tip: origin/<branch> is missing or an ancestor of the local HEAD. The
+# --expect-head guard always compares against the local HEAD.
 local_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
   echo "tkt-gate: cannot read worktree HEAD: $worktree" >&2
   exit 2
 }
 remote_head="$(git -C "$worktree" rev-parse --verify "origin/$branch" 2>/dev/null || true)"
+tip_case=""
 tip_detail=""
 if [ -z "$remote_head" ]; then
-  tip_detail="origin/$branch missing head=$local_head"
-elif [ "$remote_head" != "$local_head" ]; then
-  tip_detail="origin/$branch=$remote_head head=$local_head"
-elif [ -n "$expect_head" ] && [ "$remote_head" != "$expect_head" ]; then
-  tip_detail="origin/$branch=$remote_head expect=$expect_head head=$local_head"
+  tip_case="new-branch"
+elif [ "$remote_head" = "$local_head" ]; then
+  tip_case="pushed"
+elif git -C "$worktree" merge-base --is-ancestor "$remote_head" "$local_head" >/dev/null 2>&1; then
+  tip_case="local-ahead"
+elif git -C "$worktree" merge-base --is-ancestor "$local_head" "$remote_head" >/dev/null 2>&1; then
+  tip_case="remote-ahead"
+  tip_detail="origin/$branch=$remote_head is ahead of head=$local_head"
+else
+  tip_case="diverged"
+  tip_detail="origin/$branch=$remote_head diverged from head=$local_head"
+fi
+if [ -n "$expect_head" ] && [ "$expect_head" != "$local_head" ]; then
+  tip_detail="${tip_detail}${tip_detail:+; }expect=$expect_head does not equal head=$local_head"
 fi
 if [ -n "$tip_detail" ]; then
   digest="$tip_detail"
-  emit "TIP $tip_detail" 1
+  emit "TIP $tip_detail" 1 "tip=$tip_case"
 fi
 
 # Coverage: every changed path is checked against Files or the fence list.
@@ -603,7 +615,7 @@ if [ "$checks_only" -eq 0 ]; then
   gatelog="$(mktemp "$run/$namebase-tkt-gate-XXXXXX")"
   mv "$gatelog" "$gatelog.log"
   gatelog="$gatelog.log"
-  write_gate_script "$script" "$gatelog" "$env_prefix" "$gate_cmd" "tkt-gate: the pre-push gate on the remote tip"
+  write_gate_script "$script" "$gatelog" "$env_prefix" "$gate_cmd" "tkt-gate: the pre-push gate on the local tip"
   rc=0
   (cd "$worktree" && bash "$script") >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -666,6 +678,6 @@ if [ -n "$from_job" ]; then
   tkt journal "tkt-gate from-job id=$from_job_id head=$from_job_head"
 fi
 if [ "$checks_only" -eq 1 ]; then
-  emit "PASS head=$local_head" 0 checks-only
+  emit "PASS head=$local_head" 0 "checks-only tip=$tip_case"
 fi
-emit "PASS head=$local_head" 0
+emit "PASS head=$local_head" 0 "tip=$tip_case"

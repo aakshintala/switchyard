@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for bin/tkt-gate: pre-push checks and the gate on the remote tip.
+# Tests for bin/tkt-gate: pre-push checks and the gate on the local tip.
 # A stub plan-gate on a temp TKT_BIN prints the canned gate command; stub gate
 # commands live there too. Real git on throwaway repos with a bare origin.
 # Tests set HOME and TMPDIR to a temp dir and never read $HOME/.agents.
@@ -228,6 +228,17 @@ expect_stop_list_path() {
   [ ! -f "$T/gate-ran" ] || fail "stop-list refusal runs no gate"
 }
 
+# --- PASS: a new branch can be gated before its first push ---
+setup_case tip-new-branch
+write_plan
+commit_file base.txt "base changed"
+H="$(git -C "$WT" rev-parse HEAD)"
+run_gate --expect-head "$H"
+[ "$RC" -eq 0 ] || fail "new-branch PASS exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "new-branch PASS"
+grep -Eq "tkt-gate PASS head=$H tip=new-branch$" "$CDIR/tkt.journal" || fail "new-branch PASS journals its tip case"
+[ -f "$T/gate-ran" ] || fail "new-branch PASS runs the gate"
+
 # --- PASS: tip matches, the fence covers the change, the gate passes ---
 setup_case pass
 write_plan
@@ -243,7 +254,7 @@ grep -qx "gate=PASS" <<<"$OUT" || fail "PASS digest names the gate result"
 [ -f "$T/gate-ran" ] || fail "PASS runs the gate"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$H" ] || fail "PASS sets state head"
 grep -q "tkt-gate PASS" "$CDIR/tkt.journal" || fail "PASS journals the verdict"
-grep -Eq "tkt-gate PASS head=$H$" "$CDIR/tkt.journal" || fail "PASS journals a plain full-gate verdict"
+grep -Eq "tkt-gate PASS head=$H tip=pushed$" "$CDIR/tkt.journal" || fail "PASS journals the pushed tip case"
 ! grep -q "tkt-gate PASS head=$H checks-only" "$CDIR/tkt.journal" || fail "PASS is not marked checks-only"
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "PASS writes its log file"
@@ -321,28 +332,45 @@ log2="$(first_line)"; log2="${log2##*log=}"
 [ "$log1" != "$log2" ] || fail "reruns keep two logs"
 [ -f "$log1" ] && [ -f "$log2" ] || fail "both rerun logs exist"
 
-# --- TIP: a local commit the origin never saw runs no gate ---
-setup_case tip-unpushed
+# --- PASS: a local-ahead branch can be gated before its latest push ---
+setup_case tip-local-ahead
 write_plan
-commit_file base.txt "base changed"
-run_gate
-[ "$RC" -eq 1 ] || fail "TIP exits 1"
-expect_verdict "TKT tkt-gate TIP * log=*" "TIP"
-grep -q "missing" <<<"$OUT" || fail "TIP names the missing ref"
-[ ! -f "$T/gate-ran" ] || fail "TIP runs no gate"
-
-# --- TIP: the origin is behind the local HEAD, even with --expect-head=HEAD ---
-setup_case tip-behind
-write_plan
-commit_file base.txt "base changed"
+commit_file base.txt "first local commit"
 push_branch
 commit_file base.txt "one more"
 H="$(git -C "$WT" rev-parse HEAD)"
 run_gate --expect-head "$H"
-[ "$RC" -eq 1 ] || fail "behind TIP exits 1"
-expect_verdict "TKT tkt-gate TIP * log=*" "behind TIP"
-grep -q "origin/tkt-517" <<<"$OUT" || fail "behind TIP names the remote ref"
-[ ! -f "$T/gate-ran" ] || fail "behind TIP runs no gate"
+[ "$RC" -eq 0 ] || fail "local-ahead PASS exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "local-ahead PASS"
+grep -Eq "tkt-gate PASS head=$H tip=local-ahead$" "$CDIR/tkt.journal" || fail "local-ahead PASS journals its tip case"
+[ -f "$T/gate-ran" ] || fail "local-ahead PASS runs the gate"
+
+# --- TIP: the remote tip is ahead of the local HEAD ---
+setup_case tip-remote-ahead
+write_plan
+commit_file base.txt "pushed commit"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" reset -q --hard HEAD^
+run_gate
+[ "$RC" -eq 1 ] || fail "remote-ahead TIP exits 1"
+expect_verdict "TKT tkt-gate TIP * log=*" "remote-ahead TIP"
+grep -q "remote-ahead" <<<"$OUT" || fail "remote-ahead TIP names the relation"
+[ ! -f "$T/gate-ran" ] || fail "remote-ahead TIP runs no gate"
+
+# --- TIP: local and remote tips have diverged ---
+setup_case tip-diverged
+write_plan
+commit_file base.txt "remote-side commit"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" reset -q --hard HEAD^
+commit_file base.txt "local-side commit"
+run_gate
+[ "$RC" -eq 1 ] || fail "diverged TIP exits 1"
+expect_verdict "TKT tkt-gate TIP * log=*" "diverged TIP"
+grep -q "diverged" <<<"$OUT" || fail "diverged TIP names the relation"
+[ ! -f "$T/gate-ran" ] || fail "diverged TIP runs no gate"
 
 # --- TIP: origin matches --expect-head but not the local HEAD ---
 setup_case tip-expect-stale
@@ -709,7 +737,7 @@ run_gate --checks-only
 [ "$RC" -eq 0 ] || fail "--checks-only exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-gate PASS head=$H log=*" "--checks-only"
 grep -qx "gate=skipped" <<<"$OUT" || fail "--checks-only digest marks the gate skipped"
-grep -Eq "tkt-gate PASS head=$H checks-only$" "$CDIR/tkt.journal" || fail "--checks-only journals its distinct verdict"
+grep -Eq "tkt-gate PASS head=$H checks-only tip=pushed$" "$CDIR/tkt.journal" || fail "--checks-only journals its distinct verdict and tip case"
 ! grep -Eq "tkt-gate PASS head=$H$" "$CDIR/tkt.journal" || fail "--checks-only does not journal a full-gate verdict"
 [ ! -f "$T/gate-ran" ] || fail "--checks-only runs no gate"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$H" ] || fail "--checks-only sets state head"
@@ -1537,7 +1565,7 @@ expect_verdict "TKT tkt-gate PASS head=$H log=*" "--from-job PASS"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$H" ] || fail "--from-job PASS sets state head"
 grep -q " tkt-gate from-job id=job-from-job head=$H$" "$CDIR/tkt.journal" || fail "--from-job records its source"
 [ "$(tail -n 2 "$CDIR/tkt.journal" | head -n 1 | cut -d' ' -f2-)" = "tkt-gate from-job id=job-from-job head=$H" ] || fail "source line immediately precedes PASS"
-[ "$(tail -n 1 "$CDIR/tkt.journal" | cut -d' ' -f2-)" = "tkt-gate PASS head=$H" ] || fail "--from-job keeps the plain PASS journal line"
+[ "$(tail -n 1 "$CDIR/tkt.journal" | cut -d' ' -f2-)" = "tkt-gate PASS head=$H tip=pushed" ] || fail "--from-job journals the pushed tip case"
 OUT="$(bash "$SHIP" "$S" 2>"$CDIR/ship-stderr.txt")"; RC=$?
 [ "$RC" -eq 0 ] || fail "tkt-ship accepts --from-job PASS (rc=$RC): $(cat "$CDIR/ship-stderr.txt")"
 case "$(head -n 1 <<<"$OUT")" in "TKT tkt-ship MERGED "*) ;; *) fail "tkt-ship passes GATE-STALE check: $(head -n 1 <<<"$OUT")" ;; esac
@@ -1660,17 +1688,33 @@ grep -qx "outside.txt" <<<"$OUT" || fail "--from-job reports outside.txt"
 grep -q 'tkt-gate PASS head=' "$CDIR/tkt.journal" || fail "--from-job outside-plan report journals PASS"
 ! [ -f "$T/gate-ran" ] || fail "--from-job validates stored gate evidence without rerunning the gate"
 
-# --- --from-job refuses an unpushed tip even when the delegate head matches ---
-setup_from_job_case from-job-unpushed
+# --- --from-job passes an unpushed local-ahead tip and journals the case ---
+setup_from_job_case from-job-local-ahead
 commit_file base.txt "unpushed change"
 H="$(git -C "$WT" rev-parse HEAD)"
 printf '%s\n' "$H" >"$T/pr-head"
-plant_job_record job-unpushed present 0 "$H" false
-journal_job_gate job-unpushed gate-ok
-run_gate --from-job job-unpushed
-[ "$RC" -eq 1 ] || fail "--from-job unpushed tip refusal exits 1"
-expect_verdict "TKT tkt-gate TIP * log=*" "--from-job unpushed tip"
-! grep -q 'tkt-gate PASS head=' "$CDIR/tkt.journal" || fail "--from-job unpushed tip refusal journals no PASS"
+plant_job_record job-local-ahead present 0 "$H" false
+journal_job_gate job-local-ahead gate-ok
+run_gate --from-job job-local-ahead
+[ "$RC" -eq 0 ] || fail "--from-job local-ahead PASS exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "--from-job local-ahead"
+grep -Eq "tkt-gate PASS head=$H tip=local-ahead$" "$CDIR/tkt.journal" || fail "--from-job local-ahead journals its tip case"
+! [ -f "$T/gate-ran" ] || fail "--from-job validates stored gate evidence without rerunning the gate"
+
+# --- --from-job refuses a remote-ahead tip before accepting job evidence ---
+setup_from_job_case from-job-remote-ahead
+H="$(git -C "$WT" rev-parse HEAD)"
+commit_file base.txt "remote-ahead commit"
+push_branch
+git -C "$WT" reset -q --hard "$H"
+printf '%s\n' "$H" >"$T/pr-head"
+plant_job_record job-remote-ahead present 0 "$H" false
+journal_job_gate job-remote-ahead gate-ok
+run_gate --from-job job-remote-ahead
+[ "$RC" -eq 1 ] || fail "--from-job remote-ahead TIP exits 1"
+expect_verdict "TKT tkt-gate TIP * log=*" "--from-job remote-ahead TIP"
+! grep -q 'tkt-gate PASS head=' "$CDIR/tkt.journal" || fail "--from-job remote-ahead refusal journals no PASS"
+! [ -f "$T/gate-ran" ] || fail "--from-job remote-ahead refusal runs no gate"
 
 # --- newest resumed job's own explicit gate line overrides the dispatch line ---
 setup_from_job_case from-job-resumed-explicit-gate
@@ -1714,7 +1758,7 @@ journal_job_gate job-new gate-ok
 run_gate --from-job job-old
 [ "$RC" -eq 0 ] || fail "--from-job follows supersededBy (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q " tkt-gate from-job id=job-new head=$H$" "$CDIR/tkt.journal" || fail "--from-job marks the newest job id"
-[ "$(tail -n 1 "$CDIR/tkt.journal" | cut -d' ' -f2-)" = "tkt-gate PASS head=$H" ] || fail "superseded job retains the plain PASS line"
+[ "$(tail -n 1 "$CDIR/tkt.journal" | cut -d' ' -f2-)" = "tkt-gate PASS head=$H tip=pushed" ] || fail "superseded job journals the pushed tip case"
 
 # --- PASS with only body_has set lands above the attribution, which stays last ---
 setup_case gate-body-has
