@@ -396,5 +396,11 @@ expect_problems "chained task gate: an unnarrowed segment after a narrowed one i
   'task 1 (line 9): runs the project\x27s full check script without a configured narrowing argument: bash test/run'
 expect_clean "chained task gate: every segment narrowed or another command" \
   "$(mkplan task_gate_chain_ok '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run --since abc; bash test/plan-check.sh | tail -1`\n\n## Gate\n`bash test/run`\n')"
+expect_problems "subshell-wrapped task gate is refused" \
+  "$(mkplan task_gate_paren '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `(bash test/run)`\n\n## Gate\n`bash test/run`\n')" \
+  'task 1 (line 9): runs the project\x27s full check script without a configured narrowing argument: bash test/run'
+expect_problems "brace-group task gate is refused" \
+  "$(mkplan task_gate_brace '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `{ bash test/run; }`\n\n## Gate\n`bash test/run`\n')" \
+  'task 1 (line 9): runs the project\x27s full check script without a configured narrowing argument: bash test/run'
 
 echo "plan-check: all cases passed"
