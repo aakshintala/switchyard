@@ -88,4 +88,6 @@ After round 2, no further round runs without a fresh grant; each accepted grant 
 
   A second round-2 stop on the same ticket parks it, whatever the earlier ruling.
 
+If a ruling orders a full re-review, run `tkt-build <state> --from review --ruling <comment id>`; it validates the ticket comment and starts a fresh full review at the current head.
+
 When you answer findings yourself, follow "Answering the findings" in `code-review`. A commit `ci-triage` makes re-enters at step 3 on the same counter, with the CI failure it answers written into the findings file. A commit that only adds tests, such as one that kills a CI-reported mutant, skips step 3, and ships with `--unverified-fixes` and that failure in the findings file.
