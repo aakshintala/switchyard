@@ -94,7 +94,7 @@ for a in "\$@"; do
   previous="\$a"
 done
 [ -z "\$prompt_file" ] || cp "\$prompt_file" "$T/job-prompt.md" || exit 2
-if [ "\$(cat "$T/jobmode")" = handoff ] || [ "\$(cat "$T/jobmode")" = body-write-fail ]; then
+if [ "\$(cat "$T/jobmode")" = handoff ] || [ "\$(cat "$T/jobmode")" = body-write-fail ] || [ "\$(cat "$T/jobmode")" = write-body-anyway ]; then
   if [ -z "\$extra_file" ]; then
     state_extra="\$("$TKT_STATE" "\$state" get extra 2>/dev/null || true)"
     case "\$state_extra" in
@@ -186,6 +186,12 @@ if [ "\$(cat "$T/jobmode")" = wrapper-death ]; then
 fi
 case "\$(cat "$T/jobmode")" in
   handoff|body-write-fail)
+    commit_as_job fix.txt "fix committed without pushing"
+    echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
+  write-body-anyway)
+    body_file="\$(cat "$T/write-body-file")"
+    [ -n "\$body_file" ] || exit 2
+    printf 'Unauthorized replacement body\n' >"\$body_file"
     commit_as_job fix.txt "fix committed without pushing"
     echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   done|stray-run)
@@ -1173,7 +1179,9 @@ printf 'incomplete' >"$T/vermode"
 run_rc=0; out="$(bash "$TKT_VERIFY" "$S" --findings "$CDIR/findings.md" 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = "1" ] || fail "standalone incomplete verify exited $run_rc, want 1: $out $(cat "$T/stderr")"
 grep -q 'TKT tkt-verify FIX-INCOMPLETE' <<<"$out" || fail "standalone verify did not return FIX-INCOMPLETE: $out calls=$(cat "$T/calls.log")"
-[ "$(cat "$T/gh-count")" = 1 ] || fail "standalone verify made unexpected gh calls: $(cat "$T/calls.log")"
+# One PR-head read plus the PR-body read that records verify.body_hash (#2026).
+[ "$(grep -c '^gh|.*--json headRefOid' "$T/calls.log")" = 1 ] && [ "$(grep -c '^gh|.*--json body' "$T/calls.log")" = 1 ] \
+  && [ "$(cat "$T/gh-count")" = 2 ] || fail "standalone verify made unexpected gh calls: $(cat "$T/calls.log")"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.start)" = "$OLD" ] || fail "standalone verify did not record round 1 start"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.head)" = "$VERIFY_HEAD" ] || fail "standalone verify did not record round 1 head"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.findings)" = "$CDIR/findings.md" ] || fail "standalone verify did not record its input findings"
@@ -1792,6 +1800,45 @@ grep -Fq 'is not the verify recorded for latest tkt-fix round 2' <<<"$out" || fa
 [ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "legacy refusal does not add a round"
 fi
 
+if [ -z "${CASE:-}" ] || [ "$CASE" = model-family-dispatch ]; then
+  # Old synthetic state with a same-family verify model stops before dispatch.
+  setup_case model-family-dispatch
+  bash "$TKT_STATE" "$S" set model.lane claude/claude-sonnet-5-5 >/dev/null
+  bash "$TKT_STATE" "$S" set model.fix codex/gpt-6-luna:medium >/dev/null
+  bash "$TKT_STATE" "$S" set model.verify codex/gpt-6-luna:medium >/dev/null
+  run_rc=0
+  out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "model-family-dispatch exited $run_rc, want 2: $out $(cat "$T/stderr")"
+  grep -Fq 'PRECONDITION model-family=codex' <<<"$out" \
+    || fail "model-family-dispatch verdict missing: $out"
+  grep -Fq 'model.verify=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-dispatch omitted verify model id: $out"
+  grep -Fq 'model.fix=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-dispatch omitted fix model id: $out"
+  ! grep -q '^job|' "$T/calls.log" || fail "model-family-dispatch dispatched a fix job: $(cat "$T/calls.log")"
+  ! grep -q '^review-pr|run ' "$T/calls.log" || fail "model-family-dispatch dispatched a verify: $(cat "$T/calls.log")"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] || fail "model-family-dispatch changed the round"
+fi
+
+if [ -z "${CASE:-}" ] || [ "$CASE" = model-family-fix-override ]; then
+  setup_case model-family-fix-override
+  bash "$TKT_STATE" "$S" set model.lane claude/claude-sonnet-5-5 >/dev/null
+  bash "$TKT_STATE" "$S" set model.verify codex/gpt-6-luna:medium >/dev/null
+  run_rc=0
+  out="$(bash "$TKT" "$S" --verify --fix-model codex/gpt-6-luna:medium 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "model-family-fix-override exited $run_rc, want 2: $out $(cat "$T/stderr")"
+  grep -Fq 'PRECONDITION model-family=codex' <<<"$out" \
+    || fail "model-family-fix-override verdict missing: $out"
+  grep -Fq 'model.verify=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-fix-override omitted verify model id: $out"
+  grep -Fq 'model.fix=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-fix-override omitted fix model id: $out"
+  ! grep -q '^job|' "$T/calls.log" || fail "model-family-fix-override dispatched a fix job: $(cat "$T/calls.log")"
+  ! grep -q '^review-pr|run ' "$T/calls.log" || fail "model-family-fix-override dispatched a verify: $(cat "$T/calls.log")"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] \
+    || fail "model-family-fix-override changed the round"
+fi
+
 case "${CASE:-}" in punct-verify|collect-verify) exit 0;; esac
 
 # 1. Verify OK on an already-pushed head: no CI wait, slot fix1, reviewed set.
@@ -2020,6 +2067,101 @@ EOF
   [ "$(head -n 1 "$T/handoff-order.log")" = git-push ] || fail "failed body edit preceded the push"
   [ "$(tail -n 1 "$T/handoff-order.log")" = gh-pr-edit ] || fail "failed body edit was not attempted after the push"
   rm -f "$T/log-git-pushes" "$T/gh-edit-fail"
+fi
+
+# A round can lock the PR body from dispatch or from state, including resumes.
+if want no-body-dispatch; then
+  setup_case no-body-dispatch
+  mkdir -p "$HOME/.agents/skills/review-loop/briefs"
+  cat >"$HOME/.agents/skills/review-loop/briefs/fix.md" <<'EOF'
+Synthetic fix prompt.
+
+__EXTRA__
+EOF
+  printf 'handoff' >"$T/jobmode"
+  run_rc=0; out="$(bash "$TKT" "$S" --no-verify --no-body 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" -eq 0 ] || fail "no-body-dispatch exited $run_rc: $out $(cat "$T/stderr")"
+  grep -Fq 'Do not run `gh pr edit`.' "$T/job-prompt.md" || fail "locked dispatch lost the gh pr edit prohibition"
+  grep -Fq 'This round must not change the PR body.' "$T/job-prompt.md" || fail "locked dispatch omitted the no-body instruction"
+  ! grep -Fq 'Write the full new PR body to:' "$T/job-prompt.md" || fail "locked dispatch prompt names a body file"
+  ! grep -Fq 'Report the body file path to tkt-fix.' "$T/job-prompt.md" || fail "locked dispatch prompt asks for a body-file report"
+  [ "$(bash "$TKT_STATE" "$S" get body.locked)" = 1 ] || fail "--no-body did not persist body.locked=1"
+fi
+
+if want no-body-resume; then
+  setup_case no-body-resume
+  bash "$TKT_STATE" "$S" set body.locked 1 >/dev/null
+  printf 'Resume context.\n' >"$CDIR/prompt.md"
+  out="$(bash "$TKT" "$S" --no-verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" \
+    || fail "no-body-resume exited $?: $(cat "$T/stderr")"
+  grep -Fq 'Do not run `gh pr edit`.' "$T/job-prompt.md" || fail "locked resume lost the gh pr edit prohibition"
+  grep -Fq 'This round must not change the PR body.' "$T/job-prompt.md" || fail "locked resume omitted the no-body instruction"
+  ! grep -Fq 'Write the full new PR body to:' "$T/job-prompt.md" || fail "locked resume prompt names a body file"
+  ! grep -Fq 'Report the body file path to tkt-fix.' "$T/job-prompt.md" || fail "locked resume prompt asks for a body-file report"
+  grep -Fq 'Resume context.' "$T/job-prompt.md" || fail "locked resume dropped the caller prompt"
+fi
+
+if want no-body-skips-publish; then
+  setup_case no-body-skips-publish
+  mkdir -p "$HOME/.agents/skills/review-loop/briefs"
+  cat >"$HOME/.agents/skills/review-loop/briefs/fix.md" <<'EOF'
+Synthetic fix prompt.
+
+__EXTRA__
+EOF
+  bash "$TKT_STATE" "$S" set body.locked 1 >/dev/null
+  printf 'write-body-anyway' >"$T/jobmode"
+  body_file="$CDIR/run/switchyard-529-fix-round-1-pr-body.md"
+  printf '%s' "$body_file" >"$T/write-body-file"
+  out="$(bash "$TKT" "$S" --no-verify 2>"$T/stderr")" \
+    || fail "no-body-skips-publish exited $?: $(cat "$T/stderr")"
+  [ -s "$body_file" ] || fail "fixture job did not write the locked body file"
+  ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "locked body file invoked gh pr edit"
+  grep -Fq 'tkt-fix BODY-SKIPPED locked' "${S%.state}.journal" || fail "locked body file was not journaled as skipped"
+  grep -Fq "body-skipped=locked file=$body_file" <<<"$out" || fail "locked body file is missing from the report: $out"
+  ! grep -Fq 'Write the full new PR body to:' "$T/job-prompt.md" || fail "locked dispatch prompt names a body file"
+fi
+
+if want no-body-collect; then
+  setup_case no-body-collect
+  run_wrapper_death no-body-collect-wrapper
+  body_file="$CDIR/run/switchyard-529-fix-round-1-pr-body.md"
+  printf 'Unauthorized replacement body\n' >"$body_file"
+  printf '%s' "$body_file" >"$T/write-body-file"
+  : >"$T/calls.log"
+  out="$(bash "$TKT" "$S" --no-verify --collect-fix j1 --no-body 2>"$T/stderr")" \
+    || fail "no-body-collect exited $?: $(cat "$T/stderr")"
+  [ -s "$body_file" ] || fail "collect fixture body file is empty"
+  ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "collect with --no-body invoked gh pr edit"
+  grep -Fq 'tkt-fix BODY-SKIPPED locked' "${S%.state}.journal" || fail "collect with --no-body did not journal BODY-SKIPPED"
+  grep -Fq "body-skipped=locked file=$body_file" <<<"$out" || fail "collect report omitted the body file: $out"
+  [ "$(bash "$TKT_STATE" "$S" get body.locked)" = 1 ] || fail "collect with --no-body did not persist body.locked=1"
+fi
+
+if want no-body-persists; then
+  setup_case no-body-persists
+  mkdir -p "$HOME/.agents/skills/review-loop/briefs"
+  cat >"$HOME/.agents/skills/review-loop/briefs/fix.md" <<'EOF'
+Synthetic fix prompt.
+
+__EXTRA__
+EOF
+  printf 'handoff' >"$T/jobmode"
+  out="$(bash "$TKT" "$S" --no-verify --no-body 2>"$T/stderr")" \
+    || fail "no-body-persists initial run exited $?: $(cat "$T/stderr")"
+  [ "$(bash "$TKT_STATE" "$S" get body.locked)" = 1 ] || fail "initial --no-body run did not persist the lock"
+  body_file="$CDIR/run/switchyard-529-fix-round-2-pr-body.md"
+  printf '%s' "$body_file" >"$T/write-body-file"
+  printf 'write-body-anyway' >"$T/jobmode"
+  out="$(bash "$TKT" "$S" --no-verify 2>"$T/stderr")" \
+    || fail "no-body-persists follow-up exited $?: $(cat "$T/stderr")"
+  grep -Fq 'Do not run `gh pr edit`.' "$T/job-prompt.md" || fail "later locked prompt lost gh pr edit prohibition"
+  grep -Fq 'This round must not change the PR body.' "$T/job-prompt.md" || fail "later locked prompt omitted the no-body instruction"
+  ! grep -Fq 'Write the full new PR body to:' "$T/job-prompt.md" || fail "later locked prompt names a body file"
+  [ -s "$body_file" ] || fail "later job did not write the body file anyway"
+  ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "later locked run invoked gh pr edit"
+  grep -Fq 'tkt-fix BODY-SKIPPED locked' "${S%.state}.journal" || fail "later locked run did not journal BODY-SKIPPED"
+  grep -Fq "body-skipped=locked file=$body_file" <<<"$out" || fail "later locked report omitted the body file: $out"
 fi
 
 # 4. A stop-list breach after the fix passes through with the gate's verdict.

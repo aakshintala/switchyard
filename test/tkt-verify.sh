@@ -26,6 +26,11 @@ cat >"$T/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf 'gh|%s\n' "$*" >>"$T/calls.log"
 if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  if [[ " $* " == *" --json body "* ]]; then
+    [ ! -f "$T/body-fail" ] || { echo 'gh: PR body unavailable' >&2; exit 4; }
+    cat "$PR_BODY"
+    exit $?
+  fi
   head="$(cat "$PR_HEAD")" || exit 1
   jq -cn --arg head "$head" '{headRefOid:$head}'
   exit $?
@@ -98,6 +103,7 @@ EOF
 chmod +x "$T/bin/review-pr"
 
 setup_case() {
+  rm -f "$T/body-fail"
   CASE_DIR="$T/cases/$1"
   WT="$CASE_DIR/worktree"
   BARE="$CASE_DIR/origin.git"
@@ -106,8 +112,9 @@ setup_case() {
   S="$CASE_DIR/tkt.state"
   F="$CASE_DIR/findings.md"
   PR_HEAD="$CASE_DIR/pr-head"
+  PR_BODY="$CASE_DIR/pr-body"
   REFUSAL_HEAD="$CASE_DIR/refusal-head"
-  export WT BARE BRANCH PR_HEAD REFUSAL_HEAD OLD HEAD
+  export WT BARE BRANCH PR_HEAD PR_BODY REFUSAL_HEAD OLD HEAD
   mkdir -p "$CASE_DIR" "$RUN"
   git init --quiet --bare "$BARE" || fail "init bare origin ($1)"
   git init --quiet -b "$BRANCH" "$WT" || fail "init worktree ($1)"
@@ -126,6 +133,7 @@ setup_case() {
   git --git-dir="$BARE" symbolic-ref HEAD "refs/heads/$BRANCH"
   git -C "$WT" update-ref refs/remotes/origin/main "$OLD"
   printf '%s\n' "$HEAD" >"$PR_HEAD"
+  printf 'initial PR body\n' >"$PR_BODY"
   printf 'P1 src/main.sh:1 — initial finding\n' >"$F"
   {
     printf 'repo=%s\n' switchyard
@@ -172,6 +180,12 @@ run_verify_ruling() {
 run_verify_override() {
   local rc=0
   OUT="$(bash "$TKT" "$S" --findings "$F" --verify-model override-model 2>"$T/stderr")" || rc=$?
+  RC="$rc"
+}
+
+run_reverify() {
+  local rc=0
+  OUT="$(bash "$TKT" "$S" --reverify --verify-model "${1:-openai/gpt-6.1-sol}" 2>"$T/stderr")" || rc=$?
   RC="$rc"
 }
 
@@ -361,6 +375,15 @@ if [ -n "${CASE:-}" ]; then
     ruling-refutes-reviewed-spent-grant) run_ruling_refutes_reviewed_spent_grant; exit 0 ;;
   esac
 fi
+
+# A normal verify continues when the PR body cannot be read, recording an empty hash.
+setup_case body-read-failure
+: >"$T/body-fail"
+run_verify
+[ "$RC" = 0 ] || fail "body-read-failure exited $RC, want FIX-OK: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-OK 'body-read-failure'
+grep -q '^review-pr|' "$T/calls.log" || fail "body-read-failure did not run review-pr: $(cat "$T/calls.log")"
+grep -Fxq 'verify.body_hash=' "$S" || fail "body-read-failure did not record an empty body hash: $(cat "$S")"
 
 # FIX-OK records the exact reviewed head and passes the findings delta.
 setup_case fix-ok
@@ -655,7 +678,7 @@ assert_first_verdict HEAD-MOVED 'worktree move'
 [ "$(read_state round)" = 1 ] || fail "worktree move did not count the P-line findings round"
 [ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "worktree move did not keep the slot it recorded"
 [ "$(git -C "$WT" rev-parse HEAD)" != "$HEAD" ] || fail "review stub did not move the worktree"
-[ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "worktree-move path did not re-read the PR head after verify"
+[ "$(grep -c '^gh|' "$T/calls.log")" = 3 ] || fail "worktree-move path did not re-read the PR head after verify"
 [ ! -e "${S%.state}.journal" ] || fail "worktree move wrote the state journal"
 
 # A review-pr stub pushes to the bare origin while the local worktree stays put.
@@ -671,7 +694,7 @@ assert_first_verdict HEAD-MOVED 'origin move'
 [ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD" ] || fail "origin move also changed the worktree"
 [ "$(git --git-dir="$BARE" rev-parse "refs/heads/$BRANCH")" != "$HEAD" ] || fail "review stub did not move bare origin"
 [ "$(git -C "$WT" rev-parse "refs/remotes/origin/$BRANCH")" != "$HEAD" ] || fail "post-review fetch did not refresh origin/$BRANCH"
-[ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "origin-move path did not re-read the PR head after verify"
+[ "$(grep -c '^gh|' "$T/calls.log")" = 3 ] || fail "origin-move path did not re-read the PR head after verify"
 [ ! -e "${S%.state}.journal" ] || fail "origin move wrote the state journal"
 
 # A HEAD-MOVED review with only notes does not count a round.
@@ -686,7 +709,7 @@ assert_first_verdict HEAD-MOVED 'note-only worktree move'
 [ "$(read_state round)" = 0 ] || fail "note-only worktree move changed round state"
 [ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "note-only worktree move did not keep the slot it recorded"
 [ "$(git -C "$WT" rev-parse HEAD)" != "$HEAD" ] || fail "review stub did not move the note-only worktree"
-[ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "note-only worktree-move path did not re-read the PR head after verify"
+[ "$(grep -c '^gh|' "$T/calls.log")" = 3 ] || fail "note-only worktree-move path did not re-read the PR head after verify"
 [ ! -e "${S%.state}.journal" ] || fail "note-only worktree move wrote the state journal"
 
 # Pre-review refusal paths must not call review-pr or alter state.
@@ -748,6 +771,22 @@ assert_first_verdict ROUND-LIMIT 'ROUND-LIMIT'
 assert_no_review ROUND-LIMIT
 assert_no_slot ROUND-LIMIT
 assert_no_grant ROUND-LIMIT
+
+# Reverify cannot bypass the round cap when the recorded findings still have open P-lines.
+setup_case reverify-round-limit
+set_state reviewed "$HEAD"
+set_state round 2
+set_state verify.head "$HEAD"
+set_state verify.findings "$F"
+set_state verify.since "$OLD"
+set_state verify.body_hash prior-body-hash
+set_state verify.model state-verify-model
+set_state verify.slot 1
+run_reverify openai/gpt-6.1-sol
+[ "$RC" = 1 ] || fail "reverify-round-limit exited $RC, want 1: $OUT $(cat "$T/stderr")"
+assert_first_verdict ROUND-LIMIT 'reverify-round-limit'
+assert_no_review 'reverify-round-limit'
+[ "$(read_state round)" = 2 ] || fail "reverify-round-limit changed the round"
 
 # A grant runs one P-line review past the cap and becomes a body requirement.
 if [ -z "${CASE:-}" ] || [ "$CASE" = grant-one-round ]; then
@@ -956,6 +995,82 @@ assert_no_review 'multiple grant rulings'
 assert_no_grant 'multiple grant rulings'
 [ "$(read_state round)" = 2 ] || fail "multiple grant rulings changed round"
 fi
+
+# A body-only P3 change can be re-verified on the unchanged reviewed head.
+setup_case reverify-body-only
+set_state model.fix claude/claude-sonnet-5-5
+run_verify
+[ "$RC" = 0 ] || fail "reverify-body-only initial FIX-OK exited $RC: $OUT $(cat "$T/stderr")"
+[ "$(read_state round)" = 1 ] || fail "reverify-body-only initial verify did not count its round"
+recorded_findings="$(read_state verify.findings 2>/dev/null || true)"
+[ -n "$recorded_findings" ] && [ -r "$recorded_findings" ] \
+  || fail "reverify-body-only initial verify did not save its findings"
+cmp -s "$F" "$recorded_findings" \
+  || fail "reverify-body-only saved findings differ from the initial verify input"
+initial_body_hash="$(read_state verify.body_hash 2>/dev/null || true)"
+[ -n "$initial_body_hash" ] || fail "reverify-body-only initial verify did not record a body hash"
+printf 'updated body with the P3 disposition\n' >"$PR_BODY"
+set_state verify.body_hash ""
+[ "$(read_state verify.body_hash)" = "" ] || fail "reverify-body-only failed to prepare the empty prior body hash"
+printf 'p3-incomplete\n' >"$T/vermode"
+run_reverify
+[ "$RC" = 1 ] || fail "reverify-body-only exited $RC, want FIX-INCOMPLETE: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-INCOMPLETE 'reverify-body-only'
+[ "$(read_state reviewed)" = "$HEAD" ] || fail "reverify-body-only changed the reviewed head"
+[ "$(read_state round)" = 1 ] || fail "reverify-body-only changed the round count"
+[ "$(read_state verify.findings)" = "$recorded_findings" ] || fail "reverify-body-only did not reuse the last findings file"
+[ "$(read_state verify.since)" = "$OLD" ] || fail "reverify-body-only did not reuse the last --since"
+[ "$(read_state verify.head)" = "$HEAD" ] || fail "reverify-body-only did not record the reviewed head"
+[ "$(read_state verify.model)" = openai/gpt-6.1-sol ] || fail "reverify-body-only did not record the new model"
+[ "$(read_state verify.body_hash)" != "$initial_body_hash" ] || fail "reverify-body-only did not update the body hash"
+grep -Fq -- "--head $HEAD --model openai/gpt-6.1-sol --verify $recorded_findings --since $OLD" "$T/calls.log" \
+  || fail "reverify-body-only did not use the recorded head, findings and since: $(cat "$T/calls.log")"
+journal="${S%.state}.journal"
+grep -Fq "tkt-verify REVERIFY from=state-verify-model to=openai/gpt-6.1-sol reason=body" "$journal" \
+  || fail "reverify-body-only journal line missing: $(cat "$journal")"
+verify_pid="$(git -C "$WT" diff "origin/main...$HEAD" | git patch-id --stable | awk '{print $1}')"
+write_review_comment 700 "$verify_pid" "$HEAD" "$OLD" 'FIX-OK all findings repaired'
+append_review_comment 701 "$verify_pid" "$HEAD" "$OLD" $'FIX-INCOMPLETE round=1\nP3 src/main.sh:3 — non-blocking body finding'
+# Ship and adoption consume the newest trusted verify comment for this patch.
+. "$REAL_BIN/lib/verify-section.sh"
+. "$REAL_BIN/lib/review-verdict.sh"
+ship_verdict="$(review_verdict switchyard 17 "$verify_pid")"
+case "$ship_verdict" in incomplete-p3*) ;; *) fail "reverify-body-only newest FIX-INCOMPLETE did not supersede FIX-OK: $ship_verdict" ;; esac
+
+# A FIX-OK reverify on an unchanged body keeps the round and journals no reason.
+printf 'ok\n' >"$T/vermode"
+run_reverify
+[ "$RC" = 0 ] || fail "reverify-ok exited $RC, want FIX-OK: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-OK 'reverify-ok'
+[ "$(read_state round)" = 1 ] || fail "reverify-ok changed the round count"
+tail -n 1 "$journal" | grep -Eq " tkt-verify REVERIFY from=openai/gpt-6\.1-sol to=openai/gpt-6\.1-sol$" \
+  || fail "reverify-ok journal line wrong: $(cat "$journal")"
+
+# A reverify model in the implementer's family is refused before dispatch.
+: >"$T/calls.log"
+run_reverify claude-haiku-5-5
+[ "$RC" = 2 ] || fail "reverify-family exited $RC, want 2: $OUT $(cat "$T/stderr")"
+assert_first_verdict 'PRECONDITION model-family=claude' 'reverify-family'
+assert_no_review 'reverify-family'
+
+# Reverify refuses a head other than the one already reviewed.
+setup_case reverify-head-mismatch
+run_reverify
+[ "$RC" = 2 ] || fail "reverify-head-mismatch exited $RC, want 2: $OUT $(cat "$T/stderr")"
+assert_first_verdict 'PRECONDITION reverify=head-mismatch' 'reverify-head-mismatch'
+assert_no_review 'reverify-head-mismatch'
+
+# Same-family verification dispatch is refused for a pre-guard synthetic state.
+setup_case model-family-dispatch
+set_state model.lane openai/gpt-6.1-sol
+set_state model.verify codex/gpt-6-luna:medium
+run_verify
+[ "$RC" = 2 ] || fail "model-family-dispatch exited $RC, want 2: $OUT $(cat "$T/stderr")"
+assert_first_verdict 'PRECONDITION model-family=codex' 'model-family-dispatch'
+grep -Fq 'model.verify=codex/gpt-6-luna:medium' <<<"$OUT" || fail "model-family-dispatch omitted verify model id: $OUT"
+grep -Fq 'model.lane=openai/gpt-6.1-sol' <<<"$OUT" || fail "model-family-dispatch omitted lane model id: $OUT"
+assert_no_review 'model-family-dispatch'
+assert_no_slot 'model-family-dispatch'
 
 # A grant can be attached to the PR, and CRLF line endings are accepted.
 if [ -z "${CASE:-}" ] || [ "$CASE" = grant-on-pr ]; then

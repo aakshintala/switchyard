@@ -37,6 +37,13 @@ cat > "$T/stub/gh" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$STUBD/gh.log"
 if [ -n "${GH_BOOM:-}" ]; then echo "HTTP 502" >&2; exit 1; fi
+case " $* " in
+  *" repos/example/switchyard/issues/4271/comments "*)
+    [ "${GH_COMMENTS_BOOM:-0}" != 1 ] || { echo "HTTP 502" >&2; exit 1; }
+    cat "$STUBD/issue-comments-4271" 2>/dev/null || echo '[]'
+    exit 0
+    ;;
+esac
 if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   if [ -n "${GH_VIEW_SLEEP:-}" ]; then sleep "$GH_VIEW_SLEEP"; fi
   if [ -f "$STUBD/pr-view-${3:-}" ]; then
@@ -2035,6 +2042,87 @@ if printf '%s' "$out" | grep -q '^STALL 4271' \
   ok a-claude-lanes-wake-is-sendmessage-not-delegate-session-send
 else
   fail "a-claude-lanes-wake-is-sendmessage-not-delegate-session-send ($out)"
+fi
+# Ticket comments from any role use the same report-identity/time answer rule
+# as archived rulings. The comment must be fetched only for an open ask, and a
+# failed fetch must leave that ask visible.
+askopen_state() {
+  printf 'repo=example/switchyard\nissue=4271\n' > "$1/fiber-4271.state"
+}
+write_ruling_comment() { # createdAt [body]
+  printf '[[{"body":"%s","createdAt":"%s","author":{"login":"surveyor"}}]]\n' \
+    "${2:-RULING-4271-7: continue with the current plan.}" "$1" > "$T/issue-comments-4271"
+}
+# The newest report rep() writes, and an older one from the same lane.
+askopen_newest=box-box-4271-20261104T120000Z-1-1.md
+askopen_older=box-box-4271-20261103T120000Z-1-1.md
+
+r=$(newrun H4); boxlane "$r" 4271 fiber-4271-build
+printf '[{"name":"fiber-4271-build","state":"working","status":"busy"}]' > "$T/cagents"
+rep "$r" 4271 'STATUS: BLOCKED on the current plan.'
+askopen_state "$r"; write_ruling_comment "$(old 5M)"; : > "$T/gh.log"
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+if [ "$grc" = 0 ] && ! printf '%s' "$out" | grep -q 'ASK-OPEN' \
+   && [ "$(grep -c 'repos/example/switchyard/issues/4271/comments' "$T/gh.log" || true)" = 1 ]; then
+  ok a-surveyor-ruling-comment-that-postdates-the-report-answers-the-ask
+else
+  fail "a-surveyor-ruling-comment-that-postdates-the-report-answers-the-ask (rc=$grc; $out; $(cat "$T/gh.log"))"
+fi
+
+r=$(newrun H5); boxlane "$r" 4271 fiber-4271-build
+printf '[{"name":"fiber-4271-build","state":"working","status":"busy"}]' > "$T/cagents"
+rep "$r" 4271 'STATUS: BLOCKED on the current plan.'
+askopen_state "$r"; write_ruling_comment "$(old 20M)"; : > "$T/gh.log"
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -q 'ASK-OPEN' \
+   && [ "$(grep -c 'repos/example/switchyard/issues/4271/comments' "$T/gh.log" || true)" = 1 ]; then
+  ok a-surveyor-ruling-comment-that-predates-the-report-does-not-answer-the-ask
+else
+  fail "a-surveyor-ruling-comment-that-predates-the-report-does-not-answer-the-ask (rc=$grc; $out; $(cat "$T/gh.log"))"
+fi
+
+r=$(newrun H6); boxlane "$r" 4271 fiber-4271-build
+printf '[{"name":"fiber-4271-build","state":"working","status":"busy"}]' > "$T/cagents"
+rep "$r" 4271 'STATUS: BLOCKED on the current plan.'
+askopen_state "$r"; write_ruling_comment "$(old 5M)"; : > "$T/gh.log"
+out=$(FW_RUN=$r GH_COMMENTS_BOOM=1 FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -q 'ASK-OPEN' \
+   && [ "$(grep -c 'repos/example/switchyard/issues/4271/comments' "$T/gh.log" || true)" = 1 ]; then
+  ok a-failed-comment-read-keeps-ask-open
+else
+  fail "a-failed-comment-read-keeps-ask-open (rc=$grc; $out; $(cat "$T/gh.log"))"
+fi
+
+# A comment that names one of the lane's reports answers only the reports it
+# names, as an archived ruling does: postdating the newest report is not enough
+# when the comment says it answers the older one (#4131's shape).
+r=$(newrun H7); boxlane "$r" 4271 fiber-4271-build
+printf '[{"name":"fiber-4271-build","state":"working","status":"busy"}]' > "$T/cagents"
+rep "$r" 4271 'STATUS: BLOCKED on the current plan.'
+printf '# 4271 report\n\nSTATUS: BLOCKED on the earlier plan.\n' > "$r/inbox/read/$askopen_older"
+age_file "$r/inbox/read/$askopen_older" 60
+askopen_state "$r"
+write_ruling_comment "$(old 5M)" "RULING-4271-7: answers $askopen_older, continue."
+: > "$T/gh.log"
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -q 'ASK-OPEN'; then
+  ok a-postdating-ruling-comment-that-names-another-report-leaves-the-ask-open
+else
+  fail "a-postdating-ruling-comment-that-names-another-report-leaves-the-ask-open (rc=$grc; $out)"
+fi
+
+# Naming the newest report answers it even when the comment predates it.
+r=$(newrun H8); boxlane "$r" 4271 fiber-4271-build
+printf '[{"name":"fiber-4271-build","state":"working","status":"busy"}]' > "$T/cagents"
+rep "$r" 4271 'STATUS: BLOCKED on the current plan.'
+askopen_state "$r"
+write_ruling_comment "$(old 20M)" "RULING-4271-7: answers $askopen_newest, continue."
+: > "$T/gh.log"
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+if [ "$grc" = 0 ] && ! printf '%s' "$out" | grep -q 'ASK-OPEN'; then
+  ok a-predating-ruling-comment-that-names-the-report-answers-the-ask
+else
+  fail "a-predating-ruling-comment-that-names-the-report-answers-the-ask (rc=$grc; $out)"
 fi
 printf '[]' > "$T/cagents"
 

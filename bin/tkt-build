@@ -60,6 +60,10 @@ if [ ! -r "$stop_report_lib" ]; then echo "tkt-build: cannot read shared lib: $s
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"
 quota_bin="$bin_dir/quota"; models_file="$script_dir/../delegate/config/models.json"
+model_family_lib="$script_dir/lib/model-family.sh"
+if [ ! -r "$model_family_lib" ]; then echo "tkt-build: cannot read shared lib: $model_family_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$model_family_lib"
 mverd="$bin_dir/mutant-verdicts"
 reviewpr="$bin_dir/review-pr"; plangate="$bin_dir/plan-gate"
 delegate="${TKT_BIN:+$TKT_BIN/}delegate"
@@ -201,26 +205,6 @@ lookup_branch_pr() {
 fetch_branch_pr() {
   lookup_branch_pr
   tkt set pr "$pr"; tkt set head "$head"
-}
-map_lane_provider() {
-  local id="$1" backend=""
-  case "$id" in
-    fiber/*)
-      backend="${id#fiber/}"; backend="${backend%%/*}"
-      ;;
-    codex/*|openai/*) printf 'codex\n'; return 0 ;;
-    claude/*|claude-*) printf 'claude\n'; return 0 ;;
-    cursor/*|cursor-*) printf 'cursor\n'; return 0 ;;
-    muse/*|muse-*) printf 'muse\n'; return 0 ;;
-    opencode-go/*) printf 'opencode-go\n'; return 0 ;;
-    *)
-      backend="$(jq -r --arg id "$id" '.models[$id].backend // empty' "$models_file" 2>/dev/null || true)"
-      ;;
-  esac
-  case "$backend" in
-    claude|codex|cursor|muse|opencode-go) printf '%s\n' "$backend" ;;
-    *) return 1 ;;
-  esac
 }
 quota_refusal() {
   local verdict="$1" model="$2" provider="$3" detail="$4" repair="$5" include_model="$6"
