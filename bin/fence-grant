@@ -418,8 +418,10 @@ _fw_lane_host_from_names() {
     printf mac
   elif [ "$box_match" -eq 1 ] && [ "$mac_match" -eq 0 ]; then
     printf box
-  else
+  elif [ "$mac_match" -eq 1 ] && [ "$box_match" -eq 1 ]; then
     return 1
+  else
+    _fw_current_host
   fi
 }
 
