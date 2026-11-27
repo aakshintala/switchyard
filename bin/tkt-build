@@ -538,11 +538,6 @@ if [ "$from" = lane ]; then
   closing="$(tkt get closing)"
   plan_gate_args tkt
   gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan" 2>"$tmpd/pg-err")" || emit "PRECONDITION missing=gate" 2 "$(cat "$tmpd/pg-err")" "$(repair_hint gate)"
-  # body_ends wins; a missing or blank body_ends falls through to the body_has co-author.
-  attr="$(tkt get body_ends 2>/dev/null || true)"
-  if [ -z "${attr//[[:space:]]/}" ]; then
-    attr="$(tkt list body_has 2>/dev/null | grep -i 'co-author' | head -n 1 || true)"
-  fi
   lane_model="${lane_model:-$(tkt get model.lane 2>/dev/null || true)}"
   # A lane with no model names the missing key on stderr and stops before dispatch.
   if [ -z "$lane_model" ]; then
@@ -550,7 +545,7 @@ if [ "$from" = lane ]; then
     emit "PRECONDITION missing=model.lane" 2 "tkt-build: no lane model: the lane slot has no id (pass --lane-model or set model.lane)" "$(repair_hint model.lane)"
   fi
   check_model_quota "$lane_model" "" lane
-  lane_args=(--slot lane --template "$lane_brief" --gate-from-plan --expect-commits "BASE=$base" "GATE=$gate_cmd" "CLOSING=$closing" "ATTRIBUTION=$attr" "LANE_MODEL=$lane_model")
+  lane_args=(--slot lane --template "$lane_brief" --gate-from-plan --expect-commits "BASE=$base" "GATE=$gate_cmd" "CLOSING=$closing" "LANE_MODEL=$lane_model")
   lane_args+=(--model "$lane_model")
   rc=0; lane_out="$("$tktjob" "$state" "${lane_args[@]}" 2>"$tmpd/lane-err")" || rc=$?
   if [ "$rc" -ne 0 ]; then

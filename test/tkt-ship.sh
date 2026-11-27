@@ -348,13 +348,15 @@ got="$(grep -A1 -x -F 'arg|--gate' "$T/calls.log" | sed -n 2p)"
 [ "$got" = 'arg|bash test/run && bash bin/check-pack' ] || fail "takeover gate not passed to ship-pr: [$got]"
 
 reset_stub; setup_case takeover-note-fail
+printf '0' >"$T/exitcodes"
 printf 'plan=takeover #123\ngate=bash test/run\nmerge_gate=gate\n' >>"$S"
 printf 'Title\n' >"$T/prbody"
 : >"$T/body-write-fail"
 run_ship
-[ "$RC" -eq 2 ] || fail "takeover body-write failure: exit $RC"
-expect_line1 "PRECONDITION takeover-note=unwritten" "takeover body-write failure"
-[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "takeover body-write failure invoked ship-pr"
+[ "$RC" -eq 0 ] || fail "takeover body-write failure remains informational: exit $RC"
+expect_line1 "MERGED sha=" "takeover body-write failure"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 1 ] || fail "takeover body-write failure still invokes ship-pr"
+grep -q 'warning: cannot update PR 7 body' "$CDIR/stderr" || fail "takeover body-write failure warns: $(cat "$CDIR/stderr")"
 
 # --- ordinary missing plan, bare takeover and takeover without a gate refuse ---
 reset_stub; setup_case no-plan
@@ -640,7 +642,7 @@ grep -q "$$" "$CDIR/stderr" || fail "livelock: stderr does not name pid"
 [ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "livelock: ship-pr must not run"
 rm -rf "$S.lock"
 
-# --- flags from state reach ship-pr ---
+# --- legacy body keys are ignored; state-backed ship receives the state file ---
 reset_stub; setup_case flags
 printf '0' >"$T/exitcodes"
 printf 'body_has=%s\n' 'Resolves #515' 'Co-authored-by: T' >>"$S"
@@ -657,22 +659,34 @@ printf '# Plan\n\n## Gate\n\n`bash test/gate.sh`\n' >"$CDIR/plan.md"
 printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
 run_ship
 [ "$RC" -eq 0 ] || fail "flags: exit $RC"
-grep -F -q -- '--body-has Resolves #515' "$T/calls.log" || fail "flags: body-has 1 missing"
-grep -F -q -- '--body-has Co-authored-by: T' "$T/calls.log" || fail "flags: body-has 2 missing"
-[ "$(grep -c -x -F 'arg|--outside-plan' "$T/calls.log")" -eq 2 ] || fail "flags: outside-plan passed once per path: $(cat "$T/calls.log")"
-grep -F -q -- '--outside-plan src/outside-a.go' "$T/calls.log" || fail "flags: first outside-plan path missing"
-grep -F -q -- '--outside-plan src/outside-b.go' "$T/calls.log" || fail "flags: second outside-plan path missing"
+[ "$(grep -c -x -F 'arg|--body-has' "$T/calls.log" || true)" -eq 0 ] || fail "flags: no body-has args: $(cat "$T/calls.log")"
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log" || true)" -eq 0 ] || fail "flags: no body-ends args: $(cat "$T/calls.log")"
+[ "$(grep -c -x -F 'arg|--outside-plan' "$T/calls.log" || true)" -eq 0 ] || fail "flags: no body-derived outside-plan args: $(cat "$T/calls.log")"
+[ "$(grep -c -x -F 'arg|--ticket-state' "$T/calls.log")" -eq 1 ] || fail "flags: state path reaches ship-pr: $(cat "$T/calls.log")"
+got="$(grep -A1 -x -F 'arg|--ticket-state' "$T/calls.log" | sed -n 2p)"
+[ "$got" = "arg|$S" ] || fail "flags: ticket-state path is absolute and correct: [$got]"
 [ "$(grep -c -x -F 'arg|--known-flake' "$T/calls.log")" -eq 2 ] || fail "flags: known-flake passed once per ticket: $(cat "$T/calls.log")"
 [ "$(grep -c -x -F 'arg|516' "$T/calls.log")" -eq 1 ] || fail "flags: first known-flake ticket missing"
 [ "$(grep -c -x -F 'arg|517' "$T/calls.log")" -eq 1 ] || fail "flags: second known-flake ticket missing"
 [ "$(grep -c -x -F 'arg|--by' "$T/calls.log")" -eq 1 ] || fail "flags: known-flake by missing"
 grep -A1 -x -F 'arg|--by' "$T/calls.log" | grep -qx 'arg|flywheel' || fail "flags: by value missing"
-[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 1 ] || fail "flags: body-ends once: $(cat "$T/calls.log")"
-got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
-[ "$got" = 'arg|Co-authored with Claude Code.' ] || fail "flags: body-ends value, got [$got]"
 grep -F -q -- "--unverified-fixes $CDIR/unverified.md" "$T/calls.log" || fail "flags: unverified missing"
 grep -F -q -- '--gate FOO=1 BAR=2 bash test/gate.sh' "$T/calls.log" || fail "flags: gate missing"
 [ "$(grep -c -x -F 'arg|--merge-check' "$T/calls.log")" -eq 0 ] || fail "flags: merge-check omitted when merge_gate=gate"
+[ "$(grep -c 'ignoring legacy body' "$CDIR/stderr")" -eq 1 ] || fail "flags: one warning for legacy body state: $(cat "$CDIR/stderr")"
+
+# --- a recorded grant and tkt-gate PASS allow an empty PR body to ship ---
+reset_stub; setup_case empty-body-state
+printf '0' >"$T/exitcodes"
+printf 'round=3\ngrant.3=717 https://example.invalid/ruling\nbody_has=Recorded ruling: https://example.invalid/ruling\n' >>"$S"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H" || fail "empty-body-state: journal the gate pass"
+: >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "empty-body-state: exit $RC: $OUT $(cat "$CDIR/stderr")"
+expect_line1 "MERGED sha=" empty-body-state
+[ "$(grep -c -x -F 'arg|--ticket-state' "$T/calls.log")" -eq 1 ] || fail "empty-body-state: ticket state passed"
+[ "$(grep -c -x -F 'arg|--body-has' "$T/calls.log" || true)" -eq 0 ] || fail "empty-body-state: grant body line not passed"
+[ -s "$T/prbody" ] || fail "empty-body-state: state-authoritative ship does not require body content"
 
 # --- merge_check reaches ship-pr for a CI merge gate ---
 reset_stub; setup_case mergecheck-ci
@@ -749,39 +763,14 @@ run_ship
 [ "$(grep -c -F 'mutants-gate' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: mutants gate without mutant_job: $(cat "$T/calls.log")"
 [ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: body-ends without a body_ends line: $(cat "$T/calls.log")"
 
-# --- body_ends from state reaches ship-pr as one argument ---
+# --- legacy body_ends values are not forwarded to ship-pr ---
 reset_stub; setup_case bodyends
 printf '0' >"$T/exitcodes"
 printf 'body_ends=%s\n' 'X' >>"$S"
 run_ship
 [ "$RC" -eq 0 ] || fail "bodyends: exit $RC"
-[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 1 ] || fail "bodyends: body-ends once: $(cat "$T/calls.log")"
-got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
-[ "$got" = 'arg|X' ] || fail "bodyends: body-ends value, got [$got]"
-grep -v '^body_ends=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
-printf 'body_ends=%s\n' 'X y' >>"$S"
-: >"$T/calls.log"
-run_ship
-[ "$RC" -eq 0 ] || fail "bodyends-space: exit $RC"
-[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 1 ] || fail "bodyends-space: body-ends once: $(cat "$T/calls.log")"
-got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
-[ "$got" = 'arg|X y' ] || fail "bodyends-space: body-ends value, got [$got]"
-
-# --- an empty body_ends line means no check, so no flag ---
-reset_stub; setup_case bodyendsempty
-printf '0' >"$T/exitcodes"
-printf 'body_ends=\n' >>"$S"
-run_ship
-[ "$RC" -eq 0 ] || fail "bodyendsempty: exit $RC"
-[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 0 ] || fail "bodyendsempty: body-ends with an empty line: $(cat "$T/calls.log")"
-
-# --- a blank body_ends line means no check, so no flag ---
-reset_stub; setup_case bodyendsblank
-printf '0' >"$T/exitcodes"
-printf 'body_ends=   \n' >>"$S"
-run_ship
-[ "$RC" -eq 0 ] || fail "bodyendsblank: exit $RC"
-[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 0 ] || fail "bodyendsblank: body-ends with a blank line: $(cat "$T/calls.log")"
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log" || true)" -eq 0 ] || fail "bodyends: legacy body_ends not passed: $(cat "$T/calls.log")"
+[ "$(grep -c 'ignoring legacy body' "$CDIR/stderr")" -eq 1 ] || fail "bodyends: one warning: $(cat "$CDIR/stderr")"
 
 # --- ship-pr runs from the run dir even when the caller is in the worktree ---
 reset_stub; setup_case shipcwd
@@ -969,20 +958,18 @@ grep -Fq "origin/main diff patch-id differs: gated sha=$GATED patch-id=" "$CDIR/
   || fail "gateship-new-commit: stderr misses the changed-diff comparison: [$(cat "$CDIR/stderr")]"
 [ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gateship-new-commit: did not invoke ship-pr after refusing"
 
-# --- a stale Local gate sha refuses ship ---
+# --- an old Local gate line is informational when the journal has no PASS ---
 reset_stub; setup_case gateship-stale
 printf '0' >"$T/exitcodes"
 stale="0000000000000000000000000000000000000000"
 printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$stale" >"$T/prbody"
 cp "$T/prbody" "$CDIR/body-before"
 run_ship
-[ "$RC" -eq 1 ] || fail "gateship-stale: exit $RC"
-expect_line1 "GATE-STALE gate=$stale head=$H" gateship-stale
-grep -Fq "tkt-ship: Local gate sha $stale is not PR head $H; gated diff comparison failed: merge-base with origin/main is unavailable for sha=$stale (gate: bash test/gate.sh)" "$CDIR/stderr" \
-  || fail "gateship-stale: stderr misses the comparison failure: [$(cat "$CDIR/stderr")]"
-cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-stale: stale body remains unchanged without a journal PASS"
+[ "$RC" -eq 0 ] || fail "gateship-stale: body does not refuse ship (rc=$RC): $OUT"
+expect_line1 "MERGED sha=" gateship-stale
+cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-stale: informational body remains unchanged without a journal PASS"
 ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-stale: no body edit without a journal PASS"
-[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gateship-stale: did not invoke ship-pr after refusing"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 1 ] || fail "gateship-stale: ship-pr runs without a journal PASS or matching body line"
 
 # --- a fresh Local gate sha says nothing ---
 reset_stub; setup_case gateship-fresh
@@ -1032,10 +1019,10 @@ cat >"$CDIR/body-expected" <<EOF
 Title
 
 Some text.
-Local gate: pass at $H (bash test/gate.sh)
 Implemented by: m/a
+Local gate: pass at $H (bash test/gate.sh)
 EOF
-cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-fill: body line is not in gate placement: [$(cat "$T/prbody")]"
+cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-fill: body appends the informational gate line: [$(cat "$T/prbody")]"
 grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-fill: edited body after a current PASS"
 
 # --- a tkt-ship PR body edit redacts home and lane worktree paths
@@ -1182,10 +1169,10 @@ cat >"$CDIR/body-expected" <<EOF
 Title
 
 Some text.
-Local gate: pass at $H (bash test/gate.sh)
 Implemented by: m/a
+Local gate: pass at $H (bash test/gate.sh)
 EOF
-cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-fix-credit: matching fix-job credit did not insert Local gate line: [$(cat "$T/prbody")]"
+cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-fix-credit: body appends the informational gate line: [$(cat "$T/prbody")]"
 grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-fix-credit: did not write body after matching credit"
 ! grep -q 'GATE-STALE' "$CDIR/stderr" || fail "gateship-fix-credit: matching credit was refused: [$(cat "$CDIR/stderr")]"
 
@@ -1313,10 +1300,10 @@ grep -q 'Local gate' "$CDIR/stderr" && fail "gateship-pass-current-stale-body: u
 cat >"$CDIR/body-expected" <<EOF
 Title
 
-Local gate: pass at $H (bash test/gate.sh)
 Implemented by: m/a
+Local gate: pass at $H (bash test/gate.sh)
 EOF
-cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-pass-current-stale-body: stale body line was not rewritten: [$(cat "$T/prbody")]"
+cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-pass-current-stale-body: stale informational line is rewritten at the end: [$(cat "$T/prbody")]"
 grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-pass-current-stale-body: edited body after a current PASS"
 
 # A full PASS that records its tip case (#2016) still counts as a full gate.
@@ -1424,7 +1411,7 @@ bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H" || fail "gateshi
 run_ship
 [ "$RC" -eq 0 ] || fail "gateship-readfail: exit $RC"
 expect_line1 "MERGED sha=" gateship-readfail
-grep -q 'cannot read PR 7 body; skipping the Local gate check' "$CDIR/stderr" || fail "gateship-readfail: missing read warning: [$(cat "$CDIR/stderr")]"
+grep -q 'cannot read PR 7 body; skipping informational body updates' "$CDIR/stderr" || fail "gateship-readfail: missing read warning: [$(cat "$CDIR/stderr")]"
 ! grep -q 'tkt-gate last passed at' "$CDIR/stderr" || fail "gateship-readfail: unexpected stale-gate refusal: [$(cat "$CDIR/stderr")]"
 ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-readfail: no edit after a failed body read"
 

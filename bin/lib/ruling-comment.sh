@@ -153,7 +153,6 @@ record_round_grant() {
   existing="$("$state_fn" get "grant.$round" 2>/dev/null || true)"
   if [ "${existing%% *}" != "$comment_id" ]; then
     "$state_fn" set "grant.$round" "$comment_id $url"
-    "$state_fn" add body_has "Recorded ruling: $url"
     "$state_fn" journal "ruling $url grants round $round"
   fi
 }
