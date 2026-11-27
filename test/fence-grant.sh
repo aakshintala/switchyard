@@ -515,15 +515,18 @@ FWSEC=END
 BOX_LANE_PROBE
 )
 export BOX_PROBE_OUTPUT BOX_LANE_PROBE_OUTPUT
+BOX_2021_LANE_PROBE_OUTPUT=${BOX_LANE_PROBE_OUTPUT//fiber-2013/fiber-2021}
+export BOX_2021_LANE_PROBE_OUTPUT
 
 reset_case
 (
   PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
   TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
   SSH_OUT="$BOX_LANE_PROBE_OUTPUT"
   CLAUDE_JSON='[]'
   MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
-  export PATH TEST_HOSTNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
   bash "$FG" 2013 --paths docs/tui.md >"$T/out" 2>"$T/err"
   RC=$?
   assert_rc 3 'Mac refuses to write a live box lane grant'
@@ -543,24 +546,83 @@ reset_case
 (
   PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
   TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
   SSH_OUT="$BOX_PROBE_OUTPUT"
   CLAUDE_JSON='[]'
   MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
-  export PATH TEST_HOSTNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
   run_fg 2014 --host box --paths docs/events.md
   assert_rc 0 'box grants for a box lane'
   assert_line GRANT 'box grant prints GRANT'
   [ -f "$FW_RUN/fiber-2014-fence-grant-1.md" ] || fail 'box grant writes its grant file'
 ) || exit 1
 
+# With no --host, the local Claude probe and the local FW_SSH box probe both
+# report the same box lane. They must not be counted as two different hosts.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
+  SSH_OUT="$BOX_2021_LANE_PROBE_OUTPUT"
+  CLAUDE_JSON='[{"name":"fiber-2021","status":"busy"}]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2021 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'box grants its live local lane without --host'
+  assert_line 'GRANT docs/tui.md' 'box lane grant output'
+  grep -qF 'agents --json' "$T/claude.log" || fail 'box grant used the local Claude probe'
+  grep -qF 'FWSEC=AGENTS' "$T/ssh.log" || fail 'box grant used the FW_SSH box probe'
+  [ -f "$FW_RUN/fiber-2021-fence-grant-1.md" ] || fail 'box lane grant writes its grant file'
+) || exit 1
+
+# A ticket absent from all local box probes is unknown, and the suggested box
+# command is bare because the route already runs on the box.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2022 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 3 'box refuses a ticket absent from its live lanes'
+  assert_out '' 'unknown box lane does not print GRANT'
+  grep -qF "Run on box: $FG 2022 --paths docs/tui.md" "$T/err" || fail 'unknown box route is the bare command'
+  ! grep -qF 'Run on box: ssh ' "$T/err" || fail 'unknown box route never sshs to itself'
+  assert_no_grant 'unknown box lane refuses without writing'
+) || exit 1
+
+# Mac-local lanes still resolve to Mac and grant without an explicit host.
 reset_case
 (
   PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
   TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
   SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[{"name":"fiber-2023","status":"busy"}]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2023 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'Mac grants its live lane without --host'
+  assert_line 'GRANT docs/tui.md' 'Mac lane grant output is unchanged'
+  [ -f "$FW_RUN/fiber-2023-fence-grant-1.md" ] || fail 'Mac lane grant writes its grant file'
+) || exit 1
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
+  SSH_OUT="$BOX_LANE_PROBE_OUTPUT"
   CLAUDE_JSON='[]'
   MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
-  export PATH TEST_HOSTNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
   bash "$FG" 2015 --paths docs/tui.md >"$T/out" 2>"$T/err"
   RC=$?
   assert_rc 3 'unknown lane host is refused'

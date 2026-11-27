@@ -364,10 +364,14 @@ _fw_quote_command() {
 _fw_print_unknown_host_routes() {
   local command remote
   command=$(_fw_command_text "${original_argv[@]}") || command=fence-grant
-  remote=$(_fw_quote_command "$command") || remote="'$command'"
   printf 'fence-grant: cannot determine the lane host for ticket #%s; run the same command on its host:\n' "$ticket" >&2
   printf 'Run on Mac: %s\n' "$command" >&2
-  printf 'Run on box: ssh %s %s\n' "$(_fw_box_host)" "$remote" >&2
+  if _fw_is_box; then
+    printf 'Run on box: %s\n' "$command" >&2
+  else
+    remote=$(_fw_quote_command "$command") || remote="'$command'"
+    printf 'Run on box: ssh %s %s\n' "$(_fw_box_host)" "$remote" >&2
+  fi
 }
 
 _fw_print_wrong_host_route() {
@@ -406,6 +410,17 @@ _fw_lane_host_from_names() {
   fi
 }
 
+# Mac-named probes read local state. On the box that state is the box's, so
+# classify every local name as box-local rather than duplicating it as Mac.
+_fw_lane_host_from_local_and_box_names() {
+  local name="$1" local_names="$2" box_names="$3"
+  if _fw_is_box; then
+    _fw_lane_host_from_names "$name" "" "$local_names $box_names"
+  else
+    _fw_lane_host_from_names "$name" "$local_names" "$box_names"
+  fi
+}
+
 _fw_live_lane_host() {
   local mac_names box_names pimac_names pibox_names dmac_names dbox_names dsess_names msess_names
   local mac_ok=0 box_ok=0 pimac_ok=0 pibox_ok=0 dmac_ok=0 dbox_ok=0 dsess_ok=0 msess_ok=0
@@ -423,7 +438,7 @@ _fw_live_lane_host() {
   [ "$mac_ok" -eq 1 ] && [ "$box_ok" -eq 1 ] && [ "$pimac_ok" -eq 1 ] \
     && [ "$pibox_ok" -eq 1 ] && [ "$dmac_ok" -eq 1 ] && [ "$dbox_ok" -eq 1 ] \
     && [ "$dsess_ok" -eq 1 ] && [ "$msess_ok" -eq 1 ] || return 1
-  _fw_lane_host_from_names "$ticket" \
+  _fw_lane_host_from_local_and_box_names "$ticket" \
     "$mac_names $pimac_names $dmac_names $msess_names" \
     "$box_names $pibox_names $dbox_names $dsess_names"
 }
@@ -1151,7 +1166,7 @@ FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 [ "$dsess_ok" -eq 1 ] || { echo "ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON${boxerr:+; box stderr: $boxerr}"; exit 3; }
 [ "$msess_ok" -eq 1 ] || { echo "ERROR mac delegate sessions: delegate session list failed, or the roster mapper refused the JSON"; exit 3; }
 if [ -z "$grant_host" ]; then
-  lane_host=$(_fw_lane_host_from_names "$ticket" \
+  lane_host=$(_fw_lane_host_from_local_and_box_names "$ticket" \
     "$mac_names $pimac_names $dmac_names $msess_names" \
     "$box_names $pibox_names $dbox_names $dsess_names") || {
     _fw_print_unknown_host_routes
