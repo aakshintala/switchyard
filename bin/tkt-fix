@@ -119,6 +119,13 @@ gate_lib="$script_dir/lib/gate-script.sh"
 if [ ! -r "$gate_lib" ]; then echo "tkt-fix: cannot read shared lib: $gate_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$gate_lib"
+pr_body_lib="$script_dir/lib/pr-body.sh"
+if [ ! -r "$pr_body_lib" ]; then
+  echo "tkt-fix: cannot read shared lib: $pr_body_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$pr_body_lib"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"; reviewpr="$bin_dir/review-pr"
 plangate="$bin_dir/plan-gate"
 fbrief="$HOME/.agents/skills/review-loop/briefs/fix.md"
@@ -397,6 +404,7 @@ if [ -n "$collect_fix_job" ]; then
   [ -n "$findings" ] || { echo "tkt-fix: missing recorded round findings: fix_round.$knum.findings" >&2; exit 2; }
   [ -r "$findings" ] || { echo "tkt-fix: cannot read recorded round findings: fix_round.$knum.findings=$findings" >&2; exit 2; }
 fi
+fix_body_file="$run/$namebase$part_suffix-fix-round-$knum-pr-body.md"
 history_file="$(history_path "$knum")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
@@ -1187,6 +1195,13 @@ if [ "$fix_gate_rc" -eq 0 ]; then
   brief_gate_cmd="$fix_gate_cmd"
 fi
 record_round_findings
+fix_handoff_instruction="$(printf '%s\n' \
+  'Commit only; do not push, do not run `gh-ci wait`, and report `ready, not pushed`. tkt-fix waits on CI and pushes the fix head.' \
+  'Do not run `gh pr edit`.' \
+  'When this round changes what the PR does:' \
+  "Write the full new PR body to: \`$fix_body_file\`" \
+  'Report the body file path to tkt-fix.' \
+  'Leave the file absent or empty when no body change is needed.')"
 if [ "$recover_unpushed" -eq 1 ]; then
   # Recovery replaces this run's dispatch, so a --resume on it never runs.
   if [ -n "$resume" ]; then
@@ -1232,21 +1247,25 @@ else
   if [ -n "$collect_fix_job" ]; then
     args=(--slot "$slot" --expect-commits)
   elif [ -n "$resume" ]; then
-    resume_prompt="$prompt"
-    if [ "${#ruling_ids[@]}" -gt 0 ]; then
-      [ -r "$prompt" ] || { echo "tkt-fix: cannot read prompt: $prompt" >&2; exit 2; }
-      resume_prompt="$tmp/resume-prompt.md"
-      if ! {
+    resume_prompt="$tmp/resume-prompt.md"
+    if [ -n "$prompt" ] && [ ! -r "$prompt" ]; then
+      echo "tkt-fix: cannot read prompt: $prompt" >&2
+      exit 2
+    fi
+    if ! {
+      if [ -n "$prompt" ]; then
         cat "$prompt" \
           && { [ ! -s "$prompt" ] || [ "$(tail -c 1 "$prompt" | wc -l)" -gt 0 ] || printf '\n'; } \
-          && for ruling_index in "${!ruling_ids[@]}"; do
-            printf '\n## Recorded rulings (%s)\n\n' "${ruling_urls[$ruling_index]}" \
-              && cat "${ruling_bodies[$ruling_index]}" || exit 1
-          done
-      } >"$resume_prompt"; then
-        echo "tkt-fix: cannot build combined resume prompt: $resume_prompt" >&2
-        exit 2
+          || exit 1
       fi
+      for ruling_index in "${!ruling_ids[@]}"; do
+        printf '\n## Recorded rulings (%s)\n\n' "${ruling_urls[$ruling_index]}" \
+          && cat "${ruling_bodies[$ruling_index]}" || exit 1
+      done
+      printf '\n## tkt-fix dispatch instructions\n\n%s\n' "$fix_handoff_instruction"
+    } >"$resume_prompt"; then
+      echo "tkt-fix: cannot build combined resume prompt: $resume_prompt" >&2
+      exit 2
     fi
     args=(--slot "$slot" --resume "$resume" --prompt "$resume_prompt")
     [ -z "$fixmodel" ] || args+=(--model "$fixmodel")
@@ -1293,7 +1312,19 @@ else
       args+=(--gate-from-plan)
     fi
     args+=(--expect-commits)
-    if ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
+    fix_extra_file="$(mktemp "$run/$namebase$part_suffix-fix-round-$knum-extra-XXXXXX")"
+    if state_extra="$(t get extra 2>/dev/null)"; then
+      case "$state_extra" in
+        @*) cat "${state_extra#@}" >"$fix_extra_file" || exit 2;;
+        *) printf '%s' "$state_extra" >"$fix_extra_file";;
+      esac
+    fi
+    if [ -s "$fix_extra_file" ]; then
+      [ "$(tail -c 1 "$fix_extra_file" | wc -l)" -gt 0 ] || printf '\n' >>"$fix_extra_file"
+      printf '\n' >>"$fix_extra_file"
+    fi
+    printf '%s\n' "$fix_handoff_instruction" >>"$fix_extra_file"
+    args+=("EXTRA=@$fix_extra_file")
   fi
   t set fixopen "$knum" # this job's commits may land ahead of head
   if [ "$adopt_pending" -eq 0 ]; then
@@ -1356,6 +1387,7 @@ if [ "$remote_head" != "$new_head" ] && { [ -z "$remote_head" ] || git -C "$work
   if ! push_out="$(git -C "$worktree" push origin "$branch" 2>&1)"; then emit "PUSH-FAIL" 1 "$push_out"; fi
   tkt_claim_pushed_hunks "$issue" "$worktree" "$repo"
 fi
+tkt_publish_pr_body_file "$fix_body_file" "$pr" "$repo" tkt-fix || true
 
 grc=0
 if [ "$retry_collect_gate" -eq 1 ]; then
