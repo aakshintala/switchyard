@@ -1752,6 +1752,26 @@ grep -Fq 'is not the verify recorded for latest tkt-fix round 2' <<<"$out" || fa
 [ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "legacy refusal does not add a round"
 fi
 
+if [ -z "${CASE:-}" ] || [ "$CASE" = model-family-dispatch ]; then
+  # Old synthetic state with a same-family verify model stops before dispatch.
+  setup_case model-family-dispatch
+  bash "$TKT_STATE" "$S" set model.lane claude/claude-sonnet-5-5 >/dev/null
+  bash "$TKT_STATE" "$S" set model.fix codex/gpt-6-luna:medium >/dev/null
+  bash "$TKT_STATE" "$S" set model.verify codex/gpt-6-luna:medium >/dev/null
+  run_rc=0
+  out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "model-family-dispatch exited $run_rc, want 2: $out $(cat "$T/stderr")"
+  grep -Fq 'PRECONDITION model-family=codex' <<<"$out" \
+    || fail "model-family-dispatch verdict missing: $out"
+  grep -Fq 'model.verify=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-dispatch omitted verify model id: $out"
+  grep -Fq 'model.fix=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-dispatch omitted fix model id: $out"
+  ! grep -q '^job|' "$T/calls.log" || fail "model-family-dispatch dispatched a fix job: $(cat "$T/calls.log")"
+  ! grep -q '^review-pr|run ' "$T/calls.log" || fail "model-family-dispatch dispatched a verify: $(cat "$T/calls.log")"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] || fail "model-family-dispatch changed the round"
+fi
+
 case "${CASE:-}" in punct-verify|collect-verify) exit 0;; esac
 
 # 1. Verify OK on an already-pushed head: no CI wait, slot fix1, reviewed set.

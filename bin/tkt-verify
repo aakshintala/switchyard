@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
 # tkt-verify: review an already-pushed head without starting a fix job.
-# Usage: tkt-verify <state> --findings <file> [--verify-model <id>] [--ruling <comment id>]...
+# Usage: tkt-verify <state> --findings <file> [--verify-model <id>] [--ruling <comment id>]... | --reverify --verify-model <id>
 set -euo pipefail
 
 usage() {
-  echo "usage: tkt-verify <state> --findings <file> [--verify-model <id>] [--ruling <comment id>]..." >&2
+  echo "usage: tkt-verify <state> --findings <file> [--verify-model <id>] [--ruling <comment id>]... | --reverify --verify-model <id>" >&2
   exit 2
 }
 
-[ $# -ge 3 ] || usage
+[ $# -ge 2 ] || usage
 state="$1"; shift
-findings=""; verifymodel=""; ruling_requested=()
+findings=""; verifymodel=""; reverify=0; ruling_requested=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --findings) [ $# -ge 2 ] && [ -n "$2" ] || usage; findings="$2"; shift 2 ;;
     --verify-model) [ $# -ge 2 ] && [ -n "$2" ] || usage; verifymodel="$2"; shift 2 ;;
     --ruling) [ $# -ge 2 ] && [ -n "$2" ] || usage; ruling_requested+=("$2"); shift 2 ;;
+    --reverify) [ "$reverify" -eq 0 ] || usage; reverify=1; shift ;;
     *) usage ;;
   esac
 done
-[ -n "$findings" ] || usage
+if [ "$reverify" -eq 1 ]; then
+  [ -z "$findings" ] && [ -n "$verifymodel" ] && [ "${#ruling_requested[@]}" -eq 0 ] || usage
+else
+  [ -n "$findings" ] || usage
+fi
 
 script_path="$0"
 case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
@@ -31,6 +36,11 @@ done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 # shellcheck disable=SC1090
 . "$script_dir/lib/job-refusal.sh"
+model_family_lib="$script_dir/lib/model-family.sh"
+if [ ! -r "$model_family_lib" ]; then echo "tkt-verify: cannot read shared lib: $model_family_lib" >&2; exit 2; fi
+models_file="$script_dir/../delegate/config/models.json"
+# shellcheck disable=SC1090
+. "$model_family_lib"
 tkt_refuse_inside_delegate tkt-verify
 tkt_state="$script_dir/tkt-state"; bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 namebase_lib="$script_dir/lib/namebase.sh"
@@ -84,7 +94,21 @@ worktree="$(t get worktree)"; run="$(t get run)"; reviewed="$(t get reviewed)"
   echo 'tkt-verify: missing key: model.verify (no --verify-model and no state model.verify)' >&2
   exit 2
 }
-[ -r "$findings" ] || { echo "tkt-verify: cannot read findings: $findings" >&2; exit 2; }
+for implement_role in fix lane; do
+  implement_model="$(t get "model.$implement_role" 2>/dev/null || true)"
+  [ -n "$implement_model" ] || continue
+  if family_detail="$(model_family_conflict model.verify "$verifymodel" "model.$implement_role" "$implement_model")"; then
+    family_name="${family_detail##*family=}"
+    emit "PRECONDITION model-family=$family_name" 2 "$family_detail"
+  fi
+done
+verify_since="$reviewed"; previous_body_hash=""
+if [ "$reverify" -eq 1 ]; then
+  recorded_head="$(t get verify.head 2>/dev/null || true)"
+  findings="$(t get verify.findings 2>/dev/null || true)"
+  verify_since="$(t get verify.since 2>/dev/null || true)"
+  previous_body_hash="$(t get verify.body_hash 2>/dev/null || true)"
+fi
 
 fixopen="$(t get fixopen 2>/dev/null || printf '0')"
 case "$fixopen" in *[!0]*) emit "FIX-OPEN" 1 "finish the open fix job with tkt-fix before verifying" ;; esac
@@ -101,12 +125,21 @@ pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid 2>/dev/null)" || em
 pr_head="$(jq -r '.headRefOid // empty' <<<"$pr_json" 2>/dev/null || true)"
 [ "$head" = "$pr_head" ] || emit "PR-HEAD-MISMATCH" 1 "worktree HEAD=$head PR head=$pr_head"
 head_is_reviewed=0
-if [ "$head" = "$reviewed" ]; then
+if [ "$reverify" -eq 1 ]; then
+  [ "$head" = "$reviewed" ] || emit "PRECONDITION reverify=head-mismatch" 2 "HEAD=$head is not reviewed=$reviewed"
+  [ "$recorded_head" = "$head" ] || emit "PRECONDITION reverify=head-mismatch" 2 "last verify head=$recorded_head does not equal reviewed HEAD=$head"
+  head_is_reviewed=1
+elif [ "$head" = "$reviewed" ]; then
   [ "${#ruling_requested[@]}" -gt 0 ] || emit "NOTHING-TO-VERIFY" 1 "HEAD=$head is already reviewed"
   head_is_reviewed=1
 fi
-if ! git -C "$worktree" merge-base --is-ancestor "$reviewed" "$head" 2>/dev/null; then
-  emit "SINCE-NOT-ANCESTOR" 1 "reviewed=$reviewed HEAD=$head"
+if [ "$reverify" -eq 1 ]; then
+  [ -n "$findings" ] && [ -n "$verify_since" ] && [ -n "$previous_body_hash" ] \
+    || emit "PRECONDITION reverify=history-missing" 2 "the state has no complete last-verify record at reviewed=$reviewed"
+fi
+[ -r "$findings" ] || { echo "tkt-verify: cannot read findings: $findings" >&2; exit 2; }
+if ! git -C "$worktree" merge-base --is-ancestor "$verify_since" "$head" 2>/dev/null; then
+  emit "SINCE-NOT-ANCESTOR" 1 "since=$verify_since HEAD=$head"
 fi
 
 round="$(t get round 2>/dev/null || printf '0')"
@@ -139,7 +172,7 @@ absolute_findings_path() {
   if [ "$parent" = / ]; then printf '/%s\n' "$base"; else printf '%s/%s\n' "$parent" "$base"; fi
 }
 
-if [ "$head_is_reviewed" -eq 1 ]; then
+if [ "$head_is_reviewed" -eq 1 ] && [ "$reverify" -eq 0 ]; then
   state_findings="$(t get findings 2>/dev/null || true)"
   if [ -z "$state_findings" ]; then
     ruling_refuse findings-mismatch "${ruling_requested[0]}" \
@@ -186,7 +219,7 @@ for ruling_id in "${ruling_requested[@]+${ruling_requested[@]}}"; do
   fi
 done
 ruling_history_source=""
-if [ "$head_is_reviewed" -eq 1 ]; then
+if [ "$head_is_reviewed" -eq 1 ] && [ "$reverify" -eq 0 ]; then
   ruling_history_source="$(t get findings_history 2>/dev/null || true)"
   ruling_match_sources=(current "$findings" history "$ruling_history_source")
 else
@@ -203,7 +236,7 @@ for ruling_index in "${!ruling_ids[@]}"; do
   fi
 done
 reviewed_all_refuted=0
-if [ "$head_is_reviewed" -eq 1 ] && ruling_refutes_all_open_rows "$findings" "$ruling_history_source"; then
+if [ "$head_is_reviewed" -eq 1 ] && [ "$reverify" -eq 0 ] && ruling_refutes_all_open_rows "$findings" "$ruling_history_source"; then
   reviewed_all_refuted=1
 fi
 if [ "$head_is_reviewed" -ne 1 ] || [ "$reviewed_all_refuted" -ne 1 ]; then
@@ -215,7 +248,7 @@ if [ "$head_is_reviewed" -ne 1 ] || [ "$reviewed_all_refuted" -ne 1 ]; then
     grant_accepted=1
   done
 fi
-if [ "$head_is_reviewed" -eq 1 ]; then
+if [ "$head_is_reviewed" -eq 1 ] && [ "$reverify" -eq 0 ]; then
   if [ "$reviewed_all_refuted" -eq 1 ]; then
     for ruling_index in "${!ruling_refute_ids[@]}"; do
       t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
@@ -242,7 +275,7 @@ fi
 if [ "$grant_accepted" -eq 1 ]; then
   record_round_grant "$grant_id" "$grant_url" "$grant_round" t
 fi
-if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ] && [ "$grant_accepted" -ne 1 ]; then
+if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ] && [ "$grant_accepted" -ne 1 ] && [ "$reverify" -eq 0 ]; then
   emit "ROUND-LIMIT" 1 "round=$round; otherwise post an owner ruling with a column-0 grants: round $((round + 1)) line and retry with --ruling <comment id>; send the open findings to triage"
 fi
 verify_findings="$findings"
@@ -264,19 +297,63 @@ if [ "${#ruling_refute_ids[@]}" -gt 0 ]; then
 fi
 fixslot="$(t get fixslot 2>/dev/null || printf '0')"
 case "$fixslot" in ''|*[!0-9]*) fixslot=0 ;; esac
-if [ "$fixslot" -gt 0 ] \
-  && [ "$(t get "fix_round.$fixslot.start" 2>/dev/null || true)" = "$reviewed" ] \
-  && [ "$(t get "fix_round.$fixslot.head" 2>/dev/null || true)" = "$head" ]; then
-  knum="$fixslot"
-elif [ "$round" -gt "$fixslot" ]; then knum=$((round + 1)); else knum=$((fixslot + 1)); fi
+if [ "$reverify" -eq 1 ]; then
+  knum="$(t get verify.slot 2>/dev/null || true)"
+  case "$knum" in ''|*[!0-9]*) emit "PRECONDITION reverify=history-missing" 2 "the state has no recorded verify slot" ;; esac
+else
+  if [ "$fixslot" -gt 0 ] \
+    && [ "$(t get "fix_round.$fixslot.start" 2>/dev/null || true)" = "$reviewed" ] \
+    && [ "$(t get "fix_round.$fixslot.head" 2>/dev/null || true)" = "$head" ]; then
+    knum="$fixslot"
+  elif [ "$round" -gt "$fixslot" ]; then knum=$((round + 1)); else knum=$((fixslot + 1)); fi
+fi
 
 if [ -n "$issue" ]; then set_namebase "$repo" "$issue"; else namebase="${repo##*/}"; fi
 part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
 history_file="$(history_path "$knum")"
-vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --model "$verifymodel" --verify "$verify_findings" --since "$reviewed")
+vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --model "$verifymodel" --verify "$verify_findings" --since "$verify_since")
 verify_ruling="$(t get ruling.verify 2>/dev/null || true)"
 if [ -n "$verify_ruling" ]; then vargs+=(--model-ruling "$verify_ruling"); fi
 for ruling_index in "${!ruling_ids[@]}"; do vargs+=(--context "${ruling_bodies[$ruling_index]}"); done
+body_file="$tmp/pr-body.md"
+if ! gh pr view "$pr" --repo "$repo" --json body -q .body >"$body_file" 2>/dev/null; then
+  emit "VERIFY-FAIL" 1 "cannot read PR body for verification: pr=$pr"
+fi
+if command -v shasum >/dev/null 2>&1; then
+  current_body_hash="$(shasum -a 256 "$body_file" | awk '{print $1}')"
+elif command -v sha256sum >/dev/null 2>&1; then
+  current_body_hash="$(sha256sum "$body_file" | awk '{print $1}')"
+else
+  emit "VERIFY-FAIL" 1 "cannot hash PR body: no SHA-256 utility"
+fi
+old_verify_model=""
+reverify_reason=""
+if [ "$reverify" -eq 1 ]; then
+  old_verify_model="$(t get verify.model 2>/dev/null || true)"
+  [ -n "$old_verify_model" ] || emit "PRECONDITION reverify=history-missing" 2 "the state has no recorded verify model"
+  [ "$current_body_hash" = "$previous_body_hash" ] || reverify_reason=body
+fi
+
+record_verify_metadata() {
+  local verdict="$1" recorded_findings short_head
+  if [ "$reverify" -eq 1 ]; then
+    recorded_findings="$findings"
+  else
+    short_head="$(git -C "$worktree" rev-parse --short=12 "$head")"
+    recorded_findings="$(mktemp "$run/$namebase-verify-findings-$short_head-XXXXXX")" \
+      || emit "VERIFY-FAIL" 1 "cannot save findings used for verification"
+    cp "$verify_findings" "$recorded_findings" \
+      || emit "VERIFY-FAIL" 1 "cannot save findings used for verification: $recorded_findings"
+  fi
+  t set verify.head "$head"
+  t set verify.findings "$recorded_findings"
+  t set verify.since "$verify_since"
+  t set verify.model "$verifymodel"
+  t set verify.body_hash "$current_body_hash"
+  t set verify.verdict "$verdict"
+  t set verify.round "$round"
+  t set verify.slot "$knum"
+}
 
 advance_round() {
   if [ "$has_p_lines" -eq 1 ]; then
@@ -314,6 +391,7 @@ record_fix_ok() {
   t set head "$head"
   stamp_verdict_at t
   write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
+  record_verify_metadata FIX-OK
   if [ -n "$adoption_comment" ]; then
     t journal "tkt-verify ADOPT FIX-OK head=$head since=$adoption_since comment=$adoption_comment"
   else
@@ -401,10 +479,12 @@ adopt_posted_fix_ok() {
 
 # Record the reviewed..HEAD range before review-pr so a later tkt-fix --verify
 # can account for the commits using its standard fix-round coverage rules.
-t set "$slot_start_key" "$reviewed"
-t set "$slot_head_key" "$head"
-t set "$slot_findings_key" "$findings"
-t set fixslot "$knum"
+if [ "$reverify" -eq 0 ]; then
+  t set "$slot_start_key" "$reviewed"
+  t set "$slot_head_key" "$head"
+  t set "$slot_findings_key" "$findings"
+  t set fixslot "$knum"
+fi
 printf '%s\n' "$knum" >"$tmp/verify-rounds"
 
 vrc=0
@@ -419,6 +499,45 @@ if [ "$vrc" -ne 0 ]; then
   fi
   [ ! -s "$tmp/verify.err" ] || cat "$tmp/verify.err" >&2
   emit "VERIFY-FAIL rc=$vrc" 1 "$(head -n 40 "$tmp/verify.out")"
+fi
+
+if [ "$reverify" -eq 1 ]; then
+  if [[ "$fixline" != FIX-OK* ]] && [[ "$fixline" != FIX-INCOMPLETE* ]]; then
+    emit "VERIFY-FAIL" 1 "$(head -n 40 "$tmp/verify.out")"
+  fi
+  if ! git -C "$worktree" fetch origin >/dev/null 2>&1; then
+    emit "VERIFY-FAIL reason=head-moved" 1 "cannot recheck origin/$branch after reverify"
+  fi
+  post_worktree_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  post_origin_head="$(git -C "$worktree" rev-parse --verify "refs/remotes/origin/$branch" 2>/dev/null || true)"
+  post_pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid 2>/dev/null || true)"
+  post_pr_head="$(jq -r '.headRefOid // empty' <<<"$post_pr_json" 2>/dev/null || true)"
+  [ "$post_worktree_head" = "$head" ] && [ "$post_origin_head" = "$head" ] && [ "$post_pr_head" = "$head" ] \
+    || emit "VERIFY-FAIL reason=head-moved" 1 "reverify head=$head worktree=$post_worktree_head origin/$branch=$post_origin_head PR=$post_pr_head"
+  if [[ "$fixline" == FIX-INCOMPLETE* ]]; then
+    if ! review_incomplete_rows "$tmp/verify.out"; then
+      emit "VERIFY-FAIL reason=no-finding-rows" 1 \
+        "FIX-INCOMPLETE verify output contains no bare P0/P1/P2/P3 finding rows; rerun verification with finding rows"
+    fi
+    open="$REVIEW_INCOMPLETE_ROWS"
+    short_head="$(git -C "$worktree" rev-parse --short=12 "$head")"
+    verify_output="$(mktemp "$run/$namebase-tkt-verify-$short_head-reverify-XXXXXX")" \
+      || emit "VERIFY-FAIL" 1 "cannot save reverify findings"
+    cp "$tmp/verify.out" "$verify_output" || emit "VERIFY-FAIL" 1 "cannot save reverify findings: $verify_output"
+    t set findings "$verify_output"
+    record_verify_metadata FIX-INCOMPLETE
+    stamp_verdict_at t
+    reverify_journal="tkt-verify REVERIFY from=$old_verify_model to=$verifymodel"
+    [ -z "$reverify_reason" ] || reverify_journal="$reverify_journal reason=$reverify_reason"
+    t journal "$reverify_journal"
+    emit "FIX-INCOMPLETE" 1 "$open"
+  fi
+  record_verify_metadata FIX-OK
+  stamp_verdict_at t
+  reverify_journal="tkt-verify REVERIFY from=$old_verify_model to=$verifymodel"
+  [ -z "$reverify_reason" ] || reverify_journal="$reverify_journal reason=$reverify_reason"
+  t journal "$reverify_journal"
+  emit "FIX-OK reviewed=$head" 0
 fi
 
 case "$fixline" in
@@ -436,6 +555,7 @@ case "$fixline" in
     if [ "$REVIEW_INCOMPLETE_HAS_OPEN_P12" = 0 ]; then t set reviewed "$head"; fi
     advance_round
     stamp_verdict_at t
+    record_verify_metadata FIX-INCOMPLETE
     t journal "tkt-verify FIX-INCOMPLETE"
     emit "FIX-INCOMPLETE" 1 "$open"
     ;;

@@ -1471,6 +1471,31 @@ run_start --env 'CARGO_BUILD_JOBS=3 NEXTEST_TEST_THREADS=2 CARGO_INCREMENTAL=0'
 want "CURRENT " 0 envset
 grep -qF -- 'env=CARGO_BUILD_JOBS=3 NEXTEST_TEST_THREADS=2 CARGO_INCREMENTAL=0' "$RUN/widget-42.state" || fail "envset: state misses the non-empty env prefix"
 
+# Same-family scoped reviewers are rejected before tkt-start writes state.
+setup model-family-guard ONE AGAINST
+reload --model; remove_model_role lane
+ARGS+=(--model lane=openai/gpt-6.1-sol --model verify=codex/gpt-6-luna:medium)
+run_start --no-preflight
+[ "$RC" -eq 2 ] || fail "model-family-guard: exit $RC, want 2"
+grep -Fq 'model.verify=codex/gpt-6-luna:medium' "$CDIR/stderr" \
+  || fail "model-family-guard: refusal omitted model.verify id: $(cat "$CDIR/stderr")"
+grep -Fq 'model.lane=openai/gpt-6.1-sol' "$CDIR/stderr" \
+  || fail "model-family-guard: refusal omitted model.lane id: $(cat "$CDIR/stderr")"
+grep -Fq 'family=codex' "$CDIR/stderr" \
+  || fail "model-family-guard: refusal omitted common provider family: $(cat "$CDIR/stderr")"
+[ ! -e "$RUN/widget-42.state" ] || fail "model-family-guard: wrote state before refusing"
+
+setup model-review-family-guard ONE AGAINST
+reload --model; remove_model_role lane
+ARGS+=(--model lane=openai/gpt-6.1-sol --model review=codex/gpt-6-luna:medium)
+run_start --no-preflight
+[ "$RC" -eq 2 ] || fail "model-review-family-guard: exit $RC, want 2"
+grep -Fq 'model.review=codex/gpt-6-luna:medium' "$CDIR/stderr" \
+  || fail "model-review-family-guard: refusal omitted model.review id: $(cat "$CDIR/stderr")"
+grep -Fq 'model.lane=openai/gpt-6.1-sol' "$CDIR/stderr" \
+  || fail "model-review-family-guard: refusal omitted model.lane id: $(cat "$CDIR/stderr")"
+[ ! -e "$RUN/widget-42.state" ] || fail "model-review-family-guard: wrote state before refusing"
+
 # Invalid values fail before the first state write.
 setup partbad ONE AGAINST
 for bad in one x missing; do
