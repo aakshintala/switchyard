@@ -373,4 +373,34 @@ printf '# Plan: #1 test\nBase: %s\nOutcome:\n\n## Files\n- `src/lib.rs`\n' "$BAS
 expect_problems "bare Outcome fails" "$T/outcome-bare.md" \
   'bad Outcome:  (line 3): write Outcome: pr or Outcome: measurement'
 
+# Task gates cannot rerun the full plan gate or the project's full check script.
+expect_problems "task gate repeats the full gate after an env prefix" \
+  "$(mkplan task_gate_equal '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run`\n\n## Gate\n`CARGO_BUILD_JOBS=3 bash test/run`\n')" \
+  'task 1 (line 9): repeats plan Gate command after environment assignments are removed: bash test/run'
+expect_problems "task gate runs full check without configured narrowing" \
+  "$(mkplan task_gate_full '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run --verbose`\n\n## Gate\n`CARGO_BUILD_JOBS=3 bash test/run`\n')" \
+  'task 1 (line 9): runs the project\x27s full check script without a configured narrowing argument: bash test/run --verbose'
+expect_clean "task gate uses configured --since narrowing" \
+  "$(mkplan task_gate_since '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run --since abc`\n\n## Gate\n`CARGO_BUILD_JOBS=3 bash test/run`\n')"
+expect_clean "task gate uses configured --rules-by-path narrowing" \
+  "$(mkplan task_gate_rules '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run --rules-by-path src/lib.rs`\n\n## Gate\n`CARGO_BUILD_JOBS=3 bash test/run`\n')"
+expect_clean "task gate uses --since=REV narrowing" \
+  "$(mkplan task_gate_since_eq '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run --since=abc`\n\n## Gate\n`bash test/run`\n')"
+expect_problems "task gate runs a path-named check script with prose after it" \
+  "$(mkplan task_gate_path '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `scripts/check --quick` (the fast mode).\n\n## Gate\n`CARGO_BUILD_JOBS=3 scripts/check`\n')" \
+  'task 1 (line 9): runs the project\x27s full check script without a configured narrowing argument: scripts/check --quick'
+expect_clean "task gate sharing a tool with a tool-only Gate is not a full-script run" \
+  "$(mkplan task_gate_tool '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `cargo nextest run -p main --test foo`\n\n## Gate\n`cargo fmt --check && cargo nextest run -p main`\n')"
+expect_problems "chained task gate: an unnarrowed segment after a narrowed one is refused" \
+  "$(mkplan task_gate_chain '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run --since abc && FOO=1 bash test/run`\n\n## Gate\n`CARGO_BUILD_JOBS=3 bash test/run`\n')" \
+  'task 1 (line 9): runs the project\x27s full check script without a configured narrowing argument: bash test/run'
+expect_clean "chained task gate: every segment narrowed or another command" \
+  "$(mkplan task_gate_chain_ok '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `bash test/run --since abc; bash test/plan-check.sh | tail -1`\n\n## Gate\n`bash test/run`\n')"
+expect_problems "subshell-wrapped task gate is refused" \
+  "$(mkplan task_gate_paren '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `(bash test/run)`\n\n## Gate\n`bash test/run`\n')" \
+  'task 1 (line 9): runs the project\x27s full check script without a configured narrowing argument: bash test/run'
+expect_problems "brace-group task gate is refused" \
+  "$(mkplan task_gate_brace '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Add a test in `src/lib.rs`.\n   Gate: `{ bash test/run; }`\n\n## Gate\n`bash test/run`\n')" \
+  'task 1 (line 9): runs the project\x27s full check script without a configured narrowing argument: bash test/run'
+
 echo "plan-check: all cases passed"
