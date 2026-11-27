@@ -1173,7 +1173,9 @@ printf 'incomplete' >"$T/vermode"
 run_rc=0; out="$(bash "$TKT_VERIFY" "$S" --findings "$CDIR/findings.md" 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = "1" ] || fail "standalone incomplete verify exited $run_rc, want 1: $out $(cat "$T/stderr")"
 grep -q 'TKT tkt-verify FIX-INCOMPLETE' <<<"$out" || fail "standalone verify did not return FIX-INCOMPLETE: $out calls=$(cat "$T/calls.log")"
-[ "$(cat "$T/gh-count")" = 1 ] || fail "standalone verify made unexpected gh calls: $(cat "$T/calls.log")"
+# One PR-head read plus the PR-body read that records verify.body_hash (#2026).
+[ "$(grep -c '^gh|.*--json headRefOid' "$T/calls.log")" = 1 ] && [ "$(grep -c '^gh|.*--json body' "$T/calls.log")" = 1 ] \
+  && [ "$(cat "$T/gh-count")" = 2 ] || fail "standalone verify made unexpected gh calls: $(cat "$T/calls.log")"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.start)" = "$OLD" ] || fail "standalone verify did not record round 1 start"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.head)" = "$VERIFY_HEAD" ] || fail "standalone verify did not record round 1 head"
 [ "$(bash "$TKT_STATE" "$S" get fix_round.1.findings)" = "$CDIR/findings.md" ] || fail "standalone verify did not record its input findings"
@@ -1790,6 +1792,45 @@ run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-expected-job 2>"$T/std
 grep -Fq 'is not the verify recorded for latest tkt-fix round 2' <<<"$out" || fail "keys-present mismatch does not enter legacy path"
 [ -z "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_head 2>/dev/null || true)" ] || fail "keys-present mismatch writes no missing verify metadata"
 [ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "legacy refusal does not add a round"
+fi
+
+if [ -z "${CASE:-}" ] || [ "$CASE" = model-family-dispatch ]; then
+  # Old synthetic state with a same-family verify model stops before dispatch.
+  setup_case model-family-dispatch
+  bash "$TKT_STATE" "$S" set model.lane claude/claude-sonnet-5-5 >/dev/null
+  bash "$TKT_STATE" "$S" set model.fix codex/gpt-6-luna:medium >/dev/null
+  bash "$TKT_STATE" "$S" set model.verify codex/gpt-6-luna:medium >/dev/null
+  run_rc=0
+  out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "model-family-dispatch exited $run_rc, want 2: $out $(cat "$T/stderr")"
+  grep -Fq 'PRECONDITION model-family=codex' <<<"$out" \
+    || fail "model-family-dispatch verdict missing: $out"
+  grep -Fq 'model.verify=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-dispatch omitted verify model id: $out"
+  grep -Fq 'model.fix=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-dispatch omitted fix model id: $out"
+  ! grep -q '^job|' "$T/calls.log" || fail "model-family-dispatch dispatched a fix job: $(cat "$T/calls.log")"
+  ! grep -q '^review-pr|run ' "$T/calls.log" || fail "model-family-dispatch dispatched a verify: $(cat "$T/calls.log")"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] || fail "model-family-dispatch changed the round"
+fi
+
+if [ -z "${CASE:-}" ] || [ "$CASE" = model-family-fix-override ]; then
+  setup_case model-family-fix-override
+  bash "$TKT_STATE" "$S" set model.lane claude/claude-sonnet-5-5 >/dev/null
+  bash "$TKT_STATE" "$S" set model.verify codex/gpt-6-luna:medium >/dev/null
+  run_rc=0
+  out="$(bash "$TKT" "$S" --verify --fix-model codex/gpt-6-luna:medium 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "model-family-fix-override exited $run_rc, want 2: $out $(cat "$T/stderr")"
+  grep -Fq 'PRECONDITION model-family=codex' <<<"$out" \
+    || fail "model-family-fix-override verdict missing: $out"
+  grep -Fq 'model.verify=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-fix-override omitted verify model id: $out"
+  grep -Fq 'model.fix=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-fix-override omitted fix model id: $out"
+  ! grep -q '^job|' "$T/calls.log" || fail "model-family-fix-override dispatched a fix job: $(cat "$T/calls.log")"
+  ! grep -q '^review-pr|run ' "$T/calls.log" || fail "model-family-fix-override dispatched a verify: $(cat "$T/calls.log")"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] \
+    || fail "model-family-fix-override changed the round"
 fi
 
 case "${CASE:-}" in punct-verify|collect-verify) exit 0;; esac

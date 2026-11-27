@@ -70,6 +70,11 @@ done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 # shellcheck disable=SC1090
 . "$script_dir/lib/job-refusal.sh"
+model_family_lib="$script_dir/lib/model-family.sh"
+if [ ! -r "$model_family_lib" ]; then echo "tkt-fix: cannot read shared lib: $model_family_lib" >&2; exit 2; fi
+models_file="$script_dir/../delegate/config/models.json"
+# shellcheck disable=SC1090
+. "$model_family_lib"
 tkt_refuse_inside_delegate tkt-fix
 verify_section_lib="$script_dir/lib/verify-section.sh"
 if [ ! -r "$verify_section_lib" ]; then echo "tkt-fix: cannot read shared lib: $verify_section_lib" >&2; exit 2; fi
@@ -440,6 +445,24 @@ emit() {
   } >"$logpath"
   cat "$logpath"; t journal "tkt-fix $verdict"; exit "$ec"
 }
+
+# Check before a fix job can run: scoped verification must differ from both
+# implementer roles. Unknown provider families remain unclassified by design.
+if [ "$verify" -eq 1 ] && [ -z "$collect_verify_job" ]; then
+  selected_verify_model="$verifymodel"
+  [ -n "$selected_verify_model" ] || selected_verify_model="$(t get model.verify 2>/dev/null || true)"
+  selected_fix_model="$(t get model.fix 2>/dev/null || true)"
+  if [ -n "$fixmodel" ]; then selected_fix_model="$fixmodel"; fi
+  implement_models=()
+  implement_model="$(t get model.lane 2>/dev/null || true)"
+  [ -z "$implement_model" ] || implement_models+=("model.lane=$implement_model")
+  [ -z "$selected_fix_model" ] || implement_models+=("model.fix=$selected_fix_model")
+  if [ -n "$selected_verify_model" ] \
+    && family_detail="$(model_family_conflict_with_any model.verify "$selected_verify_model" ${implement_models[@]+"${implement_models[@]}"})"; then
+    family_name="${family_detail##*family=}"
+    emit "PRECONDITION model-family=$family_name" 2 "$family_detail"
+  fi
+fi
 
 collect_verify_refuse() {
   emit "VERIFY-FAIL reason=collect-verify" 1 "$@"
