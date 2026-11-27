@@ -1456,6 +1456,9 @@ RULING_ARCHIVE_FROM = float(os.environ.get("FW_RULING_ARCHIVE_FROM") or 17937936
 SNAP_AT = float(os.environ.get("FW_SNAP_AT") or 0.0)
 reported = {}
 inbox_reports = {}
+# Every report basename per ticket, not only the newest: a RULING comment that
+# names any of them answers only the ones it names.
+report_names = {}
 # Three sources, not two. A lane's report reaches me either as an inbox message
 # or as `run/fiber-<n>-report.md` written in place, and which one depends on the
 # machine: a box lane sends, a Mac delegate lane has no inbox to send to and only
@@ -1485,6 +1488,7 @@ for _d, _is_inbox in _srcs:
         except OSError:
             continue
         t = m.group(1)
+        report_names.setdefault(t, set()).add(base)
         if _is_inbox:
             inbox_reports.setdefault(t, []).append((when, text))
         if t in reported and reported[t][0] >= when:
@@ -1848,7 +1852,15 @@ def state_path_from_args(args):
 
 
 def ruling_comment_answers(ticket, report):
-    """A ticket RULING comment answers by report identity, else by time."""
+    """Whether a RULING comment on the ticket answers this report.
+
+    The archived-ruling rule: a comment that names any of the lane's reports
+    answers only the reports it names; a comment that names none answers a
+    report it postdates. A time-only answer to a comment that names an earlier
+    report is #4131's lost question.
+    """
+    report_at, _status, _wants, report_name = report[:4]
+    lane_reports = report_names.get(ticket, set()) | {report_name}
     values = state_values_for(state_path_for(ticket))
     repo = values.get("repo", "")
     if (values.get("issue") != ticket
@@ -1876,8 +1888,10 @@ def ruling_comment_answers(ticket, report):
         if (not isinstance(body, str)
                 or not re.search(r"RULING-" + re.escape(ticket) + r"-\d+\b", body)):
             continue
-        if report[3] in body:
-            return True
+        if any(name in body for name in lane_reports):
+            if report_name in body:
+                return True
+            continue
         created = comment.get("createdAt") or comment.get("created_at")
         if not isinstance(created, str):
             continue
@@ -1886,7 +1900,7 @@ def ruling_comment_answers(ticket, report):
                 created.replace("Z", "+00:00")).timestamp()
         except (ValueError, OverflowError):
             continue
-        if stamp > report[0]:
+        if stamp > report_at:
             return True
     return False
 
