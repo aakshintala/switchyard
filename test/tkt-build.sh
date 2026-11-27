@@ -560,6 +560,31 @@ grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is j
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
 
+# --- collect keeps one trailing period on a verdict (review-pr's contract) ---
+setup_case verdict-period
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE.
+VERDICT spec: APPROVE
+VERDICT overbuild: APPROVE.
+CI deadbeef pass
+EOF
+run_build
+[ "$RC" -eq 0 ] || fail "verdict-period exits 0 (rc=$RC): $OUT"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "verdict-period"
+setup_case verdict-period-changes
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+VERDICT spec: APPROVE
+VERDICT overbuild: CHANGES.
+P2 fixed already
+CI deadbeef pass
+EOF
+run_build
+grep -q "REVIEW-INCOMPLETE" <<<"$OUT" && fail "verdict-period-changes: a CHANGES. verdict is not missing: $OUT"
+expect_verdict "TKT tkt-build CHANGES p1=* p2=* p3=* mutants=* findings=* log=*" "verdict-period-changes"
+
 # --- a lane's untracked root run/ is moved before delegate records its change set ---
 setup_case stray-run-moved
 printf 'keep existing\n' >"$CDIR/run/stray-stub-1-fiber-77-one.log"
