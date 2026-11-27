@@ -529,7 +529,6 @@ grep -q "^job|.*--slot lane.*--template .*lane.md.*--gate-from-plan.*--expect-co
 grep -q '^concerns=' <<<"$OUT" && fail "happy: no empty concerns digest line"
 grep -q "BASE=$H" "$T/calls.log" || fail "happy: BASE reaches the lane"
 grep -q "GATE=true" "$T/calls.log" || fail "happy: GATE reaches the lane"
-
 grep -q "CLOSING=Resolves #528" "$T/calls.log" || fail "happy: CLOSING reaches the lane"
 grep -q "ATTRIBUTION=Co-authored with Test" "$T/calls.log" || fail "happy: ATTRIBUTION reaches the lane"
 grep -q "^run|id=stub-1|model=codex/test-model|prompt=.*-lane-1.md$" "$T/calls.log" || fail "happy: --lane-model wins"
@@ -584,6 +583,7 @@ CI deadbeef pass
 EOF
 run_build
 grep -q "REVIEW-INCOMPLETE" <<<"$OUT" && fail "verdict-period-changes: a CHANGES. verdict is not missing: $OUT"
+expect_verdict "TKT tkt-build CHANGES p1=* p2=* p3=* mutants=* findings=* log=*" "verdict-period-changes"
 
 # --- a lane's untracked root run/ is moved before delegate records its change set ---
 setup_case stray-run-moved
