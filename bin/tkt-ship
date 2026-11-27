@@ -266,11 +266,14 @@ gate_diff_comparison() {
 # full-gate PASS by journal order becomes the comparison base; a current PASS
 # replaces a missing or stale body line. A stale body line refuses only when
 # no full PASS exists in the journal. Current-PASS body writes remain best effort.
+# A full PASS may end in the tip case tkt-gate recorded (#2016); a checks-only
+# PASS never matches.
 journal_path="${state%.state}.journal"
 last_pass=""
 last_pass_head=""
 local_gate_cmd=""
-if grep -Eq 'tkt-gate PASS head=[0-9a-fA-F]{40}$' "$journal_path" 2>/dev/null \
+gate_pass_ere='tkt-gate PASS head=[0-9a-fA-F]{40}( tip=(pushed|local-ahead|new-branch))?$'
+if grep -Eq "$gate_pass_ere" "$journal_path" 2>/dev/null \
   || grep -q 'tkt-fix gate PASS' "$journal_path" 2>/dev/null; then
   if [ "$takeover" -eq 1 ]; then
     local_gate_cmd="$takeover_gate"
@@ -290,7 +293,7 @@ if [ -n "$local_gate_cmd" ]; then
 fi
 # Scan both evidence types together so the newest valid entry wins by journal
 # order. A wrong-hash fix credit cannot replace or hide earlier valid evidence.
-gate_pass_re='tkt-gate PASS head=([0-9a-fA-F]{40})$'
+gate_pass_re='tkt-gate PASS head=([0-9a-fA-F]{40})( tip=(pushed|local-ahead|new-branch))?$'
 fix_pass_re='(^| )tkt-fix gate PASS head=([0-9a-fA-F]{40}) cmd=([0-9a-fA-F]{64})$'
 while IFS=: read -r _ journal_line; do
   if [[ "$journal_line" =~ $gate_pass_re ]]; then
@@ -305,7 +308,7 @@ while IFS=: read -r _ journal_line; do
       if [ "$fix_head" = "$pr_head" ]; then credit_at_head=1; fi
     fi
   fi
-done < <(grep -nE 'tkt-gate PASS head=[0-9a-fA-F]{40}$|(^| )tkt-fix gate PASS head=[0-9a-fA-F]{40} cmd=[0-9a-fA-F]{64}$' "$journal_path" 2>/dev/null || true)
+done < <(grep -nE "$gate_pass_ere"'|(^| )tkt-fix gate PASS head=[0-9a-fA-F]{40} cmd=[0-9a-fA-F]{64}$' "$journal_path" 2>/dev/null || true)
 # A valid credit at the exact PR head is a full gate at that head, whatever
 # came after it in the journal.
 if [ "$credit_at_head" -eq 1 ]; then

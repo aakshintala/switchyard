@@ -4466,7 +4466,7 @@ EOF
     new_head="$(git -C "$WT" rev-parse HEAD)"
     hash="$(printf '%s' 'true' | shasum -a 256 | awk '{print $1}')"
     grep -Fq "tkt-fix gate PASS head=$new_head cmd=$hash" "$journal" || fail "$name did not journal the exact gate credit: $(cat "$journal")"
-    ! grep -Eq 'tkt-gate PASS head=[0-9a-fA-F]{40}$' "$journal" || fail "$name wrote a full tkt-gate PASS line: $(cat "$journal")"
+    ! grep -Eq 'tkt-gate PASS head=[0-9a-fA-F]{40}( tip=[a-z-]+)?$' "$journal" || fail "$name wrote a full tkt-gate PASS line: $(cat "$journal")"
     if [ "$mode" = accepted ] || [ "$mode" = chain-own-row ]; then
       grep -Fq 'tkt-job gate slot=fix1 job=j1 cmd64=' "$journal" || fail "$name lacks its full-gate job journal row"
     fi

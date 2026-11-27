@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# tkt-gate: pre-push checks and the gate on the remote tip, or validates a
+# tkt-gate: pre-push checks and the gate on the local branch tip, or validates a
 # delegate job's gate evidence after the stored-head, fetch, tip, fence and
-# history checks. The normal path checks origin/<branch> (and --expect-head),
-# checks git diff --name-only --no-renames origin/main...HEAD against the plan's
-# Files or the state's fence list, then runs the plan gate. From-job evidence
-# uses cmd64=/env64= jq base64 fields and requires the newest job's own journal
+# history checks. --from-job accepts --expect-head and checks headAfter against
+# HEAD plus a state or branch PR head when present; --checks-only and
+# --from-job are exclusive. The normal path passes when origin/<branch> is
+# missing or an ancestor of HEAD, checks --expect-head against HEAD, checks git
+# diff --name-only --no-renames origin/main...HEAD against the plan's Files or
+# the state's fence list, then runs the plan gate. From-job evidence uses
+# cmd64=/env64= jq base64 fields and requires the newest job's own journal
 # line before sharing the normal head update and PASS path.
 # For takeovers, the gate comes from state key `gate` when the plan value is
 # `takeover <ref>`, and the file fence comes from the state's `fence` list.
@@ -43,7 +46,7 @@ while [ $# -gt 0 ]; do
     *) usage ;;
   esac
 done
-[ -z "$from_job" ] || { [ "$checks_only" -eq 0 ] && [ -z "$expect_head" ]; } || usage
+[ -z "$from_job" ] || [ "$checks_only" -eq 0 ] || usage
 
 script_path="$0"
 case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
@@ -127,13 +130,14 @@ from_job_refuse() {
   printf 'tkt-gate: --from-job check failed: %s\n' "$*" >&2
   exit 1
 }
+from_job_journal_pr_note=""
 
 # Validate delegate evidence before writing either the source marker or PASS.
 # job-record uses delegate's lookup order; resumed jobs follow the same
 # supersededBy chain that tkt-job watches.
 from_job_pass() {
   local jobid record gate_exit expected_gate journal_path
-  local command_match head_after pr pr_repo pr_head dirty candidate_id chain current_env selected_cmd selected_env
+  local command_match head_after pr pr_repo pr_head pr_list pr_number dirty candidate_id chain current_env selected_cmd selected_env
   local job_gate_journal_found=0 job_gate_journal_id=""
   local -a seen=()
   chain="$(job_walk_superseded "$from_job")" || from_job_refuse "job record supersededBy cycle in chain starting at id=$from_job"
@@ -183,12 +187,34 @@ from_job_pass() {
   head_after="$(jq -r '.result.changeSet.headAfter // empty' "$record" 2>/dev/null)" || from_job_refuse "head check failed: cannot read changeSet.headAfter for id=$jobid"
   [ -n "$head_after" ] || from_job_refuse "head check failed: job record is missing changeSet.headAfter for id=$jobid"
   local_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || from_job_refuse "head check failed: cannot read worktree HEAD in $worktree"
-  pr="$(tkt get pr 2>/dev/null)" || from_job_refuse "PR head check failed: state has no PR"
-  pr_repo="$(git -C "$worktree" config --get remote.origin.url 2>/dev/null)" || from_job_refuse "PR head check failed: cannot read origin URL in $worktree"
-  pr_head="$(gh pr view "$pr" --repo "$pr_repo" --json headRefOid --jq .headRefOid 2>/dev/null)" || from_job_refuse "PR head check failed: cannot read PR $pr head"
-  [ -n "$pr_head" ] || from_job_refuse "PR head check failed: PR $pr has no head SHA"
-  if [ "$head_after" != "$local_head" ] || [ "$head_after" != "$pr_head" ]; then
-    from_job_refuse "head check failed: job head=$head_after worktree HEAD=$local_head PR head=$pr_head"
+  if pr="$(tkt get pr 2>/dev/null)"; then
+    pr_repo="$(git -C "$worktree" config --get remote.origin.url 2>/dev/null)" || from_job_refuse "PR head check failed: cannot read origin URL in $worktree"
+    pr_head="$(gh pr view "$pr" --repo "$pr_repo" --json headRefOid --jq .headRefOid 2>/dev/null)" || from_job_refuse "PR head check failed: cannot read PR $pr head"
+    [ -n "$pr_head" ] || from_job_refuse "PR head check failed: PR $pr has no head SHA"
+  else
+    pr_repo="$(git -C "$worktree" config --get remote.origin.url 2>/dev/null)" || from_job_refuse "PR head check failed: cannot read origin URL in $worktree"
+    pr_list="$(command gh pr list --head "$branch" --repo "$pr_repo" --json number,headRefOid 2>/dev/null)" || from_job_refuse "PR head check failed: cannot look up branch PR"
+    if ! jq -e 'if type == "array" then all(.[]; (type == "object") and (.number | type == "number") and (.headRefOid | type == "string")) else false end' <<<"$pr_list" >/dev/null 2>&1; then
+      from_job_refuse "PR head check failed: branch PR lookup returned invalid JSON"
+    fi
+    if [ "$(jq -r 'length' <<<"$pr_list")" -gt 0 ]; then
+      pr_number="$(jq -r '.[0].number | tostring' <<<"$pr_list")" || from_job_refuse "PR head check failed: cannot read branch PR number"
+      pr_head="$(jq -r '.[0].headRefOid // empty' <<<"$pr_list")" || from_job_refuse "PR head check failed: cannot read branch PR $pr_number head"
+      [ -n "$pr_head" ] || from_job_refuse "PR head check failed: branch PR $pr_number has no head SHA"
+    else
+      pr_head=""
+      from_job_journal_pr_note=" pr=none"
+    fi
+  fi
+  if [ -n "$expect_head" ] && [ "$head_after" != "$expect_head" ]; then
+    from_job_refuse "head check failed: job head=$head_after expect=$expect_head"
+  fi
+  if [ -n "$pr_head" ]; then
+    if [ "$head_after" != "$local_head" ] || [ "$head_after" != "$pr_head" ]; then
+      from_job_refuse "head check failed: job head=$head_after worktree HEAD=$local_head PR head=$pr_head"
+    fi
+  elif [ "$head_after" != "$local_head" ]; then
+    from_job_refuse "head check failed: job head=$head_after worktree HEAD=$local_head"
   fi
 
   if ! jq -e '
@@ -311,23 +337,34 @@ git -C "$worktree" fetch origin >/dev/null 2>&1 || {
 hist=""
 digest=""
 
-# Tip: origin/<branch> equals the local HEAD, and equals --expect-head.
+# Tip: origin/<branch> is missing or an ancestor of the local HEAD. The
+# --expect-head guard always compares against the local HEAD.
 local_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
   echo "tkt-gate: cannot read worktree HEAD: $worktree" >&2
   exit 2
 }
 remote_head="$(git -C "$worktree" rev-parse --verify "origin/$branch" 2>/dev/null || true)"
+tip_case=""
 tip_detail=""
 if [ -z "$remote_head" ]; then
-  tip_detail="origin/$branch missing head=$local_head"
-elif [ "$remote_head" != "$local_head" ]; then
-  tip_detail="origin/$branch=$remote_head head=$local_head"
-elif [ -n "$expect_head" ] && [ "$remote_head" != "$expect_head" ]; then
-  tip_detail="origin/$branch=$remote_head expect=$expect_head head=$local_head"
+  tip_case="new-branch"
+elif [ "$remote_head" = "$local_head" ]; then
+  tip_case="pushed"
+elif git -C "$worktree" merge-base --is-ancestor "$remote_head" "$local_head" >/dev/null 2>&1; then
+  tip_case="local-ahead"
+elif git -C "$worktree" merge-base --is-ancestor "$local_head" "$remote_head" >/dev/null 2>&1; then
+  tip_case="remote-ahead"
+  tip_detail="origin/$branch=$remote_head is ahead of head=$local_head"
+else
+  tip_case="diverged"
+  tip_detail="origin/$branch=$remote_head diverged from head=$local_head"
+fi
+if [ -n "$expect_head" ] && [ "$expect_head" != "$local_head" ]; then
+  tip_detail="${tip_detail}${tip_detail:+; }expect=$expect_head does not equal head=$local_head"
 fi
 if [ -n "$tip_detail" ]; then
   digest="$tip_detail"
-  emit "TIP $tip_detail" 1
+  emit "TIP $tip_detail" 1 "tip=$tip_case"
 fi
 
 # Coverage: every changed path is checked against Files or the fence list.
@@ -603,7 +640,7 @@ if [ "$checks_only" -eq 0 ]; then
   gatelog="$(mktemp "$run/$namebase-tkt-gate-XXXXXX")"
   mv "$gatelog" "$gatelog.log"
   gatelog="$gatelog.log"
-  write_gate_script "$script" "$gatelog" "$env_prefix" "$gate_cmd" "tkt-gate: the pre-push gate on the remote tip"
+  write_gate_script "$script" "$gatelog" "$env_prefix" "$gate_cmd" "tkt-gate: the pre-push gate on the local tip"
   rc=0
   (cd "$worktree" && bash "$script") >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -663,9 +700,9 @@ if [ "$checks_only" -eq 0 ] && gate_pr="$(tkt get pr 2>/dev/null)"; then
   fi
 fi
 if [ -n "$from_job" ]; then
-  tkt journal "tkt-gate from-job id=$from_job_id head=$from_job_head"
+  tkt journal "tkt-gate from-job id=$from_job_id head=$from_job_head$from_job_journal_pr_note"
 fi
 if [ "$checks_only" -eq 1 ]; then
-  emit "PASS head=$local_head" 0 checks-only
+  emit "PASS head=$local_head" 0 "checks-only tip=$tip_case"
 fi
-emit "PASS head=$local_head" 0
+emit "PASS head=$local_head" 0 "tip=$tip_case"
