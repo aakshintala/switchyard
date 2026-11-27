@@ -4,7 +4,7 @@
 # A lane blocked before its PR resumes with tkt-job --resume <job.lane>; the resumed lane must finish its brief's push step (which opens the PR) before tkt-build --from gate. When no lane ran, use tkt-build --from lane.
 # Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--collect-fix <job id>] [--findings <file>]
 #   [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>]
-#   [--fix-model <id>] [--verify-model <id>] [--collect-verify <job id>]
+#   [--fix-model <id>] [--verify-model <id>] [--collect-verify <job id>] [--no-body]
 #   --prompt appends orchestrator context to a fresh fix job; --resume requires --prompt except for adoption below.
 #   --collect-fix watches the stored job in the open fix slot and records its round.
 #   --collect-fix and --verify --resume can adopt a BLOCKED passed-gate complete tree after its hand commit is pushed.
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify | --collect-verify <job id> | --verify [--since <sha>] --collect-fix <job id> | --no-verify --collect-fix <job id>) [--findings <file>] [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
+  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify | --collect-verify <job id> | --verify [--since <sha>] --collect-fix <job id> | --no-verify --collect-fix <job id>) [--findings <file>] [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>] [--no-body]" >&2
   echo "  --collect-fix <job id> recollects the stored job in the open fix slot and continues the normal round; it does not dispatch another job." >&2
   echo "  A BLOCKED passed-gate complete tree can be adopted after its hand commit is pushed; --verify --resume does not resume it." >&2
   echo "  An abnormal end (ASK, BLOCKED, ERROR, STALLED, CANCELLED) closes the slot without a round." >&2
@@ -27,12 +27,13 @@ usage() {
 
 [ $# -ge 2 ] || usage
 state="$1"; shift
-verify=0; noverify=0; findings=""; since=""; resume=""; prompt=""; fixmodel=""; verifymodel=""; collect_verify_job=""; collect_fix_job=""
+verify=0; noverify=0; no_body=0; body_skip_note=""; findings=""; since=""; resume=""; prompt=""; fixmodel=""; verifymodel=""; collect_verify_job=""; collect_fix_job=""
 ruling_requested=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --verify) verify=1; shift ;;
     --no-verify) noverify=1; shift ;;
+    --no-body) no_body=1; shift ;;
     --findings) [ $# -ge 2 ] && [ -n "$2" ] || usage; findings="$2"; shift 2 ;;
     --ruling) [ $# -ge 2 ] && [ -n "$2" ] || usage; ruling_requested+=("$2"); shift 2 ;;
     --since) [ $# -ge 2 ] && [ -n "$2" ] || usage; since="$2"; shift 2 ;;
@@ -49,7 +50,7 @@ if [ -n "$collect_verify_job" ]; then
   [ -z "$collect_fix_job" ] && [ "$verify" -eq 0 ] && [ "$noverify" -eq 0 ] && [ -z "$findings" ] \
     && [ "${#ruling_requested[@]}" -eq 0 ] && [ -z "$since" ] \
     && [ -z "$resume" ] && [ -z "$prompt" ] && [ -z "$fixmodel" ] \
-    && [ -z "$verifymodel" ] || usage
+    && [ -z "$verifymodel" ] && [ "$no_body" -eq 0 ] || usage
 elif [ -n "$collect_fix_job" ]; then
   [ -z "$resume" ] && [ -z "$prompt" ] && [ -z "$fixmodel" ] && [ -z "$findings" ] || usage
   [ "$verify" -ne "$noverify" ] || usage
@@ -314,6 +315,9 @@ take_state_lock tkt-fix "$lockdir"
 rmdir "$lockdir"
 
 t require repo issue branch worktree run
+if [ "$no_body" -eq 1 ]; then t set body.locked 1; fi
+body_locked=0
+[ "$(t get body.locked 2>/dev/null || true)" != 1 ] || body_locked=1
 repo="$(t get repo)"; issue="$(t get issue)"; set_namebase "$repo" "$issue"; branch="$(t get branch)"
 worktree="$(t get worktree)"; run="$(t get run)"
 reviewed="$(t get reviewed 2>/dev/null || true)"
@@ -440,6 +444,7 @@ emit() {
   verdict="$1"; ec="$2"; shift 2
   logpath="$run/$namebase-tkt-fix-$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')-$(date +%H%M%S).log"
   { printf 'TKT tkt-fix %s log=%s\n' "$verdict" "$logpath"
+    [ -z "$body_skip_note" ] || printf '%s\n' "$body_skip_note"
     for ruling_note in ${ruling_notes[@]+"${ruling_notes[@]}"}; do printf '%s\n' "$ruling_note"; done
     [ $# -eq 0 ] || printf '%s\n' "$@" | head -n 40
   } >"$logpath"
@@ -1218,13 +1223,21 @@ if [ "$fix_gate_rc" -eq 0 ]; then
   brief_gate_cmd="$fix_gate_cmd"
 fi
 record_round_findings
-fix_handoff_instruction="$(printf '%s\n' \
-  'Commit only; do not push, do not run `gh-ci wait`, and report `ready, not pushed`. tkt-fix waits on CI and pushes the fix head.' \
-  'Do not run `gh pr edit`.' \
-  'When this round changes what the PR does:' \
-  "Write the full new PR body to: \`$fix_body_file\`" \
-  'Report the body file path to tkt-fix.' \
-  'Leave the file absent or empty when no body change is needed.')"
+fix_handoff_instruction=""
+if [ "$body_locked" -eq 1 ]; then
+  fix_handoff_instruction="$(printf '%s\n' \
+    'Commit only; do not push, do not run `gh-ci wait`, and report `ready, not pushed`. tkt-fix waits on CI and pushes the fix head.' \
+    'Do not run `gh pr edit`.' \
+    'This round must not change the PR body.')"
+else
+  fix_handoff_instruction="$(printf '%s\n' \
+    'Commit only; do not push, do not run `gh-ci wait`, and report `ready, not pushed`. tkt-fix waits on CI and pushes the fix head.' \
+    'Do not run `gh pr edit`.' \
+    'When this round changes what the PR does:' \
+    "Write the full new PR body to: \`$fix_body_file\`" \
+    'Report the body file path to tkt-fix.' \
+    'Leave the file absent or empty when no body change is needed.')"
+fi
 if [ "$recover_unpushed" -eq 1 ]; then
   # Recovery replaces this run's dispatch, so a --resume on it never runs.
   if [ -n "$resume" ]; then
@@ -1410,7 +1423,14 @@ if [ "$remote_head" != "$new_head" ] && { [ -z "$remote_head" ] || git -C "$work
   if ! push_out="$(git -C "$worktree" push origin "$branch" 2>&1)"; then emit "PUSH-FAIL" 1 "$push_out"; fi
   tkt_claim_pushed_hunks "$issue" "$worktree" "$repo"
 fi
-tkt_publish_pr_body_file "$fix_body_file" "$pr" "$repo" tkt-fix || true
+if [ "$body_locked" -eq 1 ]; then
+  if [ -s "$fix_body_file" ]; then
+    t journal "tkt-fix BODY-SKIPPED locked"
+    body_skip_note="body-skipped=locked file=$fix_body_file"
+  fi
+else
+  tkt_publish_pr_body_file "$fix_body_file" "$pr" "$repo" tkt-fix || true
+fi
 
 grc=0
 if [ "$retry_collect_gate" -eq 1 ]; then
