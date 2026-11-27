@@ -1998,6 +1998,7 @@ EOF
   grep -Fq 'Do not run `gh pr edit`.' "$T/job-prompt.md" || fail "resume prompt does not forbid gh pr edit"
   grep -Fq "Write the full new PR body to: \`$CDIR/run/switchyard-529-fix-round-1-pr-body.md\`" "$T/job-prompt.md" \
     || fail "resume prompt does not name the round body file"
+  grep -Fq 'Resume context.' "$T/job-prompt.md" || fail "resume prompt dropped the caller's --prompt content"
 
   setup_case commit-only-edit-fail
   mkdir -p "$HOME/.agents/skills/review-loop/briefs"
