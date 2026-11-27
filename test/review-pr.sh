@@ -506,7 +506,7 @@ grep -q "^VERDICT: APPROVE$" <<<"$out" && fail "overbuild verdict is never bare"
 grep -q "^P1 fix the off-by-one$" <<<"$out" || fail "collect carries P1 lines"
 grep -q "^CI $SHORT pass$" <<<"$out" || fail "collect CI line"
 grep -q UNFINISHED <<<"$out" && fail "collect has no UNFINISHED"
-leftovers="$(printf '%s' "$out" | grep -vE '^(patch-id |VERDICT|P[123] |FIX-OK|FIX-INCOMPLETE|CI |UNFINISHED |BAD-VERDICT )' || true)"
+leftovers="$(printf '%s' "$out" | grep -vE '^(patch-id |dropped-body-findings=|VERDICT|P[123] |FIX-OK|FIX-INCOMPLETE|CI |UNFINISHED |BAD-VERDICT )' || true)"
 [ -z "$leftovers" ] || fail "collect stdout shapes only: [$leftovers]"
 [ "$(cat "$T/state/comment-pr.txt")" = "7" ] || fail "comment posted to PR 7"
 [ "$(head -1 "$T/state/comment.md")" = "review-pr: patch-id $EXPECTED_PID, head $FAKE_SHA" ] || fail "comment first line"
@@ -789,7 +789,26 @@ printf '1 body\n1 comments\n3 body\n3 comments\n2 body\n2 comments\n' >"$T/expec
 cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "ticket fetches preserve issue order and fetch body then comments"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "prefetch review collect exits 0"
 
-# --- case: a non-empty PR body reaches every reviewer as an untrusted claim
+# --- case: collected PR-body findings are dropped from rows and journaled
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+P1 .review-context/pr-body.md:1 — body text must change
+P2 PR-body:2 — another body-only finding
+P0 PR-body:3 — critical-looking generated text
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M \
+  >/dev/null 2>&1 || fail "body-only finding start exits 0"
+out="$(bash "$REVIEW" collect job-standards --findings-out "$T/body-findings.md" 2>"$T/stderr.txt")" \
+  || fail "body-only finding collect exits 0: $(cat "$T/stderr.txt")"
+grep -Fxq 'dropped-body-findings=3' <<<"$out" || fail "collect journals the three dropped body findings: $out"
+! grep -q '^P[0-3] ' <<<"$out" || fail "collect prints no body-only finding rows: $out"
+grep -Fxq 'no open findings' "$T/body-findings.md" || fail "findings output contains no body-only findings"
+grep -Fq 'dropped-body-findings=3' "$T/state/comment.md" || fail "posted review journal records dropped body finding count"
+! grep -q '^P[0-3] .*PR-body\|^P[0-3] .*\.review-context/pr-body\.md' "$T/state/comment.md" \
+  || fail "posted review omits body-only finding rows"
+
+# --- case: review does not fetch or stage the PR body
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 printf 'claim: 30-run load proof\n' >"$T/state/pr-body.txt"
@@ -800,45 +819,38 @@ STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
-  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "non-empty body start exits 0"
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "body-free review start exits 0"
+[ ! -e "$T/state/body-calls.txt" ] || fail "review never requests the PR body"
 for role in standards spec overbuild; do
   body_file="$(worktree_for "$role")/.review-context/pr-body.md"
-  [ -f "$body_file" ] || fail "$role worktree holds the PR body"
-  cmp -s "$T/state/pr-body.txt" "$body_file" || fail "$role worktree body matches the fetched body"
-  grep -Fq "The PR body is the lane's claim, not ground truth. Check evidence it cites; do not trust it." \
-    "$T/state/prompt-$role.md" || fail "$role prompt treats the PR body as an untrusted claim"
-  grep -Fq '.review-context/pr-body.md' "$T/state/prompt-$role.md" || fail "$role prompt names the PR body file"
+  [ ! -e "$body_file" ] || fail "$role worktree does not hold the PR body"
+  ! grep -Fq 'PR body' "$T/state/prompt-$role.md" || fail "$role prompt does not ask the reviewer to judge the PR body"
 done
-bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "non-empty body collect exits 0"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "body-free review collect exits 0"
 
-for body_kind in empty whitespace; do
-  reset_state
-  printf 'ci\tpass\n' >"$T/checks.txt"
-  if [ "$body_kind" = empty ]; then : >"$T/state/pr-body.txt"; else printf ' \t\n  \n' >"$T/state/pr-body.txt"; fi
-  write_record standards DONE "VERDICT standards: APPROVE
+# A failed PR-body API read cannot block a review because the body is not read.
+reset_state
+touch "$T/state/fail-body"
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
 STATUS: DONE" 0
-  start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || \
-    fail "$body_kind body start exits 0"
-  wt="$(worktree_for standards)/.review-context"
-  [ ! -e "$wt/pr-body.md" ] || fail "$body_kind body creates no PR body file"
-  ! grep -Fq "The PR body is the lane's claim" "$T/state/prompt-standards.md" || \
-    fail "$body_kind body adds no claim line"
-  bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "$body_kind body collect exits 0"
-done
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M \
+  >/dev/null 2>&1 || fail "review continues when PR body access would fail"
+[ ! -e "$T/state/body-calls.txt" ] || fail "body API failure path is never called"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "body API failure review collects"
 
-# --- case: a --context pr-body.md is disambiguated from the fetched PR body
+# --- case: a --context pr-body.md remains ordinary caller-supplied context
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'claim from PR\n' >"$T/state/pr-body.txt"
 printf 'outside context\n' >"$T/pr-body.md"
 write_record standards DONE "VERDICT standards: APPROVE
 STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M --context "$T/pr-body.md" \
-  >/dev/null 2>&1 || fail "body context collision start exits 0"
+  >/dev/null 2>&1 || fail "pr-body-named context start exits 0"
 wt="$(worktree_for standards)/.review-context"
-cmp -s "$T/state/pr-body.txt" "$wt/pr-body.md" || fail "the fetched body keeps its canonical path"
-cmp -s "$T/pr-body.md" "$wt/1-pr-body.md" || fail "the context file gets a disambiguated path"
-bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "body context collision collect exits 0"
+cmp -s "$T/pr-body.md" "$wt/pr-body.md" || fail "caller context is copied without a fetched body collision"
+[ ! -e "$T/state/body-calls.txt" ] || fail "caller context start does not fetch the PR body"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "pr-body-named context collect exits 0"
 
 # --- case: a checked-out .review-context symlink cannot redirect the copy
 reset_state
@@ -853,20 +865,30 @@ wt="$(worktree_for standards)"
 [ ! -e "$T/context-target/pr.diff" ] || fail "copy does not write through the PR symlink"
 bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "symlink context collect exits 0"
 
-# --- case: absent issue and spec default fetches the PR ticket only
+# --- case: no ticket does not use the PR description as a spec
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
-start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || fail "default ticket prefetch start exits 0"
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || fail "review without a ticket starts"
 wt="$(worktree_for spec)/.review-context"
-[ -f "$wt/issue-7.md" ] || fail "spec worktree holds PR #7 as ticket text"
-[ ! -e "$wt/issue-1.md" ] || fail "spec worktree fetches no unrelated ticket"
-printf '7 body\n7 comments\n' >"$T/expected-issue-calls.txt"
-cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "default ticket fetches only the PR body and comments"
-bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "default ticket prefetch collect exits 0"
+[ ! -e "$wt/issue-7.md" ] || fail "review does not stage the PR description as ticket text"
+[ ! -s "$T/state/issue-calls.txt" ] || fail "review does not fetch the PR description as ticket text"
+bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "no-ticket review collects"
 
-# --- case: an explicit spec joins the PR ticket and deduplicates issues
+# Explicitly naming the PR number as an issue still does not expose its description.
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --issue 7 --model M >/dev/null 2>&1 \
+  || fail "review with the PR number as an issue starts"
+wt="$(worktree_for spec)/.review-context"
+[ ! -e "$wt/issue-7.md" ] || fail "explicit PR number does not stage the PR description"
+[ ! -s "$T/state/issue-calls.txt" ] || fail "explicit PR number does not fetch the PR description"
+bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "explicit PR-number review collects"
+
+# --- case: an explicit spec fetches only its issue
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record spec DONE "VERDICT spec: APPROVE
@@ -874,10 +896,10 @@ STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --axes spec --spec 2 --model M >/dev/null 2>&1 || \
   fail "explicit spec prefetch start exits 0"
 wt="$(worktree_for spec)/.review-context"
-[ -f "$wt/issue-7.md" ] || fail "explicit spec fetches the PR ticket"
-[ -f "$wt/issue-2.md" ] || fail "explicit spec fetches its ticket"
-printf '7 body\n7 comments\n2 body\n2 comments\n' >"$T/expected-issue-calls.txt"
-cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "PR ticket precedes an explicit spec ticket"
+[ ! -e "$wt/issue-7.md" ] || fail "explicit spec does not fetch the PR description"
+[ -f "$wt/issue-2.md" ] || fail "explicit spec fetches its issue"
+printf '2 body\n2 comments\n' >"$T/expected-issue-calls.txt"
+cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "explicit spec fetches only its issue"
 bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "explicit spec prefetch collect exits 0"
 
 reset_state
@@ -901,16 +923,16 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || fail "standards-only prefetch start exits 0"
 [ -f "$(worktree_for standards)/.review-context/pr.diff" ] || fail "standards-only worktree holds the diff"
-[ -f "$(worktree_for standards)/.review-context/issue-7.md" ] || fail "standards-only run fetches the PR ticket"
-printf '7 body\n7 comments\n' >"$T/expected-issue-calls.txt"
-cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "standards-only run fetches ticket body and comments"
+[ ! -e "$(worktree_for standards)/.review-context/issue-7.md" ] || fail "standards-only run does not stage the PR description"
+[ ! -s "$T/state/issue-calls.txt" ] || fail "standards-only run does not fetch the PR description"
 bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "standards-only prefetch collect exits 0"
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || fail "spec-only prefetch start exits 0"
-[ -f "$(worktree_for spec)/.review-context/issue-7.md" ] || fail "spec-only run fetches the PR ticket"
+[ ! -e "$(worktree_for spec)/.review-context/issue-7.md" ] || fail "spec-only run does not stage the PR description"
+[ ! -s "$T/state/issue-calls.txt" ] || fail "spec-only run does not fetch the PR description"
 bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "spec-only prefetch collect exits 0"
 
 # --- case: overbuild-only runs fetch and receive ticket text
@@ -929,7 +951,7 @@ grep -Fq '.review-context/issue-886.md' "$T/state/prompt-overbuild.md" || \
 bash "$REVIEW" collect job-overbuild >/dev/null 2>&1 || fail "overbuild-only prefetch collect exits 0"
 
 # --- case: fetch failure stops before any worktree or job starts
-for failed_fetch in fail-base empty-diff fail-issue fail-issue-comments fail-body; do
+for failed_fetch in fail-base empty-diff fail-issue fail-issue-comments; do
   reset_state
   printf 'ci\tpass\n' >"$T/checks.txt"
   write_record spec DONE "VERDICT spec: APPROVE
@@ -945,7 +967,7 @@ STATUS: DONE" 0
     fail-base) grep -q 'could not fetch the base branch for PR 7' <<<"$err" || fail "$failed_fetch names the base branch";;
     empty-diff) grep -q 'could not fetch the diff of PR 7' <<<"$err" || fail "$failed_fetch names the PR diff";;
     fail-issue|fail-issue-comments) grep -q 'could not fetch ticket #1' <<<"$err" || fail "$failed_fetch names the ticket";;
-    fail-body) grep -q 'could not fetch the body of PR 7' <<<"$err" || fail "$failed_fetch names the PR body";;
+
   esac
   [ ! -e "$T/state/runs.txt" ] || fail "$failed_fetch starts no job"
   [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || fail "$failed_fetch creates no worktree"
@@ -1039,7 +1061,7 @@ collect: review-pr collect job-verify" ] || fail "verify with $flag prints the v
   run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-verify")"
   case ":$(cat "$T/state/path-verify"):" in *":$run_dir/cargo-slot:"*) ;; *) fail "verify delegate PATH includes cargo-slot" ;; esac
   [ -x "$run_dir/cargo-slot/cargo" ] || fail "verify run keeps its cargo-slot shim"
-  [ "$(cat "$T/state/body-calls.txt")" = "7" ] || fail "verify with $flag fetches the PR body"
+  [ ! -e "$T/state/body-calls.txt" ] || fail "verify with $flag does not fetch the PR body"
   bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with $flag collects"
 done
 reset_state
@@ -1532,11 +1554,9 @@ grep -q '^P1 unposted orphan finding$' <<<"$out" || fail "orphan result still re
 [ "$(cat "$T/orphan-findings.txt")" = "P1 unposted orphan finding" ] || fail "orphan writes --findings-out"
 [ ! -e "$T/state/comment-pr.txt" ] || fail "orphan unposted collect posts nothing"
 
-# --- case: empty verify diff refuses an unrefuted finding before starting a job,
-# even when the PR body is non-empty
+# --- case: empty verify diff refuses an unrefuted finding before starting a job
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'The PR fixes the value.\n' >"$T/state/pr-body.txt"
 printf 'P1 file.txt:1 — wrong value — repair it\n- Evidence: reviewed code has the wrong value\n' >"$T/findings.txt"
 write_record verify DONE "FIX-OK
 STATUS: DONE" 0
@@ -1826,7 +1846,7 @@ start_review 7 --repo O/N --cwd "$T/clone" \
   --model M --overbuild-model M2 >/dev/null 2>&1 || fail "start exits 0"
 out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || fail "concerns with a verdict collect exits 0"
 grep -q UNFINISHED <<<"$out" && fail "concerns with a verdict is finished"
-grep -q 'for issue #7 (spec #7)' "$T/state/prompt-spec.md" || fail "ticketless PR is its own issue and spec"
+grep -q 'for issue #none (spec #none)' "$T/state/prompt-spec.md" || fail "ticketless PR does not use its description as a spec"
 
 # --- case: a verdict glued onto narration is no verdict
 reset_state
@@ -2917,65 +2937,49 @@ bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
 grep -Fq 'Files in .review-context/ for this verify: none' "$T/state/prompt-verify.md" || \
   fail "verify without --context lists no context files"
 
-# --- case: non-empty PR body is listed in verify context by default
+# --- case: a body-only legacy finding does not refuse an empty verify diff
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'The PR supports dry runs.\n' >"$T/state/pr-body.txt"
-printf 'no open findings\n' >"$T/findings.txt"
-write_record verify DONE "FIX-OK
-STATUS: DONE" 0
-start_review 7 --repo O/N --cwd "$T/clone" --model M \
-  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || \
-  fail "verify start with a non-empty PR body exits 0"
-wt="$(worktree_for verify)"
-[ "$(cat "$T/state/body-calls.txt")" = "7" ] || fail "verify fetches the PR body"
-cmp -s "$T/state/pr-body.txt" "$wt/.review-context/pr-body.md" || \
-  fail "verify copies the PR body into its worktree"
-grep -Fq '.review-context/pr-body.md' "$T/state/prompt-verify.md" || \
-  fail "verify brief lists the PR body"
-run_out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || \
-  fail "verify collect with a non-empty PR body exits 0"
-grep -q '^FIX-OK$' <<<"$run_out" || fail "verify run prints FIX-OK"
-
-# --- case: a finding the PR body resolves verifies as fixed
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'The PR supports dry runs.\n' >"$T/state/pr-body.txt"
-printf 'P2 product.md:1 — missing statement — say the PR supports dry runs\nrefuted: fixed in PR body\n' >"$T/findings.txt"
-write_record verify DONE "FIX-OK
-STATUS: DONE" 0
-run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
-  --verify "$T/findings.txt" --since "$FAKE_SHA" 2>/dev/null)" || \
-  fail "verify of a body-resolved finding exits 0"
-grep -q '^FIX-OK$' <<<"$run_out" || fail "body-resolved finding reports FIX-OK"
-grep -q 'say the PR supports dry runs' "$T/state/prompt-verify.md" || \
-  fail "verify brief carries the body-resolved finding"
-grep -Fq '.review-context/pr-body.md' "$T/state/prompt-verify.md" || \
-  fail "body-resolved finding brief says where to read the PR body"
-grep -Fxq 'FIX-OK' "$T/state/comment.md" || fail "body-resolved finding posts FIX-OK"
-
-# --- case: verify body fetch failure stops before any worktree or job starts
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P2 product.md:1 — missing statement — add the PR body line\n' >"$T/findings.txt"
+printf 'P2 PR-body:1 — body text should change\n' >"$T/findings.txt"
 write_record verify DONE "FIX-OK
 STATUS: DONE" 0
 : >"$T/state/fail-body"
-st=0
-err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M \
-  --verify "$T/findings.txt" --since "$FAKE_SHA" 2>&1 >/dev/null)" || st=$?
-[ "$st" -eq 1 ] || fail "verify body fetch failure exits 1 (got $st)"
-grep -Fxq 'review-pr: could not fetch the body of PR 7' <<<"$err" || \
-  fail "verify body fetch failure uses the review-mode message"
-[ "$(cat "$T/state/body-calls.txt")" = "7" ] || fail "verify attempts to fetch the PR body"
-[ ! -e "$T/state/runs.txt" ] || fail "verify body fetch failure starts no job"
-[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || \
-  fail "verify body fetch failure creates no worktree"
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>"$T/body-verify.err" \
+  || fail "body-only legacy finding does not refuse an empty verify diff: $(cat "$T/body-verify.err")"
+[ ! -e "$T/state/body-calls.txt" ] || fail "verify does not query PR-body text"
+wt="$(worktree_for verify)"
+[ ! -e "$wt/.review-context/pr-body.md" ] || fail "verify does not stage the PR body"
+grep -Fq 'no open findings' "$T/state/prompt-verify.md" || fail "verify removes the legacy body-only finding"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "body-only empty-diff verify collects"
+
+# --- case: --context pr-body.md is ordinary caller-supplied context in verify
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises context copying\n' >"$T/findings.txt"
+mkdir -p "$T/ctx-a"
+printf 'context pr-body contents\n' >"$T/ctx-a/pr-body.md"
+printf 'plan text\n' >"$T/ctx-a/plan.md"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" \
+  --context "$T/ctx-a/plan.md" --context "$T/ctx-a/pr-body.md" \
+  >/dev/null 2>&1 || fail "verify caller context start exits 0"
+wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-verify")"
+[ -f "$wt/.review-context/pr-body.md" ] || fail "verify copies caller context named pr-body.md"
+[ -f "$wt/.review-context/plan.md" ] || fail "verify copies the plan context file"
+cmp -s "$T/ctx-a/pr-body.md" "$wt/.review-context/pr-body.md" || fail "verify copies caller context without a fetched body"
+cmp -s "$T/ctx-a/plan.md" "$wt/.review-context/plan.md" || fail "verify context copy matches the source"
+grep -Fq '.review-context/pr-body.md' "$T/state/prompt-verify.md" || fail "verify lists caller-supplied context"
+[ ! -e "$T/state/body-calls.txt" ] || fail "caller context does not trigger a PR-body read"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify caller context collect exits 0"
 
 # --- case: a reprint of a collected job writes --findings-out too, and posts nothing
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record standards DONE "VERDICT standards: APPROVE
+P1 PR-body:1 — generated description text
 STATUS: DONE" 0
 write_record spec DONE "VERDICT spec: CHANGES
 P2 slow.ts:9 — missing check — add it
@@ -2990,8 +2994,9 @@ bash "$REVIEW" collect job-standards job-spec job-overbuild --findings-out "$T/r
 cp "$T/reprint-a.txt" "$T/reprint-a.saved"
 [ -f "$T/state/comment-pr.txt" ] || fail "reprint first collect posts the comment"
 rm -f "$T/reprint-a.txt" "$T/state/comment-pr.txt"
-bash "$REVIEW" collect job-standards job-spec job-overbuild --findings-out "$T/reprint-b.txt" \
-  >/dev/null 2>&1 || fail "reprint collect exits 0"
+reprint_out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild --findings-out "$T/reprint-b.txt" \
+  2>"$T/reprint.err")" || fail "reprint collect exits 0: $(cat "$T/reprint.err")"
+grep -Fxq 'dropped-body-findings=1' <<<"$reprint_out" || fail "reprint collect journals its dropped body finding: $reprint_out"
 [ -f "$T/reprint-b.txt" ] || fail "reprint collect --findings-out writes the file"
 cmp -s "$T/reprint-a.saved" "$T/reprint-b.txt" || fail "reprint findings file matches the first collect's file"
 [ ! -e "$T/state/comment-pr.txt" ] || fail "reprint collect posts no PR comment"
@@ -3202,7 +3207,6 @@ reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 printf 'P2 findings text\n- Evidence: refuted: this fixture exercises context copying\n' >"$T/findings.txt"
 mkdir -p "$T/ctx-a" "$T/ctx-b"
-printf 'PR body contents\n' >"$T/state/pr-body.txt"
 printf 'context pr-body contents\n' >"$T/ctx-a/pr-body.md"
 printf 'plan text\n' >"$T/ctx-a/plan.md"
 printf 'mutant list\n' >"$T/ctx-b/plan.md"
@@ -3213,16 +3217,16 @@ start_review 7 --repo O/N --cwd "$T/clone" --model M \
   --context "$T/ctx-a/plan.md" --context "$T/ctx-b/plan.md" \
   --context "$T/ctx-a/pr-body.md" >/dev/null 2>&1 || fail "verify --context start exits 0"
 wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-verify")"
-[ -f "$wt/.review-context/pr-body.md" ] || fail "verify --context keeps the PR body under its default name"
-[ -f "$wt/.review-context/1-pr-body.md" ] || fail "verify --context disambiguates a context file named pr-body.md"
+[ -f "$wt/.review-context/pr-body.md" ] || fail "verify --context copies caller context under its basename"
+[ ! -e "$wt/.review-context/1-pr-body.md" ] || fail "verify has no fetched body to disambiguate caller context"
 [ -f "$wt/.review-context/plan.md" ] || fail "verify --context copies the file under its basename"
 [ -f "$wt/.review-context/1-plan.md" ] || fail "verify --context disambiguates a basename collision"
-cmp -s "$T/state/pr-body.txt" "$wt/.review-context/pr-body.md" || fail "verify --context preserves the PR body"
-cmp -s "$T/ctx-a/pr-body.md" "$wt/.review-context/1-pr-body.md" || fail "verify --context copies the pr-body.md context file"
+cmp -s "$T/ctx-a/pr-body.md" "$wt/.review-context/pr-body.md" || fail "verify --context copies caller context"
 cmp -s "$T/ctx-a/plan.md" "$wt/.review-context/plan.md" || fail "verify --context copy matches the first file"
 cmp -s "$T/ctx-b/plan.md" "$wt/.review-context/1-plan.md" || fail "verify --context collision copy matches the second file"
-grep -q '\.review-context/pr-body\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the PR body"
-grep -q '\.review-context/1-pr-body\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the disambiguated pr-body.md context"
+! grep -q '\.review-context/1-pr-body\.md' "$T/state/prompt-verify.md" || fail "verify lists no disambiguated body context"
+grep -q '\.review-context/pr-body\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the caller context"
+[ ! -e "$T/state/body-calls.txt" ] || fail "verify with caller context does not fetch the PR body"
 grep -q '\.review-context/plan\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the context file"
 grep -q '\.review-context/1-plan\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the collision copy"
 bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify --context collect exits 0"

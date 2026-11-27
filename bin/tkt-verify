@@ -63,6 +63,10 @@ review_verdict_lib="$script_dir/lib/review-verdict.sh"
 if [ ! -r "$review_verdict_lib" ]; then echo "tkt-verify: cannot read shared lib: $review_verdict_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$review_verdict_lib"
+pr_body_lib="$script_dir/lib/pr-body.sh"
+if [ ! -r "$pr_body_lib" ]; then echo "tkt-verify: cannot read shared lib: $pr_body_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$pr_body_lib"
 ruling_refutes_lib="$script_dir/lib/ruling-refutes.sh"
 if [ ! -r "$ruling_refutes_lib" ]; then echo "tkt-verify: cannot read shared lib: $ruling_refutes_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -76,8 +80,7 @@ emit() {
   printf 'TKT tkt-verify %s\n' "$message"
   [ "$#" -eq 0 ] || printf '%s\n' "$@"
   if [ -n "${grant_url:-}" ]; then
-    printf 'Recorded ruling: %s\n' "$grant_url"
-    printf 'add this line to the PR body.\n'
+    printf 'Recorded round grant: %s (round %s)\n' "$grant_url" "$grant_round"
   fi
   exit "$status"
 }
@@ -104,12 +107,11 @@ if family_detail="$(model_family_conflict_with_any model.verify "$verifymodel" $
   family_name="${family_detail##*family=}"
   emit "PRECONDITION model-family=$family_name" 2 "$family_detail"
 fi
-verify_since="$reviewed"; previous_body_hash=""
+verify_since="$reviewed"
 if [ "$reverify" -eq 1 ]; then
   recorded_head="$(t get verify.head 2>/dev/null || true)"
   findings="$(t get verify.findings 2>/dev/null || true)"
   verify_since="$(t get verify.since 2>/dev/null || true)"
-  previous_body_hash="$(t get verify.body_hash 2>/dev/null || true)"
 fi
 
 fixopen="$(t get fixopen 2>/dev/null || printf '0')"
@@ -136,7 +138,7 @@ elif [ "$head" = "$reviewed" ]; then
   head_is_reviewed=1
 fi
 if [ "$reverify" -eq 1 ]; then
-  if [ -z "$findings" ] || [ -z "$verify_since" ] || ! t get verify.body_hash >/dev/null 2>&1; then
+  if [ -z "$findings" ] || [ -z "$verify_since" ]; then
     emit "PRECONDITION reverify=history-missing" 2 "the state has no complete last-verify record at reviewed=$reviewed"
   fi
 fi
@@ -147,14 +149,10 @@ fi
 
 round="$(t get round 2>/dev/null || printf '0')"
 case "$round" in ''|*[!0-9]*) round=0 ;; esac
-has_p_lines=0
-if finding_rows input "$findings" >/dev/null; then has_p_lines=1; fi
 issue="$(t get issue 2>/dev/null || true)"
 mkdir -p "$run"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-verify.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
-round_grant_limited=0
-if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ]; then round_grant_limited=1; fi
 ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_grant_ids=()
 ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
 grant_comment_count=0
@@ -189,6 +187,16 @@ if [ "$head_is_reviewed" -eq 1 ] && [ "$reverify" -eq 0 ]; then
   fi
 fi
 
+findings_for_review="$findings"
+if tkt_has_pr_body_findings "$findings"; then
+  findings_for_review="$tmp/findings-without-pr-body.md"
+  tkt_filter_pr_body_findings "$findings" "$findings_for_review"
+fi
+has_p_lines=0
+if finding_rows input "$findings_for_review" >/dev/null; then has_p_lines=1; fi
+round_grant_limited=0
+if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ]; then round_grant_limited=1; fi
+
 for ruling_id in "${ruling_requested[@]+${ruling_requested[@]}}"; do
   case "$ruling_id" in
     ''|*[!0-9]*) ruling_refuse bad-id "$ruling_id" ;;
@@ -199,12 +207,25 @@ for ruling_id in "${ruling_requested[@]+${ruling_requested[@]}}"; do
   if ! fetch_issue_comment "$ruling_id" "$ruling_json" "$ruling_error" "$pr"; then
     ruling_refuse "$ruling_comment_failure" "$ruling_id" "$ruling_comment_hint"
   fi
+  ruling_source="$tmp/ruling-$ruling_id.source.md"
+  jq -r '.body' "$ruling_json" >"$ruling_source" || ruling_refuse fetch "$ruling_id"
   ruling_body="$tmp/ruling-$ruling_id.md"
-  jq -r '.body' "$ruling_json" >"$ruling_body" || ruling_refuse fetch "$ruling_id"
-  ruling_url="$(jq -r '.html_url // ""' "$ruling_json")"
-  ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body")
   ruling_refutes_file="$tmp/ruling-$ruling_id.refutes"
   ruling_grants_file="$tmp/ruling-$ruling_id.grants"
+  body_refutes_ignored=0
+  : >"$ruling_body"
+  while IFS= read -r ruling_line || [ -n "$ruling_line" ]; do
+    case "$ruling_line" in
+      'refutes: '*) ruling_prefix="${ruling_line#refutes: }" ;;
+      'refutes:'*) ruling_prefix="${ruling_line#refutes:}" ;;
+      *) ruling_prefix="" ;;
+    esac
+    if tkt_is_pr_body_finding "$ruling_prefix"; then
+      body_refutes_ignored=1
+      continue
+    fi
+    printf '%s\n' "$ruling_line" >>"$ruling_body"
+  done <"$ruling_source"
   grep '^refutes:' "$ruling_body" >"$ruling_refutes_file" || true
   grep '^grants:' "$ruling_body" >"$ruling_grants_file" || true
   if [ -s "$ruling_refutes_file" ]; then
@@ -218,15 +239,23 @@ for ruling_id in "${ruling_requested[@]+${ruling_requested[@]}}"; do
     ruling_grant_ids+=("$ruling_id")
     grant_comment_count=$((grant_comment_count + 1))
   elif [ ! -s "$ruling_refutes_file" ]; then
-    ruling_refuse no-refutes "$ruling_id"
+    [ "$body_refutes_ignored" -eq 1 ] || ruling_refuse no-refutes "$ruling_id"
+    continue
   fi
+  ruling_url="$(jq -r '.html_url // ""' "$ruling_json")"
+  ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body")
 done
 ruling_history_source=""
 if [ "$head_is_reviewed" -eq 1 ] && [ "$reverify" -eq 0 ]; then
   ruling_history_source="$(t get findings_history 2>/dev/null || true)"
-  ruling_match_sources=(current "$findings" history "$ruling_history_source")
+  if [ -n "$ruling_history_source" ] && [ -r "$ruling_history_source" ]; then
+    filtered_history="$tmp/findings-history-without-pr-body.md"
+    tkt_filter_pr_body_findings "$ruling_history_source" "$filtered_history"
+    ruling_history_source="$filtered_history"
+  fi
+  ruling_match_sources=(current "$findings_for_review" history "$ruling_history_source")
 else
-  ruling_match_sources=(current "$findings")
+  ruling_match_sources=(current "$findings_for_review")
 fi
 for ruling_index in "${!ruling_ids[@]}"; do
   if ! ruling_refutes_validate_file \
@@ -239,7 +268,7 @@ for ruling_index in "${!ruling_ids[@]}"; do
   fi
 done
 reviewed_all_refuted=0
-if [ "$head_is_reviewed" -eq 1 ] && [ "$reverify" -eq 0 ] && ruling_refutes_all_open_rows "$findings" "$ruling_history_source"; then
+if [ "$head_is_reviewed" -eq 1 ] && [ "$reverify" -eq 0 ] && ruling_refutes_all_open_rows "$findings_for_review" "$ruling_history_source"; then
   reviewed_all_refuted=1
 fi
 if [ "$head_is_reviewed" -ne 1 ] || [ "$reviewed_all_refuted" -ne 1 ]; then
@@ -281,10 +310,10 @@ fi
 if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ] && [ "$grant_accepted" -ne 1 ]; then
   emit "ROUND-LIMIT" 1 "round=$round; otherwise post an owner ruling with a column-0 grants: round $((round + 1)) line and retry with --ruling <comment id>; send the open findings to triage"
 fi
-verify_findings="$findings"
+verify_findings="$findings_for_review"
 if [ "${#ruling_refute_ids[@]}" -gt 0 ]; then
   verify_findings="$tmp/findings.md"
-  if ! ruling_refutes_prepare "$findings" "$verify_findings" "$tmp/findings-with-rulings.md"; then
+  if ! ruling_refutes_prepare "$findings_for_review" "$verify_findings" "$tmp/findings-with-rulings.md"; then
     case "$ruling_refutes_prepare_failure" in
       drift)
         emit "VERIFY-FAIL reason=ruling-drift" 1 \
@@ -318,25 +347,10 @@ vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --model "$verif
 verify_ruling="$(t get ruling.verify 2>/dev/null || true)"
 if [ -n "$verify_ruling" ]; then vargs+=(--model-ruling "$verify_ruling"); fi
 for ruling_index in "${!ruling_ids[@]}"; do vargs+=(--context "${ruling_bodies[$ruling_index]}"); done
-body_file="$tmp/pr-body.md"
-if gh pr view "$pr" --repo "$repo" --json body -q .body >"$body_file" 2>/dev/null; then
-  if command -v shasum >/dev/null 2>&1; then
-    current_body_hash="$(shasum -a 256 "$body_file" | awk '{print $1}')"
-  elif command -v sha256sum >/dev/null 2>&1; then
-    current_body_hash="$(sha256sum "$body_file" | awk '{print $1}')"
-  else
-    emit "VERIFY-FAIL" 1 "cannot hash PR body: no SHA-256 utility"
-  fi
-else
-  [ "$reverify" -eq 0 ] || emit "VERIFY-FAIL" 1 "cannot read PR body for verification: pr=$pr"
-  current_body_hash=""
-fi
 old_verify_model=""
-reverify_reason=""
 if [ "$reverify" -eq 1 ]; then
   old_verify_model="$(t get verify.model 2>/dev/null || true)"
   [ -n "$old_verify_model" ] || emit "PRECONDITION reverify=history-missing" 2 "the state has no recorded verify model"
-  [ "$current_body_hash" = "$previous_body_hash" ] || reverify_reason=body
 fi
 
 record_verify_metadata() {
@@ -354,7 +368,6 @@ record_verify_metadata() {
   t set verify.findings "$recorded_findings"
   t set verify.since "$verify_since"
   t set verify.model "$verifymodel"
-  t set verify.body_hash "$current_body_hash"
   t set verify.verdict "$verdict"
   t set verify.round "$round"
   t set verify.slot "$knum"
@@ -533,14 +546,12 @@ if [ "$reverify" -eq 1 ]; then
     record_verify_metadata FIX-INCOMPLETE
     stamp_verdict_at t
     reverify_journal="tkt-verify REVERIFY from=$old_verify_model to=$verifymodel"
-    [ -z "$reverify_reason" ] || reverify_journal="$reverify_journal reason=$reverify_reason"
     t journal "$reverify_journal"
     emit "FIX-INCOMPLETE" 1 "$open"
   fi
   record_verify_metadata FIX-OK
   stamp_verdict_at t
   reverify_journal="tkt-verify REVERIFY from=$old_verify_model to=$verifymodel"
-  [ -z "$reverify_reason" ] || reverify_journal="$reverify_journal reason=$reverify_reason"
   t journal "$reverify_journal"
   emit "FIX-OK reviewed=$head" 0
 fi

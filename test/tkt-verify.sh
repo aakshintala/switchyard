@@ -376,14 +376,15 @@ if [ -n "${CASE:-}" ]; then
   esac
 fi
 
-# A normal verify continues when the PR body cannot be read, recording an empty hash.
+# Verification never fetches the PR body or records body provenance.
 setup_case body-read-failure
 : >"$T/body-fail"
 run_verify
 [ "$RC" = 0 ] || fail "body-read-failure exited $RC, want FIX-OK: $OUT $(cat "$T/stderr")"
 assert_first_verdict FIX-OK 'body-read-failure'
 grep -q '^review-pr|' "$T/calls.log" || fail "body-read-failure did not run review-pr: $(cat "$T/calls.log")"
-grep -Fxq 'verify.body_hash=' "$S" || fail "body-read-failure did not record an empty body hash: $(cat "$S")"
+! grep -q -- '--json body' "$T/calls.log" || fail "body-read-failure queried the PR body"
+! grep -q '^verify.body_hash=' "$S" || fail "body-read-failure recorded obsolete body provenance"
 
 # FIX-OK records the exact reviewed head and passes the findings delta.
 setup_case fix-ok
@@ -678,7 +679,7 @@ assert_first_verdict HEAD-MOVED 'worktree move'
 [ "$(read_state round)" = 1 ] || fail "worktree move did not count the P-line findings round"
 [ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "worktree move did not keep the slot it recorded"
 [ "$(git -C "$WT" rev-parse HEAD)" != "$HEAD" ] || fail "review stub did not move the worktree"
-[ "$(grep -c '^gh|' "$T/calls.log")" = 3 ] || fail "worktree-move path did not re-read the PR head after verify"
+[ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "worktree-move path did not re-read the PR head after verify"
 [ ! -e "${S%.state}.journal" ] || fail "worktree move wrote the state journal"
 
 # A review-pr stub pushes to the bare origin while the local worktree stays put.
@@ -694,7 +695,7 @@ assert_first_verdict HEAD-MOVED 'origin move'
 [ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD" ] || fail "origin move also changed the worktree"
 [ "$(git --git-dir="$BARE" rev-parse "refs/heads/$BRANCH")" != "$HEAD" ] || fail "review stub did not move bare origin"
 [ "$(git -C "$WT" rev-parse "refs/remotes/origin/$BRANCH")" != "$HEAD" ] || fail "post-review fetch did not refresh origin/$BRANCH"
-[ "$(grep -c '^gh|' "$T/calls.log")" = 3 ] || fail "origin-move path did not re-read the PR head after verify"
+[ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "origin-move path did not re-read the PR head after verify"
 [ ! -e "${S%.state}.journal" ] || fail "origin move wrote the state journal"
 
 # A HEAD-MOVED review with only notes does not count a round.
@@ -709,7 +710,7 @@ assert_first_verdict HEAD-MOVED 'note-only worktree move'
 [ "$(read_state round)" = 0 ] || fail "note-only worktree move changed round state"
 [ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "note-only worktree move did not keep the slot it recorded"
 [ "$(git -C "$WT" rev-parse HEAD)" != "$HEAD" ] || fail "review stub did not move the note-only worktree"
-[ "$(grep -c '^gh|' "$T/calls.log")" = 3 ] || fail "note-only worktree-move path did not re-read the PR head after verify"
+[ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "note-only worktree-move path did not re-read the PR head after verify"
 [ ! -e "${S%.state}.journal" ] || fail "note-only worktree move wrote the state journal"
 
 # Pre-review refusal paths must not call review-pr or alter state.
@@ -788,7 +789,7 @@ assert_first_verdict ROUND-LIMIT 'reverify-round-limit'
 assert_no_review 'reverify-round-limit'
 [ "$(read_state round)" = 2 ] || fail "reverify-round-limit changed the round"
 
-# A grant runs one P-line review past the cap and becomes a body requirement.
+# A grant records its round in state and journal, never as a PR-body requirement.
 if [ -z "${CASE:-}" ] || [ "$CASE" = grant-one-round ]; then
 setup_case grant-one-round
 set_state round 2
@@ -800,9 +801,8 @@ assert_first_verdict FIX-INCOMPLETE 'granted FIX-INCOMPLETE'
 [ "$(read_state round)" = 3 ] || fail "grant did not count round 3"
 [ "$(read_state grant.3)" = '900 https://github.com/switchyard/switchyard/issues/1756#issuecomment-900' ] || fail "grant.3 was not recorded"
 grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-900 grants round 3' "${S%.state}.journal" || fail "grant journal omitted URL and round"
-grep -Fq 'body_has=Recorded ruling: https://github.com/switchyard/switchyard/issues/1756#issuecomment-900' "$S" || fail "grant body requirement was not recorded"
-grep -Fq 'Recorded ruling: https://github.com/switchyard/switchyard/issues/1756#issuecomment-900' <<<"$OUT" || fail "grant output omitted PR body line"
-grep -Fq 'add this line to the PR body' <<<"$OUT" || fail "grant output omitted body instruction"
+grep -Fq 'Recorded round grant: https://github.com/switchyard/switchyard/issues/1756#issuecomment-900 (round 3)' <<<"$OUT" || fail "grant output omitted the state-backed round grant"
+! grep -Fq 'add this line to the PR body' <<<"$OUT" || fail "grant output still asks for a PR-body edit"
 : >"$T/calls.log"
 run_verify_ruling 900
 [ "$RC" = 2 ] || fail "reuse exited $RC, want 2: $OUT"
@@ -819,7 +819,7 @@ fi
 
 # A separate refutes comment is staged with a valid round grant and marks only
 # the copied findings file passed to review-pr. The grant-only path above stays
-# unchanged, including its round count and PR-body requirement.
+# unchanged, including its round count and journal record.
 setup_case grant-with-separate-refutes
 set_state round 2
 write_ruling_comment 920 $'context\ngrants: round 3'
@@ -836,6 +836,28 @@ grep -Fq 'refutes: P1 src/main.sh:1' "$T/context-ruling-921.md" || fail "separat
 [ "$(read_state round)" = 3 ] || fail "separate refutes grant did not count round 3"
 [ "$(read_state grant.3)" = '920 https://github.com/switchyard/switchyard/issues/1756#issuecomment-920' ] || fail "separate refutes grant was not recorded"
 grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-921 refutes P1 src/main.sh:1' "${S%.state}.journal" || fail "separate refutes ruling was not journalled"
+
+# A PR-body finding stays filtered when a separate finding is refuted.
+setup_case ruling-refutes-body-finding
+printf 'P2 .review-context/pr-body.md:2 — generated text\nP1 src/main.sh:1 — initial finding\n' >"$F"
+write_ruling_comment 923 'refutes: P1 src/main.sh:1'
+run_verify_ruling 923
+[ "$RC" = 0 ] || fail "ruling-refutes-body-finding exited $RC, want 0: $OUT $(cat "$T/stderr")"
+! grep -Fq '.review-context/pr-body.md' "$T/verify-input.md" || fail "ruling-refutes-body-finding passed a body-only finding to verify"
+grep -Fxq 'P1 src/main.sh:1 — initial finding' "$T/verify-input.md" \
+  || fail "ruling-refutes-body-finding dropped the code finding"
+grep -Fq 'refuted: recorded ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-923' "$T/verify-input.md" \
+  || fail "ruling-refutes-body-finding did not mark the code finding"
+
+# A legacy body-only refutation becomes a no-op instead of blocking verify.
+setup_case ruling-refutes-body-only
+printf 'P2 PR-body:2 — generated text\n' >"$F"
+write_ruling_comment 924 'refutes: P2 PR-body:2'
+run_verify_ruling 924
+[ "$RC" = 0 ] || fail "ruling-refutes-body-only exited $RC, want 0: $OUT $(cat "$T/stderr")"
+! grep -Fq 'RULING-REFUSED' <<<"$OUT" || fail "ruling-refutes-body-only refused a dropped body finding: $OUT"
+grep -Fxq 'no open findings' "$T/verify-input.md" \
+  || fail "ruling-refutes-body-only did not verify with no open findings"
 
 # A valid-shaped refutes prefix with no finding is refused before review.
 setup_case ruling-refutes-no-match
@@ -898,7 +920,7 @@ bash "$TKT_STATE" "$S" unset grants || fail "grant-cycle-reset clears previous g
 set_state round 0
 set_state verdict_at '2026-11-15T00:00:00Z'
 assert_no_grant 'grant-cycle-reset after reset'
-grep -Fq 'body_has=Recorded ruling: https://github.com/switchyard/switchyard/issues/1756#issuecomment-940' "$S" || fail "grant-cycle-reset reset removed the PR-body audit line"
+grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-940 grants round 3' "${S%.state}.journal" || fail "grant-cycle-reset did not retain the grant journal record"
 run_verify
 [ "$RC" = 1 ] || fail "grant-cycle-reset round 1 exited $RC: $OUT"
 assert_first_verdict FIX-INCOMPLETE 'grant-cycle-reset round 1'
@@ -946,7 +968,7 @@ run_verify_ruling 901
 [ "$RC" = 1 ] || fail "grant retry second run exited $RC: $OUT"
 assert_first_verdict FIX-INCOMPLETE 'grant retry second run'
 [ "$(read_state round)" = 3 ] || fail "grant retry did not count round 3"
-[ "$(grep -c '^body_has=Recorded ruling:' "$S")" = 1 ] || fail "grant retry repeated the body requirement"
+[ "$(grep -c ' grants round 3$' "${S%.state}.journal")" = 1 ] || fail "grant retry repeated the grant journal record"
 fi
 
 # The shared grant refusals do not reserve a round or dispatch a review.
@@ -996,7 +1018,7 @@ assert_no_grant 'multiple grant rulings'
 [ "$(read_state round)" = 2 ] || fail "multiple grant rulings changed round"
 fi
 
-# A body-only P3 change can be re-verified on the unchanged reviewed head.
+# A PR-body edit or an unavailable body does not constrain re-verification.
 setup_case reverify-body-only
 set_state model.fix claude/claude-sonnet-5-5
 run_verify
@@ -1007,11 +1029,9 @@ recorded_findings="$(read_state verify.findings 2>/dev/null || true)"
   || fail "reverify-body-only initial verify did not save its findings"
 cmp -s "$F" "$recorded_findings" \
   || fail "reverify-body-only saved findings differ from the initial verify input"
-initial_body_hash="$(read_state verify.body_hash 2>/dev/null || true)"
-[ -n "$initial_body_hash" ] || fail "reverify-body-only initial verify did not record a body hash"
-printf 'updated body with the P3 disposition\n' >"$PR_BODY"
-set_state verify.body_hash ""
-[ "$(read_state verify.body_hash)" = "" ] || fail "reverify-body-only failed to prepare the empty prior body hash"
+printf 'updated body with a P3 disposition\n' >"$PR_BODY"
+grep -v '^verify[.]body_hash=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+touch "$T/body-fail"
 printf 'p3-incomplete\n' >"$T/vermode"
 run_reverify
 [ "$RC" = 1 ] || fail "reverify-body-only exited $RC, want FIX-INCOMPLETE: $OUT $(cat "$T/stderr")"
@@ -1022,12 +1042,12 @@ assert_first_verdict FIX-INCOMPLETE 'reverify-body-only'
 [ "$(read_state verify.since)" = "$OLD" ] || fail "reverify-body-only did not reuse the last --since"
 [ "$(read_state verify.head)" = "$HEAD" ] || fail "reverify-body-only did not record the reviewed head"
 [ "$(read_state verify.model)" = openai/gpt-6.1-sol ] || fail "reverify-body-only did not record the new model"
-[ "$(read_state verify.body_hash)" != "$initial_body_hash" ] || fail "reverify-body-only did not update the body hash"
+! grep -q '^verify.body_hash=' "$S" || fail "reverify-body-only recreated obsolete body provenance"
 grep -Fq -- "--head $HEAD --model openai/gpt-6.1-sol --verify $recorded_findings --since $OLD" "$T/calls.log" \
   || fail "reverify-body-only did not use the recorded head, findings and since: $(cat "$T/calls.log")"
 journal="${S%.state}.journal"
-grep -Fq "tkt-verify REVERIFY from=state-verify-model to=openai/gpt-6.1-sol reason=body" "$journal" \
-  || fail "reverify-body-only journal line missing: $(cat "$journal")"
+! grep -Fq 'reason=body' "$journal" || fail "reverify-body-only journal treated a body change as process"
+! grep -q -- '--json body' "$T/calls.log" || fail "reverify-body-only queried the PR body"
 verify_pid="$(git -C "$WT" diff "origin/main...$HEAD" | git patch-id --stable | awk '{print $1}')"
 write_review_comment 700 "$verify_pid" "$HEAD" "$OLD" 'FIX-OK all findings repaired'
 append_review_comment 701 "$verify_pid" "$HEAD" "$OLD" $'FIX-INCOMPLETE round=1\nP3 src/main.sh:3 — non-blocking body finding'
@@ -1037,7 +1057,7 @@ append_review_comment 701 "$verify_pid" "$HEAD" "$OLD" $'FIX-INCOMPLETE round=1\
 ship_verdict="$(review_verdict switchyard 17 "$verify_pid")"
 case "$ship_verdict" in incomplete-p3*) ;; *) fail "reverify-body-only newest FIX-INCOMPLETE did not supersede FIX-OK: $ship_verdict" ;; esac
 
-# A FIX-OK reverify on an unchanged body keeps the round and journals no reason.
+# A reverify does not need a PR-body read or body provenance.
 printf 'ok\n' >"$T/vermode"
 run_reverify
 [ "$RC" = 0 ] || fail "reverify-ok exited $RC, want FIX-OK: $OUT $(cat "$T/stderr")"
