@@ -188,6 +188,11 @@ case "\$(cat "$T/jobmode")" in
   handoff|body-write-fail)
     commit_as_job fix.txt "fix committed without pushing"
     echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
+  write-body-anyway)
+    run_dir="\$("$TKT_STATE" "\$state" get run)"
+    printf 'Unauthorized replacement body\n' >"\$run_dir/switchyard-529-fix-round-1-pr-body.md"
+    commit_as_job fix.txt "fix committed without pushing"
+    echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   done|stray-run)
     n="\$((\$(cat "$T/jobcount") + 1))"
     printf '%s' "\$n" >"$T/jobcount"
@@ -2020,6 +2025,45 @@ EOF
   [ "$(head -n 1 "$T/handoff-order.log")" = git-push ] || fail "failed body edit preceded the push"
   [ "$(tail -n 1 "$T/handoff-order.log")" = gh-pr-edit ] || fail "failed body edit was not attempted after the push"
   rm -f "$T/log-git-pushes" "$T/gh-edit-fail"
+fi
+
+# A round can lock the PR body from dispatch or from state, including resumes.
+if want no-body-dispatch; then
+  setup_case no-body-dispatch
+  run_rc=0; out="$(bash "$TKT" "$S" --no-verify --no-body 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" -eq 0 ] || fail "no-body-dispatch exited $run_rc: $out $(cat "$T/stderr")"
+  grep -Fq 'Do not run `gh pr edit`.' "$T/job-prompt.md" || fail "locked dispatch lost the gh pr edit prohibition"
+  grep -Fq 'This round must not change the PR body.' "$T/job-prompt.md" || fail "locked dispatch omitted the no-body instruction"
+  ! grep -Fq 'Write the full new PR body to:' "$T/job-prompt.md" || fail "locked dispatch prompt names a body file"
+  ! grep -Fq 'Report the body file path to tkt-fix.' "$T/job-prompt.md" || fail "locked dispatch prompt asks for a body-file report"
+  [ "$(bash "$TKT_STATE" "$S" get body.locked)" = 1 ] || fail "--no-body did not persist body.locked=1"
+fi
+
+if want no-body-resume; then
+  setup_case no-body-resume
+  bash "$TKT_STATE" "$S" set body.locked 1 >/dev/null
+  printf 'Resume context.\n' >"$CDIR/prompt.md"
+  out="$(bash "$TKT" "$S" --no-verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" \
+    || fail "no-body-resume exited $?: $(cat "$T/stderr")"
+  grep -Fq 'Do not run `gh pr edit`.' "$T/job-prompt.md" || fail "locked resume lost the gh pr edit prohibition"
+  grep -Fq 'This round must not change the PR body.' "$T/job-prompt.md" || fail "locked resume omitted the no-body instruction"
+  ! grep -Fq 'Write the full new PR body to:' "$T/job-prompt.md" || fail "locked resume prompt names a body file"
+  ! grep -Fq 'Report the body file path to tkt-fix.' "$T/job-prompt.md" || fail "locked resume prompt asks for a body-file report"
+  grep -Fq 'Resume context.' "$T/job-prompt.md" || fail "locked resume dropped the caller prompt"
+fi
+
+if want no-body-skips-publish; then
+  setup_case no-body-skips-publish
+  bash "$TKT_STATE" "$S" set body.locked 1 >/dev/null
+  printf 'write-body-anyway' >"$T/jobmode"
+  out="$(bash "$TKT" "$S" --no-verify 2>"$T/stderr")" \
+    || fail "no-body-skips-publish exited $?: $(cat "$T/stderr")"
+  body_file="$CDIR/run/switchyard-529-fix-round-1-pr-body.md"
+  [ -s "$body_file" ] || fail "fixture job did not write the locked body file"
+  ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "locked body file invoked gh pr edit"
+  grep -Fq 'tkt-fix BODY-SKIPPED locked' "${S%.state}.journal" || fail "locked body file was not journaled as skipped"
+  grep -Fq "body-skipped=locked file=$body_file" <<<"$out" || fail "locked body file is missing from the report: $out"
+  ! grep -Fq 'Write the full new PR body to:' "$T/job-prompt.md" || fail "locked dispatch prompt names a body file"
 fi
 
 # 4. A stop-list breach after the fix passes through with the gate's verdict.
