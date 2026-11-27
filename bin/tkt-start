@@ -203,14 +203,16 @@ model_for_start() {
 for scoped_role in verify review; do
   scoped_model="$(model_for_start "$scoped_role")"
   [ -n "$scoped_model" ] || continue
+  implement_models=()
   for implement_role in fix lane; do
     implement_model="$(model_for_start "$implement_role")"
     [ -n "$implement_model" ] || continue
-    if family_detail="$(model_family_conflict "model.$scoped_role" "$scoped_model" "model.$implement_role" "$implement_model")"; then
-      printf 'tkt-start: scoped reviewer and implementer must use different provider families: %s\n' "$family_detail" >&2
-      exit 2
-    fi
+    implement_models+=("model.$implement_role=$implement_model")
   done
+  if family_detail="$(model_family_conflict_with_any "model.$scoped_role" "$scoped_model" ${implement_models[@]+"${implement_models[@]}"})"; then
+    printf 'tkt-start: scoped reviewer and implementer must use different provider families: %s\n' "$family_detail" >&2
+    exit 2
+  fi
 done
 state_has_planner_model() {
   local state_line model_id

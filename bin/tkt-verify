@@ -94,14 +94,16 @@ worktree="$(t get worktree)"; run="$(t get run)"; reviewed="$(t get reviewed)"
   echo 'tkt-verify: missing key: model.verify (no --verify-model and no state model.verify)' >&2
   exit 2
 }
+implement_models=()
 for implement_role in fix lane; do
   implement_model="$(t get "model.$implement_role" 2>/dev/null || true)"
   [ -n "$implement_model" ] || continue
-  if family_detail="$(model_family_conflict model.verify "$verifymodel" "model.$implement_role" "$implement_model")"; then
-    family_name="${family_detail##*family=}"
-    emit "PRECONDITION model-family=$family_name" 2 "$family_detail"
-  fi
+  implement_models+=("model.$implement_role=$implement_model")
 done
+if family_detail="$(model_family_conflict_with_any model.verify "$verifymodel" ${implement_models[@]+"${implement_models[@]}"})"; then
+  family_name="${family_detail##*family=}"
+  emit "PRECONDITION model-family=$family_name" 2 "$family_detail"
+fi
 verify_since="$reviewed"; previous_body_hash=""
 if [ "$reverify" -eq 1 ]; then
   recorded_head="$(t get verify.head 2>/dev/null || true)"
@@ -134,8 +136,9 @@ elif [ "$head" = "$reviewed" ]; then
   head_is_reviewed=1
 fi
 if [ "$reverify" -eq 1 ]; then
-  [ -n "$findings" ] && [ -n "$verify_since" ] && [ -n "$previous_body_hash" ] \
-    || emit "PRECONDITION reverify=history-missing" 2 "the state has no complete last-verify record at reviewed=$reviewed"
+  if [ -z "$findings" ] || [ -z "$verify_since" ] || ! t get verify.body_hash >/dev/null 2>&1; then
+    emit "PRECONDITION reverify=history-missing" 2 "the state has no complete last-verify record at reviewed=$reviewed"
+  fi
 fi
 [ -r "$findings" ] || { echo "tkt-verify: cannot read findings: $findings" >&2; exit 2; }
 if ! git -C "$worktree" merge-base --is-ancestor "$verify_since" "$head" 2>/dev/null; then
@@ -275,7 +278,7 @@ fi
 if [ "$grant_accepted" -eq 1 ]; then
   record_round_grant "$grant_id" "$grant_url" "$grant_round" t
 fi
-if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ] && [ "$grant_accepted" -ne 1 ] && [ "$reverify" -eq 0 ]; then
+if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ] && [ "$grant_accepted" -ne 1 ]; then
   emit "ROUND-LIMIT" 1 "round=$round; otherwise post an owner ruling with a column-0 grants: round $((round + 1)) line and retry with --ruling <comment id>; send the open findings to triage"
 fi
 verify_findings="$findings"
@@ -316,15 +319,17 @@ verify_ruling="$(t get ruling.verify 2>/dev/null || true)"
 if [ -n "$verify_ruling" ]; then vargs+=(--model-ruling "$verify_ruling"); fi
 for ruling_index in "${!ruling_ids[@]}"; do vargs+=(--context "${ruling_bodies[$ruling_index]}"); done
 body_file="$tmp/pr-body.md"
-if ! gh pr view "$pr" --repo "$repo" --json body -q .body >"$body_file" 2>/dev/null; then
-  emit "VERIFY-FAIL" 1 "cannot read PR body for verification: pr=$pr"
-fi
-if command -v shasum >/dev/null 2>&1; then
-  current_body_hash="$(shasum -a 256 "$body_file" | awk '{print $1}')"
-elif command -v sha256sum >/dev/null 2>&1; then
-  current_body_hash="$(sha256sum "$body_file" | awk '{print $1}')"
+if gh pr view "$pr" --repo "$repo" --json body -q .body >"$body_file" 2>/dev/null; then
+  if command -v shasum >/dev/null 2>&1; then
+    current_body_hash="$(shasum -a 256 "$body_file" | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    current_body_hash="$(sha256sum "$body_file" | awk '{print $1}')"
+  else
+    emit "VERIFY-FAIL" 1 "cannot hash PR body: no SHA-256 utility"
+  fi
 else
-  emit "VERIFY-FAIL" 1 "cannot hash PR body: no SHA-256 utility"
+  [ "$reverify" -eq 0 ] || emit "VERIFY-FAIL" 1 "cannot read PR body for verification: pr=$pr"
+  current_body_hash=""
 fi
 old_verify_model=""
 reverify_reason=""

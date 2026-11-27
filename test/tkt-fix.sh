@@ -1774,6 +1774,25 @@ if [ -z "${CASE:-}" ] || [ "$CASE" = model-family-dispatch ]; then
   [ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] || fail "model-family-dispatch changed the round"
 fi
 
+if [ -z "${CASE:-}" ] || [ "$CASE" = model-family-fix-override ]; then
+  setup_case model-family-fix-override
+  bash "$TKT_STATE" "$S" set model.lane claude/claude-sonnet-5-5 >/dev/null
+  bash "$TKT_STATE" "$S" set model.verify codex/gpt-6-luna:medium >/dev/null
+  run_rc=0
+  out="$(bash "$TKT" "$S" --verify --fix-model codex/gpt-6-luna:medium 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "model-family-fix-override exited $run_rc, want 2: $out $(cat "$T/stderr")"
+  grep -Fq 'PRECONDITION model-family=codex' <<<"$out" \
+    || fail "model-family-fix-override verdict missing: $out"
+  grep -Fq 'model.verify=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-fix-override omitted verify model id: $out"
+  grep -Fq 'model.fix=codex/gpt-6-luna:medium' <<<"$out" \
+    || fail "model-family-fix-override omitted fix model id: $out"
+  ! grep -q '^job|' "$T/calls.log" || fail "model-family-fix-override dispatched a fix job: $(cat "$T/calls.log")"
+  ! grep -q '^review-pr|run ' "$T/calls.log" || fail "model-family-fix-override dispatched a verify: $(cat "$T/calls.log")"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = 0 ] \
+    || fail "model-family-fix-override changed the round"
+fi
+
 case "${CASE:-}" in punct-verify|collect-verify) exit 0;; esac
 
 # 1. Verify OK on an already-pushed head: no CI wait, slot fix1, reviewed set.

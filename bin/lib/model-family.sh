@@ -29,3 +29,18 @@ model_family_conflict() {
   [ -n "$family_a" ] && [ "$family_a" = "$family_b" ] || return 1
   printf '%s=%s and %s=%s share provider family=%s\n' "$key_a" "$id_a" "$key_b" "$id_b" "$family_a"
 }
+
+model_family_conflict_with_any() {
+  local scoped_key="$1" scoped_id="$2" pair implement_key implement_id detail
+  shift 2
+  for pair in "$@"; do
+    implement_key="${pair%%=*}"
+    implement_id="${pair#*=}"
+    [ -n "$implement_key" ] && [ -n "$implement_id" ] || continue
+    if detail="$(model_family_conflict "$scoped_key" "$scoped_id" "$implement_key" "$implement_id")"; then
+      printf '%s\n' "$detail"
+      return 0
+    fi
+  done
+  return 1
+}

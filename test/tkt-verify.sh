@@ -27,6 +27,7 @@ cat >"$T/bin/gh" <<'EOF'
 printf 'gh|%s\n' "$*" >>"$T/calls.log"
 if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   if [[ " $* " == *" --json body "* ]]; then
+    [ ! -f "$T/body-fail" ] || { echo 'gh: PR body unavailable' >&2; exit 4; }
     cat "$PR_BODY"
     exit $?
   fi
@@ -102,6 +103,7 @@ EOF
 chmod +x "$T/bin/review-pr"
 
 setup_case() {
+  rm -f "$T/body-fail"
   CASE_DIR="$T/cases/$1"
   WT="$CASE_DIR/worktree"
   BARE="$CASE_DIR/origin.git"
@@ -373,6 +375,15 @@ if [ -n "${CASE:-}" ]; then
     ruling-refutes-reviewed-spent-grant) run_ruling_refutes_reviewed_spent_grant; exit 0 ;;
   esac
 fi
+
+# A normal verify continues when the PR body cannot be read, recording an empty hash.
+setup_case body-read-failure
+: >"$T/body-fail"
+run_verify
+[ "$RC" = 0 ] || fail "body-read-failure exited $RC, want FIX-OK: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-OK 'body-read-failure'
+grep -q '^review-pr|' "$T/calls.log" || fail "body-read-failure did not run review-pr: $(cat "$T/calls.log")"
+grep -Fxq 'verify.body_hash=' "$S" || fail "body-read-failure did not record an empty body hash: $(cat "$S")"
 
 # FIX-OK records the exact reviewed head and passes the findings delta.
 setup_case fix-ok
@@ -761,6 +772,22 @@ assert_no_review ROUND-LIMIT
 assert_no_slot ROUND-LIMIT
 assert_no_grant ROUND-LIMIT
 
+# Reverify cannot bypass the round cap when the recorded findings still have open P-lines.
+setup_case reverify-round-limit
+set_state reviewed "$HEAD"
+set_state round 2
+set_state verify.head "$HEAD"
+set_state verify.findings "$F"
+set_state verify.since "$OLD"
+set_state verify.body_hash prior-body-hash
+set_state verify.model state-verify-model
+set_state verify.slot 1
+run_reverify openai/gpt-6.1-sol
+[ "$RC" = 1 ] || fail "reverify-round-limit exited $RC, want 1: $OUT $(cat "$T/stderr")"
+assert_first_verdict ROUND-LIMIT 'reverify-round-limit'
+assert_no_review 'reverify-round-limit'
+[ "$(read_state round)" = 2 ] || fail "reverify-round-limit changed the round"
+
 # A grant runs one P-line review past the cap and becomes a body requirement.
 if [ -z "${CASE:-}" ] || [ "$CASE" = grant-one-round ]; then
 setup_case grant-one-round
@@ -983,6 +1010,8 @@ cmp -s "$F" "$recorded_findings" \
 initial_body_hash="$(read_state verify.body_hash 2>/dev/null || true)"
 [ -n "$initial_body_hash" ] || fail "reverify-body-only initial verify did not record a body hash"
 printf 'updated body with the P3 disposition\n' >"$PR_BODY"
+set_state verify.body_hash ""
+[ "$(read_state verify.body_hash)" = "" ] || fail "reverify-body-only failed to prepare the empty prior body hash"
 printf 'p3-incomplete\n' >"$T/vermode"
 run_reverify
 [ "$RC" = 1 ] || fail "reverify-body-only exited $RC, want FIX-INCOMPLETE: $OUT $(cat "$T/stderr")"
