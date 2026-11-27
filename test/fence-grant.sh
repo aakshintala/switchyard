@@ -518,6 +518,26 @@ export BOX_PROBE_OUTPUT BOX_LANE_PROBE_OUTPUT
 BOX_2021_LANE_PROBE_OUTPUT=${BOX_LANE_PROBE_OUTPUT//fiber-2013/fiber-2021}
 export BOX_2021_LANE_PROBE_OUTPUT
 
+# The tkt-drive grant step calls fence-grant with --repo, multiple --paths,
+# and --reads but no --host. On the box, its local Claude and FW_SSH probes
+# report the same lane; that lane must still resolve to the box and grant.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
+  SSH_OUT="$BOX_2021_LANE_PROBE_OUTPUT"
+  CLAUDE_JSON='[{"name":"fiber-2021","status":"busy"}]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2021 --repo owner/name --paths docs/tui.md,docs/events.md --reads docs/events.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'tkt-drive grant step grants its live box lane without --host'
+  assert_line GRANT 'tkt-drive grant step prints GRANT'
+  ! grep -qF 'cannot determine the lane host' "$T/err" || fail 'tkt-drive grant step resolves the box lane'
+  [ -f "$FW_RUN/fiber-2021-fence-grant-1.md" ] || fail 'tkt-drive grant step writes its grant file'
+) || exit 1
+
 reset_case
 (
   PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
@@ -531,8 +551,8 @@ reset_case
   RC=$?
   assert_rc 3 'Mac refuses to write a live box lane grant'
   assert_out '' 'Mac refusal does not print GRANT'
-  grep -qF "Run on box: ssh $FW_BOX_HOST '$FG 2013 --paths docs/tui.md'" "$T/err" \
-    || fail 'Mac refusal prints the exact box command'
+  grep -qF "Run on box: ssh $FW_BOX_HOST '~/.agents/bin/fence-grant 2013 --paths docs/tui.md'" "$T/err" \
+    || fail 'Mac refusal prints the installed box command'
   assert_no_grant 'Mac refuses box grant without writing locally'
   bash "$FG" 2013 --paths docs/tui.md --dry >"$T/out" 2>"$T/err"
   RC=$?
@@ -540,6 +560,37 @@ reset_case
   assert_out '' 'refused dry run does not predict a grant'
   grep -qF 'Run on box:' "$T/err" || fail 'refused dry run names the box command'
   assert_no_grant 'refused dry run writes no grant locally'
+) || exit 1
+
+# A relative caller path is retained on local routes, but the ssh route must
+# invoke the installed fence-grant instead of carrying that unusable path over.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
+  SSH_OUT="$BOX_LANE_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  (
+    cd "$SCRIPT_DIR/.." || exit 1
+    bash bin/fence-grant 2019 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  )
+  RC=$?
+  assert_rc 3 'relative-path caller refuses the live box lane on Mac'
+  route=$(grep -F "Run on box: ssh $FW_BOX_HOST " "$T/err" | head -n 1)
+  [ -n "$route" ] || fail 'relative-path refusal prints an ssh route'
+  case "$route" in
+    "Run on box: ssh $FW_BOX_HOST "*) remote_route=${route#"Run on box: ssh $FW_BOX_HOST "} ;;
+    *) fail 'relative-path refusal route names the expected host' ;;
+  esac
+  case "$remote_route" in
+    bin/*|"'bin/"*) fail 'ssh route does not start with the relative caller path' ;;
+  esac
+  [ "$remote_route" = "'~/.agents/bin/fence-grant 2019 --paths docs/tui.md'" ] \
+    || fail "relative-path refusal names the installed command: $remote_route"
+  assert_no_grant 'relative-path refusal does not write a grant'
 ) || exit 1
 
 reset_case
@@ -628,7 +679,7 @@ reset_case
   assert_rc 3 'unknown lane host is refused'
   assert_out '' 'unknown-host refusal does not print GRANT'
   grep -qF "Run on Mac: $FG 2015 --paths docs/tui.md" "$T/err" || fail 'unknown-host refusal names the Mac route'
-  grep -qF "Run on box: ssh $FW_BOX_HOST '$FG 2015 --paths docs/tui.md'" "$T/err" || fail 'unknown-host refusal names the box route'
+  grep -qF "Run on box: ssh $FW_BOX_HOST '~/.agents/bin/fence-grant 2015 --paths docs/tui.md'" "$T/err" || fail 'unknown-host refusal names the installed box route'
   assert_no_grant 'unknown lane host refuses without writing'
 ) || exit 1
 
@@ -642,7 +693,7 @@ reset_case
   assert_rc 3 'unrecognized local host refuses a box grant'
   assert_out '' 'unrecognized local host refusal does not print GRANT'
   grep -qF 'Run on Mac:' "$T/err" || fail 'unrecognized local host refusal names the Mac route'
-  grep -qF "Run on box: ssh $FW_BOX_HOST '" "$T/err" || fail 'unrecognized local host refusal names the box route'
+  grep -qF "Run on box: ssh $FW_BOX_HOST '~/.agents/bin/fence-grant " "$T/err" || fail 'unrecognized local host refusal names the installed box route'
   assert_no_grant 'unrecognized local host writes no grant'
 ) || exit 1
 
