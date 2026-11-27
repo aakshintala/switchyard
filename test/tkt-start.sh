@@ -1700,6 +1700,32 @@ want "CURRENT " 0 partnostate
 grep -qF -- 'part=2' "$RUN/widget-42.state" || fail "partnostate: state misses [part=2]"
 [ ! -e "$RUN/widget-42.state.part1" ] || fail "partnostate: unexpected archive"
 
+# A changed --model on a rerun replaces its old value and journals the correction.
+setup modelrerun ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 modelrerun-first
+S="$RUN/widget-42.state"
+reload; remove_model_role lane; ARGS+=(--model lane=new-model)
+run_start --no-preflight
+want "SKIPPED filing=" 0 modelrerun-corrected
+[ "$(grep -c '^model\.lane=' "$S")" -eq 1 ] || fail "modelrerun: state wants one model.lane value"
+grep -qxF 'model.lane=new-model' "$S" || fail "modelrerun: state misses corrected model.lane"
+grep -qF 'tkt-start model.lane from=sol to=new-model' "${S%.state}.journal" \
+  || fail "modelrerun: journal misses model correction"
+
+# A reader refuses a duplicated model.lane rather than choosing its first value.
+setup modelambiguous ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 modelambiguous-first
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set model.review review-model
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" add model.lane second-model
+run_start --no-preflight
+[ "$RC" -eq 2 ] || fail "modelambiguous: exit $RC, want 2"
+case "$OUT" in *"TKT tkt-start MODEL-AMBIGUOUS key=model.lane"*) ;; *) fail "modelambiguous: verdict missing: $OUT" ;; esac
+case "$OUT" in *'values=sol,second-model'*) ;; *) fail "modelambiguous: values missing: $OUT" ;; esac
+case "$OUT" in *"tkt-state $S set model.lane <id>"*) ;; *) fail "modelambiguous: repair command missing: $OUT" ;; esac
+
 # The requested model wins over the archived value for the same role.
 setup partmodel ONE AGAINST; part_seed_pr partmodel
 S="$RUN/widget-42.state"

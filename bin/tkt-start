@@ -180,32 +180,41 @@ if [ ! -r "$namebase_lib" ]; then echo "tkt-start: cannot read shared lib: $name
 . "$namebase_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"; sweep="$bin_dir/plan-sweep"; tktjob="$bin_dir/tkt-job"
 set_namebase "$repo" "$issue"; state="$run/$namebase.state"
+part_notes=()
+emit() {
+  local rest="$1" code="$2"; shift 2; local twelve log out note
+  twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf nohead)"
+  log="$run/$namebase-tkt-start-$twelve-$(date +%H%M%S).log"; out="TKT tkt-start $rest log=$log"
+  [ $# -eq 0 ] || out="$out
+$(printf '%s\n' "$@" | head -n 40)"
+  for note in ${part_notes[@]+"${part_notes[@]}"}; do out="$out
+$note"; done
+  printf '%s\n' "$out" | tee "$log"; exit "$code"
+}
+read_state_model() {
+  local role="$1" status=0 output
+  STATE_MODEL=""; STATE_MODEL_FOUND=0
+  [ -f "$state" ] || return 1
+  output="$("$tkt_state" "$state" get "model.$role" 2>&1)" || status=$?
+  if [ "$status" -eq 3 ]; then emit "MODEL-AMBIGUOUS key=model.$role" 2 "$output"; fi
+  [ "$status" -eq 0 ] || return 1
+  STATE_MODEL="$output"; STATE_MODEL_FOUND=1
+  return 0
+}
 model_for_start() {
-  local role="$1" model="" line arg
-  if [ -f "$state" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "model.$role="*) model="${line#*=}"; break ;;
-      esac
-    done <"$state"
-  fi
-  if [ "$part_given" -eq 1 ]; then
-    for arg in ${models[@]+"${models[@]}"}; do
-      if [ "${arg%%=*}" = "$role" ]; then model="${arg#*=}"; break; fi
-    done
-  elif [ -z "$model" ]; then
-    for arg in ${models[@]+"${models[@]}"}; do
-      if [ "${arg%%=*}" = "$role" ]; then model="${arg#*=}"; break; fi
-    done
-  fi
-  printf '%s\n' "$model"
+  local role="$1" model="" arg
+  if read_state_model "$role"; then model="$STATE_MODEL"; fi
+  for arg in ${models[@]+"${models[@]}"}; do
+    if [ "${arg%%=*}" = "$role" ]; then model="${arg#*=}"; fi
+  done
+  MODEL_FOR_START="$model"
 }
 for scoped_role in verify review; do
-  scoped_model="$(model_for_start "$scoped_role")"
+  model_for_start "$scoped_role"; scoped_model="$MODEL_FOR_START"
   [ -n "$scoped_model" ] || continue
   implement_models=()
   for implement_role in fix lane; do
-    implement_model="$(model_for_start "$implement_role")"
+    model_for_start "$implement_role"; implement_model="$MODEL_FOR_START"
     [ -n "$implement_model" ] || continue
     implement_models+=("model.$implement_role=$implement_model")
   done
@@ -215,16 +224,7 @@ for scoped_role in verify review; do
   fi
 done
 state_has_planner_model() {
-  local state_line model_id
-  [ -f "$state" ] || return 1
-  while IFS= read -r state_line || [ -n "$state_line" ]; do
-    case "$state_line" in
-      model.planner=*)
-        model_id="${state_line#*=}"
-        if [ -n "${model_id//[[:space:]]/}" ]; then return 0; fi
-        ;;
-    esac
-  done <"$state"
+  if read_state_model planner && [ -n "${STATE_MODEL//[[:space:]]/}" ]; then return 0; fi
   return 1
 }
 if [ -f "$state" ]; then
@@ -255,17 +255,6 @@ clear_preflight_slot() {
   tkt set job.preflight.prompt ""
   tkt set preflight.resume_attempted ""
   tkt journal "tkt-start preflight cleared job=$job_id"
-}
-part_notes=()
-emit() {
-  local rest="$1" code="$2"; shift 2; local twelve log out note
-  twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf nohead)"
-  log="$run/$namebase-tkt-start-$twelve-$(date +%H%M%S).log"; out="TKT tkt-start $rest log=$log"
-  [ $# -eq 0 ] || out="$out
-$(printf '%s\n' "$@" | head -n 40)"
-  for note in ${part_notes[@]+"${part_notes[@]}"}; do out="$out
-$note"; done
-  printf '%s\n' "$out" | tee "$log"; exit "$code"
 }
 fail_step() {
   local msg="tkt-start: $1 failed (rc=$2)"
@@ -401,7 +390,7 @@ if [ "$part_given" -eq 1 ]; then
         if [ -e "$archive" ]; then
           deny "PRECONDITION part=$part archive=$archive" 2 "tkt-start: archive already exists: $archive"
         fi
-        carried_models=()
+        carried_models=(); carried_model_roles=()
         carried_verdict=""; carried_verdict_base=""; carried_verdict_hash=""
         verdict_seen=0; verdict_base_seen=0; verdict_hash_seen=0
         while IFS= read -r state_line || [ -n "$state_line" ]; do
@@ -416,13 +405,20 @@ if [ "$part_given" -eq 1 ]; then
               carried_verdict="${state_line#plan_verdict=}"; verdict_seen=1
               ;;
             model.*=*)
-              model_key="${state_line%%=*}"; model_role="${model_key#model.}"; model_replaced=0
+              model_key="${state_line%%=*}"; model_role="${model_key#model.}"; model_seen=0
+              for seen_role in ${carried_model_roles[@]+"${carried_model_roles[@]}"}; do
+                [ "$seen_role" = "$model_role" ] && model_seen=1
+              done
+              [ "$model_seen" -eq 0 ] || continue
+              carried_model_roles+=("$model_role")
+              read_state_model "$model_role" || continue
+              model_line="$model_key=$STATE_MODEL"; model_replaced=0
               for m in ${models[@]+"${models[@]}"}; do
                 if [ "${m%%=*}" = "$model_role" ]; then model_replaced=1; fi
               done
               if [ "$model_replaced" -eq 0 ]; then
-                carried_models+=("$state_line")
-                part_notes+=("carried $state_line from part $((part - 1)); pass --model ${state_line#model.} to change it")
+                carried_models+=("$model_line")
+                part_notes+=("carried $model_line from part $((part - 1)); pass --model ${model_line#model.} to change it")
               fi
               ;;
           esac
@@ -500,7 +496,15 @@ fi
 if [ "$body_ends_given" -eq 1 ]; then tkt set body_ends "$body_ends"; fi
 if [ "$spec_issue_given" -eq 1 ]; then tkt set spec_issue "$spec_issue"; fi
 for b in ${body_has[@]+"${body_has[@]}"}; do tkt list body_has 2>/dev/null | grep -xF -- "$b" >/dev/null || tkt add body_has "$b"; done
-for m in ${models[@]+"${models[@]}"}; do tkt list "model.${m%%=*}" 2>/dev/null | grep -xF -- "${m#*=}" >/dev/null || tkt add "model.${m%%=*}" "${m#*=}"; done
+for m in ${models[@]+"${models[@]}"}; do
+  model_role="${m%%=*}"; model_key="model.$model_role"; model_id="${m#*=}"
+  old_model=""; old_model_found=0
+  if read_state_model "$model_role"; then old_model="$STATE_MODEL"; old_model_found=1; fi
+  tkt set "$model_key" "$model_id"
+  if [ "$old_model_found" -eq 1 ] && [ "$old_model" != "$model_id" ]; then
+    tkt journal "tkt-start $model_key from=$old_model to=$model_id"
+  fi
+done
 tkt journal "tkt-start state repo=$repo issue=$issue branch=$branch"
 # Repo reads go through the worktree once it exists, so a rerun works from
 # any directory; creating it still runs in the caller's repo.

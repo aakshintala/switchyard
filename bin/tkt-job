@@ -578,10 +578,16 @@ else
   fi
   prompt_hash="$(shasum -a 256 <"$brief" | awk '{print $1}')"
   if [ -z "$model" ]; then
-    model="$(tkt get "model.$slot" 2>/dev/null)" || {
+    model_status=0
+    model="$(tkt get "model.$slot" 2>&1)" || model_status=$?
+    if [ "$model_status" -eq 3 ]; then
+      printf 'TKT tkt-job MODEL-AMBIGUOUS key=model.%s\n%s\n' "$slot" "$model" >&2
+      exit 3
+    fi
+    if [ "$model_status" -ne 0 ]; then
       echo "tkt-job: missing key: model.$slot (no --model and no state model.$slot)" >&2
       exit 2
-    }
+    fi
   fi
   # The tool-idle window bounds one silent tool call and the job-end gate, on every model: a full
   # gate on a loaded box can run past 30 min, so every job gets 2 h. For muse it is also the
