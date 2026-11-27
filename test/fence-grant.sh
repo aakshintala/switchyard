@@ -515,21 +515,180 @@ FWSEC=END
 BOX_LANE_PROBE
 )
 export BOX_PROBE_OUTPUT BOX_LANE_PROBE_OUTPUT
+BOX_2021_LANE_PROBE_OUTPUT=${BOX_LANE_PROBE_OUTPUT//fiber-2013/fiber-2021}
+BOX_2015_LANE_PROBE_OUTPUT=${BOX_LANE_PROBE_OUTPUT//fiber-2013/fiber-2015}
+BOX_2019_LANE_PROBE_OUTPUT=${BOX_LANE_PROBE_OUTPUT//fiber-2013/fiber-2019}
+export BOX_2021_LANE_PROBE_OUTPUT BOX_2015_LANE_PROBE_OUTPUT BOX_2019_LANE_PROBE_OUTPUT
+
+# An absent ticket grants on the current Mac when both host probes succeed.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2030 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'Mac grants a ticket absent from both live-lane probes'
+  assert_line 'GRANT docs/tui.md' 'absent Mac lane prints GRANT'
+  [ -f "$FW_RUN/fiber-2030-fence-grant-1.md" ] || fail 'absent Mac lane writes its grant file'
+) || exit 1
 
 reset_case
 (
   PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
   TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2031 --paths docs/tui.md --dry >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'Mac dry run grants a ticket absent from both live-lane probes'
+  assert_line 'WOULD-GRANT docs/tui.md' 'absent Mac dry run predicts the path grant'
+  assert_line WOULD-GRANT 'absent Mac dry run predicts GRANT'
+  assert_no_grant 'absent Mac dry run writes no grant'
+) || exit 1
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2032 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'box grants a ticket absent from both live-lane probes'
+  assert_line 'GRANT docs/tui.md' 'absent box lane prints GRANT'
+  [ -f "$FW_RUN/fiber-2032-fence-grant-1.md" ] || fail 'absent box lane writes its grant file'
+) || exit 1
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2033 --paths docs/tui.md --dry >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'box dry run grants a ticket absent from both live-lane probes'
+  assert_line 'WOULD-GRANT docs/tui.md' 'absent box dry run predicts the path grant'
+  assert_line WOULD-GRANT 'absent box dry run predicts GRANT'
+  assert_no_grant 'absent box dry run writes no grant'
+) || exit 1
+
+# --empty uses the same absent-ticket routing rule on both current hosts.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2034 --empty >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'Mac --empty grants an absent ticket on the current host'
+  assert_line GRANT 'Mac --empty prints GRANT for an absent ticket'
+  [ -f "$FW_RUN/fiber-2034-fence-grant-1.md" ] || fail 'Mac --empty writes its grant file'
+) || exit 1
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2035 --empty >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'box --empty grants an absent ticket on the current host'
+  assert_line GRANT 'box --empty prints GRANT for an absent ticket'
+  [ -f "$FW_RUN/fiber-2035-fence-grant-1.md" ] || fail 'box --empty writes its grant file'
+) || exit 1
+
+# A failed probe without --host still refuses an absent ticket.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
+  SSH_OUT='broken markers'
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2036 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_error 'markerless box probe refuses without --host' 'ERROR ssh box exit 0: no stderr; output lacks the FWSEC markers'
+) || exit 1
+
+# A failed --empty probe refuses and preserves the current box's bare route.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
+  SSH_OUT='broken markers'
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2022 --empty >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 3 'box --empty refuses when a probe fails'
+  assert_out '' 'failed box --empty does not print GRANT'
+  grep -qF "Run on box: $FG 2022 --empty" "$T/err" || fail 'box refusal prints the bare on-box command'
+  ! grep -qF 'Run on box: ssh ' "$T/err" || fail 'box refusal never sshs to itself'
+  assert_no_grant 'failed box --empty writes no grant'
+) || exit 1
+
+# The tkt-drive grant step calls fence-grant with --repo, multiple --paths,
+# and --reads but no --host. On the box, its local Claude and FW_SSH probes
+# report the same lane; that lane must still resolve to the box and grant.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
+  SSH_OUT="$BOX_2021_LANE_PROBE_OUTPUT"
+  CLAUDE_JSON='[{"name":"fiber-2021","status":"busy"}]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2021 --repo owner/name --paths docs/tui.md,docs/events.md --reads docs/events.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'tkt-drive grant step grants its live box lane without --host'
+  assert_line GRANT 'tkt-drive grant step prints GRANT'
+  ! grep -qF 'cannot determine the lane host' "$T/err" || fail 'tkt-drive grant step resolves the box lane'
+  [ -f "$FW_RUN/fiber-2021-fence-grant-1.md" ] || fail 'tkt-drive grant step writes its grant file'
+) || exit 1
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
   SSH_OUT="$BOX_LANE_PROBE_OUTPUT"
   CLAUDE_JSON='[]'
   MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
-  export PATH TEST_HOSTNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
   bash "$FG" 2013 --paths docs/tui.md >"$T/out" 2>"$T/err"
   RC=$?
   assert_rc 3 'Mac refuses to write a live box lane grant'
   assert_out '' 'Mac refusal does not print GRANT'
-  grep -qF "Run on box: ssh $FW_BOX_HOST '$FG 2013 --paths docs/tui.md'" "$T/err" \
-    || fail 'Mac refusal prints the exact box command'
+  grep -qF "Run on box: ssh $FW_BOX_HOST '~/.agents/bin/fence-grant 2013 --paths docs/tui.md'" "$T/err" \
+    || fail 'Mac refusal prints the installed box command'
   assert_no_grant 'Mac refuses box grant without writing locally'
   bash "$FG" 2013 --paths docs/tui.md --dry >"$T/out" 2>"$T/err"
   RC=$?
@@ -539,35 +698,158 @@ reset_case
   assert_no_grant 'refused dry run writes no grant locally'
 ) || exit 1
 
+# A relative caller path is retained on local routes, but the ssh route must
+# invoke the installed fence-grant instead of carrying that unusable path over.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
+  SSH_OUT="$BOX_2019_LANE_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  (
+    cd "$SCRIPT_DIR/.." || exit 1
+    bash bin/fence-grant 2019 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  )
+  RC=$?
+  assert_rc 3 'relative-path caller refuses the live box lane on Mac'
+  route=$(grep -F "Run on box: ssh $FW_BOX_HOST " "$T/err" | head -n 1)
+  [ -n "$route" ] || fail 'relative-path refusal prints an ssh route'
+  case "$route" in
+    "Run on box: ssh $FW_BOX_HOST "*) remote_route=${route#"Run on box: ssh $FW_BOX_HOST "} ;;
+    *) fail 'relative-path refusal route names the expected host' ;;
+  esac
+  case "$remote_route" in
+    bin/*|"'bin/"*) fail 'ssh route does not start with the relative caller path' ;;
+  esac
+  [ "$remote_route" = "'~/.agents/bin/fence-grant 2019 --paths docs/tui.md'" ] \
+    || fail "relative-path refusal names the installed command: $remote_route"
+  assert_no_grant 'relative-path refusal does not write a grant'
+) || exit 1
+
 reset_case
 (
   PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
   TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
   SSH_OUT="$BOX_PROBE_OUTPUT"
   CLAUDE_JSON='[]'
   MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
-  export PATH TEST_HOSTNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
   run_fg 2014 --host box --paths docs/events.md
   assert_rc 0 'box grants for a box lane'
   assert_line GRANT 'box grant prints GRANT'
   [ -f "$FW_RUN/fiber-2014-fence-grant-1.md" ] || fail 'box grant writes its grant file'
 ) || exit 1
 
+# With no --host, the local Claude probe and the local FW_SSH box probe both
+# report the same box lane. They must not be counted as two different hosts.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
+  SSH_OUT="$BOX_2021_LANE_PROBE_OUTPUT"
+  CLAUDE_JSON='[{"name":"fiber-2021","status":"busy"}]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2021 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'box grants its live local lane without --host'
+  assert_line 'GRANT docs/tui.md' 'box lane grant output'
+  grep -qF 'agents --json' "$T/claude.log" || fail 'box grant used the local Claude probe'
+  grep -qF 'FWSEC=AGENTS' "$T/ssh.log" || fail 'box grant used the FW_SSH box probe'
+  [ -f "$FW_RUN/fiber-2021-fence-grant-1.md" ] || fail 'box lane grant writes its grant file'
+) || exit 1
+
+# A ticket absent from all local box probes uses the box as the current host.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME="$FW_BOX_HOST"
+  TEST_UNAME=Linux
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2022 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'box grants a ticket absent from its live lanes'
+  assert_line 'GRANT docs/tui.md' 'absent box ticket prints GRANT'
+  [ -f "$FW_RUN/fiber-2022-fence-grant-1.md" ] || fail 'absent box ticket writes its grant file'
+) || exit 1
+
+# Mac-local lanes still resolve to Mac and grant without an explicit host.
 reset_case
 (
   PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
   TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[{"name":"fiber-2023","status":"busy"}]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2023 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 0 'Mac grants its live lane without --host'
+  assert_line 'GRANT docs/tui.md' 'Mac lane grant output is unchanged'
+  [ -f "$FW_RUN/fiber-2023-fence-grant-1.md" ] || fail 'Mac lane grant writes its grant file'
+) || exit 1
+
+# A ticket absent from both Mac and box probes grants on the current Mac.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
   SSH_OUT="$BOX_PROBE_OUTPUT"
   CLAUDE_JSON='[]'
   MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
-  export PATH TEST_HOSTNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
   bash "$FG" 2015 --paths docs/tui.md >"$T/out" 2>"$T/err"
   RC=$?
-  assert_rc 3 'unknown lane host is refused'
-  assert_out '' 'unknown-host refusal does not print GRANT'
-  grep -qF "Run on Mac: $FG 2015 --paths docs/tui.md" "$T/err" || fail 'unknown-host refusal names the Mac route'
-  grep -qF "Run on box: ssh $FW_BOX_HOST '$FG 2015 --paths docs/tui.md'" "$T/err" || fail 'unknown-host refusal names the box route'
-  assert_no_grant 'unknown lane host refuses without writing'
+  assert_rc 0 'Mac grants a ticket absent from its live lanes'
+  assert_line 'GRANT docs/tui.md' 'absent Mac ticket prints GRANT'
+  [ -f "$FW_RUN/fiber-2015-fence-grant-1.md" ] || fail 'absent Mac ticket writes its grant file'
+) || exit 1
+
+# A ticket listed by both independent host probes remains ambiguous and refuses.
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=mac.local
+  TEST_UNAME=Darwin
+  SSH_OUT="$BOX_2015_LANE_PROBE_OUTPUT"
+  CLAUDE_JSON='[{"name":"fiber-2015","status":"busy"}]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2015 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 3 'ticket listed on both hosts is ambiguous'
+  assert_out '' 'ambiguous lane host does not print GRANT'
+  grep -qF "Run on Mac: $FG 2015 --paths docs/tui.md" "$T/err" || fail 'ambiguous lane refusal names the Mac route'
+  grep -qF "Run on box: ssh $FW_BOX_HOST '~/.agents/bin/fence-grant 2015 --paths docs/tui.md'" "$T/err" || fail 'ambiguous lane refusal names the installed box route'
+  assert_no_grant 'ambiguous lane host refuses without writing'
+) || exit 1
+
+reset_case
+(
+  PATH="$HOST_SIM_BIN:$ORIGINAL_PATH"
+  TEST_HOSTNAME=unknown.local
+  TEST_UNAME=Linux
+  SSH_OUT="$BOX_PROBE_OUTPUT"
+  CLAUDE_JSON='[]'
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}'
+  export PATH TEST_HOSTNAME TEST_UNAME SSH_OUT CLAUDE_JSON MAC_DSESS_JSON
+  bash "$FG" 2017 --paths docs/tui.md >"$T/out" 2>"$T/err"
+  RC=$?
+  assert_rc 3 'unrecognized current host refuses an absent ticket'
+  assert_out '' 'unrecognized current host does not print GRANT'
+  grep -qF 'Run on Mac:' "$T/err" || fail 'unrecognized current host refusal names the Mac route'
+  grep -qF "Run on box: ssh $FW_BOX_HOST '~/.agents/bin/fence-grant " "$T/err" || fail 'unrecognized current host refusal names the installed box route'
+  assert_no_grant 'unrecognized current host writes no grant'
 ) || exit 1
 
 reset_case
@@ -576,11 +858,11 @@ reset_case
   TEST_HOSTNAME=unknown.local
   TEST_UNAME=Linux
   export PATH TEST_HOSTNAME TEST_UNAME
-  run_fg 2017 --host box --paths docs/tui.md
+  run_fg 2018 --host box --paths docs/tui.md
   assert_rc 3 'unrecognized local host refuses a box grant'
   assert_out '' 'unrecognized local host refusal does not print GRANT'
   grep -qF 'Run on Mac:' "$T/err" || fail 'unrecognized local host refusal names the Mac route'
-  grep -qF "Run on box: ssh $FW_BOX_HOST '" "$T/err" || fail 'unrecognized local host refusal names the box route'
+  grep -qF "Run on box: ssh $FW_BOX_HOST '~/.agents/bin/fence-grant " "$T/err" || fail 'unrecognized local host refusal names the installed box route'
   assert_no_grant 'unrecognized local host writes no grant'
 ) || exit 1
 
