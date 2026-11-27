@@ -2765,7 +2765,7 @@ assert_rc 0 'nested-run dry probe reads shared holder grant'
 assert_contains 'OVERLAP docs/tui.md lane #66' 'shared grant holder is visible from nested run'
 FILE_CLAIM_LIST="$(printf 'docs/tui.md\tsweep-1798-holder\tplan\t0\tt:stub\t\n')"
 export FILE_CLAIM_LIST
-if fw_self_grant tkt-job 1798 "$state_run" 1 build >"$T/nested-overlap.out" 2>&1; then
+if PATH="$UNAME_PIN:$PATH" fw_self_grant tkt-job 1798 "$state_run" 1 build >"$T/nested-overlap.out" 2>&1; then
   fail 'nested-run self-grant refuses an exclusive overlapping holder'
 fi
 grep -qF 'HELD docs/tui.md by lane sweep-1798-holder' "$T/nested-overlap.out" \
@@ -2792,7 +2792,7 @@ cat >"$T/self-grant-plan.md" <<'PLAN'
 
 - `docs/events.md`
 PLAN
-fw_self_grant tkt-job 1798 "$state_run" 1 build >"$T/nested-free.out" 2>&1 \
+PATH="$UNAME_PIN:$PATH" fw_self_grant tkt-job 1798 "$state_run" 1 build >"$T/nested-free.out" 2>&1 \
   || fail "nested-run self-grant grants a non-overlapping path: $(cat "$T/nested-free.out")"
 [ -f "$shared_run/fiber-1798-fence-grant-1.md" ] || fail 'nested-run self-grant writes its grant in shared run'
 [ ! -e "$state_run/fiber-1798-fence-grant-1.md" ] || fail 'nested-run self-grant does not hide its grant in state directory'
