@@ -346,9 +346,7 @@ The project's workflow doc is __WORKFLOW_DOC__; it wins where it speaks.
 
 Read the plan at `__PLAN__` before anything else.
 
-Push the branch. The body starts with `__CLOSING__` and holds `__ATTRIBUTION__`.
-
-Implemented by: __LANE_MODEL__
+Push the branch. Ticket closure intent: `__CLOSING__`. Finish the job in the PR; the PR body is generated output.
 
 The gate passes: `__GATE__`.
 __EXTRA__
@@ -530,14 +528,14 @@ grep -q '^concerns=' <<<"$OUT" && fail "happy: no empty concerns digest line"
 grep -q "BASE=$H" "$T/calls.log" || fail "happy: BASE reaches the lane"
 grep -q "GATE=true" "$T/calls.log" || fail "happy: GATE reaches the lane"
 grep -q "CLOSING=Resolves #528" "$T/calls.log" || fail "happy: CLOSING reaches the lane"
-grep -q "ATTRIBUTION=Co-authored with Test" "$T/calls.log" || fail "happy: ATTRIBUTION reaches the lane"
+! grep -q "ATTRIBUTION=" "$T/calls.log" || fail "happy: no body attribution reaches the lane"
 grep -q "^run|id=stub-1|model=codex/test-model|prompt=.*-lane-1.md$" "$T/calls.log" || fail "happy: --lane-model wins"
 grep -q '^quota: provider=codex status=healthy$' <<<"$OUT" || fail "happy: quota pick is reported"
 grep -q '^job|.*--gate-from-plan' "$T/calls.log" || fail "happy: lane tkt-job builds its gate from the plan (stray run handling)"
 brief="$(grep '^run|' "$T/calls.log" | sed 's/.*prompt=//')"
 grep -q "$H" "$brief" || fail "happy: the filled brief holds the base"
 grep -q "Resolves #528" "$brief" || fail "happy: the filled brief holds CLOSING"
-grep -q "Co-authored with Test" "$brief" || fail "happy: the filled brief holds ATTRIBUTION"
+! grep -q "Co-authored with Test" "$brief" || fail "happy: the filled brief has no body attribution requirement"
 grep -q "^gate|.*--expect-head $H$" "$T/calls.log" || fail "happy: the gate checks the lane head"
 grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issue 528 --model codex/test-review-model --overbuild-model composer-2.5 --axes standards --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: standards starts with state and flag values"
 grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issue 528 --model codex/test-review-model --overbuild-model composer-2.5 --axes spec --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: spec starts per axis"
@@ -598,7 +596,7 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "lane-claim
 grep -F -q "claim --lane fiber-528 --diff $WT" "$T/file-claim.log" || fail "lane-claim-failure: hunk claim helper is invoked"
 grep -q 'WARN tkt: could not record pushed hunk claims for #528' "$CDIR/stderr.txt" || fail "lane-claim-failure: claim failure warns without failing the push"
 
-# --- the real lane brief fills and carries the second-patch stop rule (#982) ---
+# The real lane brief still carries the second-patch stop rule and no body instructions.
 setup_case real-lane-brief
 cp "$T/home/.agents/skills/planning/briefs/lane.md" "$T/lane-stub.md" || fail "real-lane-brief: keep the stub lane brief"
 cp "$SCRIPT_DIR/../skills/planning/briefs/lane.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: install the real lane brief"
@@ -609,35 +607,26 @@ cp "$T/lane-stub.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "r
 grep -q 'second patch' "$brief" || fail "real-lane-brief: the filled brief carries the second-patch stop rule"
 grep -q 'STATUS: BLOCKED' "$brief" || fail "real-lane-brief: the filled brief names the BLOCKED stop"
 
-# --- body_ends wins over body_has for the lane ATTRIBUTION ---
-setup_case attr-ends
-bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-ends: set body_has"
-bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "attr-ends: set body_ends"
-run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
-[ "$RC" -eq 0 ] || fail "attr-ends exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q "ATTRIBUTION=Co-authored with Ends" "$T/calls.log" || fail "attr-ends: ATTRIBUTION reaches the lane"
+# --- body state no longer supplies a lane attribution instruction ---
+for attr_case in attr-ends attr-body attr-both attr-empty; do
+  setup_case "$attr_case"
+  case "$attr_case" in
+    attr-ends) bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "$attr_case: set body_has"; bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "$attr_case: set body_ends" ;;
+    attr-body) bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "$attr_case: set body_has" ;;
+    attr-both) bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "$attr_case: set body_has"; bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "$attr_case: set body_ends" ;;
+    attr-empty) bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "$attr_case: set body_has" ;;
+  esac
+  run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
+  [ "$RC" -eq 0 ] || fail "$attr_case exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  ! grep -q 'ATTRIBUTION=' "$T/calls.log" || fail "$attr_case: body state does not reach lane instructions"
+done
 
-# --- with no body_ends, a body_has co-author reaches the lane ---
-setup_case attr-body
-bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "attr-body: set body_has"
+# --- with no body requirements, the lane instruction has no attribution slot ---
+setup_case attr-empty-slot
+bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-empty-slot: seed legacy body_has"
 run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
-[ "$RC" -eq 0 ] || fail "attr-body exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q "ATTRIBUTION=Co-authored with Body" "$T/calls.log" || fail "attr-body: ATTRIBUTION reaches the lane"
-
-# --- when both keys are set, body_ends wins ---
-setup_case attr-both
-bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "attr-both: set body_has"
-bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "attr-both: set body_ends"
-run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
-[ "$RC" -eq 0 ] || fail "attr-both exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q "ATTRIBUTION=Co-authored with Ends" "$T/calls.log" || fail "attr-both: ATTRIBUTION reaches the lane"
-
-# --- with neither key, the ATTRIBUTION slot stays empty ---
-setup_case attr-empty
-bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-empty: set body_has"
-run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
-[ "$RC" -eq 0 ] || fail "attr-empty exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q "ATTRIBUTION= LANE_MODEL=" "$T/calls.log" || fail "attr-empty: ATTRIBUTION stays empty"
+[ "$RC" -eq 0 ] || fail "attr-empty-slot exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+! grep -q 'ATTRIBUTION=' "$T/calls.log" || fail "attr-empty-slot: no attribution slot"
 
 # --- mutants present: the map runs beside review, needs-test and removed merge ---
 setup_case mutants
@@ -812,7 +801,7 @@ grep -q "model.lane" <<<"$OUT" || fail "lane-error: the digest names the key"
 grep -q "model.lane" "$CDIR/stderr.txt" || fail "lane-error: stderr names the key"
 grep -q -- "-lane-" "$T/calls.log" && fail "lane-error: the lane never dispatches"
 
-# --- the lane brief carries the state lane model, never unknown ---
+# --- the lane uses its configured model without a PR-body attribution line ---
 setup_case lane-model
 run_build
 [ "$RC" -eq 0 ] || fail "lane-model exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
@@ -820,9 +809,7 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "lane-model
 grep -q "^run|id=stub-1|model=codex/test-model|" "$T/calls.log" || fail "lane-model: the lane runs on model.lane"
 brief="$(grep '^run|' "$T/calls.log" | sed 's/.*prompt=//')"
 case "$brief" in "$CDIR/run/"*) ;; *) fail "lane-model: the brief is written under \$CDIR/run";; esac
-impl="$(grep '^Implemented by:' "$brief")"
-[ "$impl" = "Implemented by: codex/test-model" ] || fail "lane-model: the brief holds [$impl]"
-case "$impl" in *unknown*) fail "lane-model: the Implemented by line never holds unknown";; esac
+! grep -q '^Implemented by:' "$brief" || fail "lane-model: no PR-body attribution requirement in the brief"
 
 # --- mapped provider refusals name their provider and stop before dispatch ---
 quota_refusal_case() {

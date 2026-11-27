@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ship-pr: run a reviewed PR's merge tail in one command.
-# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--outside-plan <path>]... [--known-flake <ticket>...] [--by <who>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]
+# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--ticket-state <file>] [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--outside-plan <path>]... [--known-flake <ticket>...] [--by <who>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
 #        60 s for GitHub's head to match the local HEAD; require a matching
@@ -9,8 +9,14 @@
 #        with readable, non-empty P3-only findings; each P3 is filed or matched
 #        to an open issue and linked from the PR immediately before merge;
 #        --unverified-fixes permits a no-real-bug
-#        fix round after either CHANGES or FIX-INCOMPLETE); require each --body-has
-#        line and run pr-closes (see below); run --gate in the worktree on that head,
+#        fix round after either CHANGES or FIX-INCOMPLETE); ticket-state guards
+#        apply only when --ticket-state is passed: grants cover every counted
+#        round past limit two, and the state Files fence/outside_plan list is
+#        checked against the pinned diff. Hand-run lanes without state use their
+#        explicit --gate. Legacy body flags are accepted, warned about once and
+#        ignored; PR body text supplies no process or closure evidence. Run
+#        pr-closes against title/commit messages plus state closing, then run
+#        --gate in the worktree on that head;
 #        once, before any merge or push; merge origin/main when required (see below);
 #        compare the reviewed patch with the new head's diff against origin/main by
 #        `git patch-id --stable`, ignoring context lines (with --unverified-fixes, a
@@ -33,9 +39,8 @@
 #        in strict mode (no extra sleep, sharing the 3 retries);
 #        polling MERGED even after a failed retry; wait for MERGED; by default
 #        remove the worktree and local branch by default after a merge when
-#        clean and no process has its cwd inside. Keep them when --keep-branch
-#        is set, the body says Refs #N without a closing line, the caller's cwd
-#        is inside the worktree, it is dirty, or lsof is unavailable, errors,
+#        clean and no process has its cwd inside. Keep them when --keep-branch is
+#        set, the caller's cwd is inside the worktree, it is dirty, or lsof is unavailable,
 #        or finds a process inside. The remote branch is still deleted.
 #        After a confirmed merge of aakshintala/switchyard, fast-forward ~/.agents
 #        only when it is on main with no tracked changes or local commits; untracked
@@ -46,45 +51,30 @@
 #        absent required check is pending. To keep a draft run from satisfying
 #        the wait, give its check a name other than the required one (fiber's
 #        draft run reports `CI (draft)`; the required check is `CI`).
-#        Each --body-has <prefix> (repeatable) requires a PR body line that starts
-#        with <prefix>, literally and case-sensitively; it is checked after step 1,
-#        before the merge, and each missing one prints `missing body line: <prefix>`.
-#        When the prefix is exactly `Implemented by:`, every such line must hold
-#        model ids (comma-separated items, none empty after trimming, none
-#        `unknown` in any letter case); each bad line prints `bad body line: <line>`.
-#        --body-ends <text> requires the body's last non-blank line to equal
-#        <text> exactly, literally and case-sensitively. A blank line is empty
-#        or whitespace-only (after stripping a trailing CR), so trailing blank
-#        lines are ignored; a body with no non-blank line fails. It is checked
-#        in the same block and prints `body does not end with (--body-ends): <text>`.
-#        --outside-plan <path> (repeatable) requires each recorded path in the
-#        body's `Outside-plan files` section as `- <path> — <reason>`; it also
-#        accepts `- <path> - <reason>` and `- \`<path>\`: <reason>`. A path may
-#        have one pair of surrounding backticks. The reason must be non-blank
-#        and on that same line. This check is opt-in; an empty recorded list
-#        needs no section.
-#        Always, the PR body and each PR comment whose first line starts with
-#        `Review round closed` (the review record; other comments are not read) are
-#        scanned for authority claims: a line with
-#        `per the ruling`, `owner ruled`, `approved by` or similar, outside code spans,
-#        fenced blocks and `>` quotes, must cite #<n>, a URL or <doc>:<line> on the same line,
-#        or in the same bullet, as the claim, else it prints `uncited authority: <line>` and exits 5.
+#        Legacy --body-has, --body-ends and --outside-plan values are no-ops;
+#        ship-pr warns once and ignores them. With --ticket-state, round grants
+#        must be present in state for every counted round past two, and every
+#        outside-plan entry must match the pinned diff; uncovered changed paths
+#        must appear in state outside_plan. Review-round comments (only those
+#        whose first line starts with `Review round closed`) remain the authority
+#        citation source; PR-body prose is not scanned.
 #        When the repo defines a `mutants` label (`gh label list`), a draft PR
 #        must carry it before ship-pr marks it ready, so mutants run on the
 #        draft from the first push; a repo without the label is not checked,
 #        and neither is a PR that is already ready. A draft without the label
-#        exits 5. --no-mutants-label <reason> skips this legacy check and prints
+#        exits 5. --no-mutants-label <reason> skips this label check and prints
 #        the reason; --mutants-gate still requires its label or completed-run proof.
 #        --mutants-gate opts in to requiring a draft's `mutants` label or a
 #        completed run on the pinned head whose Selection job log contains
 #        `mutants in the diff: 0`; an in-progress or absent run fails before ready.
-#        Step 2 runs pr-closes just after the --body-has check, before any gate,
-#        merge, push or CI wait. With --allow-commit-closes, a stray match whose
-#        report's second field is `commit <sha>` is printed to stderr as a warning
-#        and does not fail; a title or body match still exits 5. Without the flag
-#        every stray match exits 5. Both repos that use ship-pr squash with the PR
-#        title and body as the commit message, so a commit message keyword never
-#        reaches main.
+#        --mutants-gate opts in to requiring a draft's `mutants` label or a
+#        completed run on the pinned head whose Selection job log contains
+#        `mutants in the diff: 0`; an in-progress or absent run fails before ready.
+#        Step 2 checks title and commit closure keywords against the state `closing`
+#        value; PR body text supplies no matches or authorization. With
+#        --allow-commit-closes, a stray commit match warns and does not fail; a
+#        title match still exits 5. Without the flag every stray title or commit
+#        match exits 5.
 #        When `gh-ci wait` fails on the pinned head, ship-pr reads `gh-ci failures
 #        --pr <pr>` and, only when the failure is outside the diff, reruns each failed
 #        or cancelled run on the pinned head with `gh run rerun <run id> --failed`,
@@ -155,7 +145,11 @@
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 merge conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
-#        verdict; with --unverified-fixes, no exit 4), 5 PR text or review state needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, stray closing keywords from pr-closes, or no approved review verdict: CHANGES needs a scoped verify; FIX-INCOMPLETE needs readable, non-empty P3-only findings or --unverified-fixes for a no-real-bug fix round), 124 CI wait timeout.
+#        verdict; with --unverified-fixes, no exit 4), 5 a draft missing the mutants
+#        label, uncited authority in a review-round comment, a stray title/commit
+#        closure keyword, or review state needing a fix (CHANGES needs scoped verify;
+#        FIX-INCOMPLETE needs readable non-empty P3-only findings or --unverified-fixes
+#        for a no-real-bug fix round). Legacy PR-body flags are ignored; 124 CI timeout.
 #        Merge rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
@@ -202,7 +196,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--outside-plan <path>]... [--known-flake <ticket>...] [--by <who>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]" >&2
+  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--ticket-state <file>] [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--outside-plan <path>]... [--known-flake <ticket>...] [--by <who>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]" >&2
   echo "       --known-flake requires a fail-fast gate ending in nextest (exit 100 for test failures)" >&2
   echo "       only FAIL/TIMEOUT/SIG*/LEAK* open output blocks; other statuses close them" >&2
   echo "       after the final Summary, only Fiber's scripts/check tail is accepted; other output refuses" >&2
@@ -894,7 +888,7 @@ post_known_flake_comments() {
 ship_args=("$@")
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
-repo="" reviewed="" worktree="" gate="" merge_check="" timeout=7200 body_has=() body_ends="" outside_plan=() known_flakes=() known_by="" known_by_seen="" unverified="" allow_commit_closes="" keep_branch="" no_mutants_label="" mutants_gate=""
+repo="" reviewed="" worktree="" gate="" merge_check="" timeout=7200 known_flakes=() known_by="" known_by_seen="" unverified="" allow_commit_closes="" keep_branch="" no_mutants_label="" mutants_gate="" ticket_state="" legacy_body_flags=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --known-flake)
@@ -926,12 +920,13 @@ while [ $# -gt 0 ]; do
     --repo) repo="$2" ;;
     --reviewed) reviewed="$2" ;;
     --worktree) worktree="$2" ;;
+    --ticket-state) [ -n "$2" ] || usage; ticket_state="$2" ;;
     --gate) gate="$2" ;;
     --merge-check) merge_check="$2" ;;
     --timeout) timeout="$2" ;;
-    --body-has) case "$2" in ''|*$'\n'*) usage ;; esac; body_has+=("$2") ;;
-    --body-ends) case "$2" in ''|*$'\n'*) usage ;; esac; body_ends="$2" ;;
-    --outside-plan) case "$2" in ''|*$'\n'*) usage ;; esac; outside_plan+=("$2") ;;
+    --body-has) legacy_body_flags=1 ;;
+    --body-ends) legacy_body_flags=1 ;;
+    --outside-plan) legacy_body_flags=1 ;;
     --unverified-fixes) [ -n "$2" ] || usage; unverified="$2" ;;
     --no-mutants-label) [ -n "$2" ] || usage; no_mutants_label="$2" ;;
     *) usage ;;
@@ -939,6 +934,13 @@ while [ $# -gt 0 ]; do
   shift 2
 done
 [ -n "$repo" ] && [ -n "$reviewed" ] && [ -n "$worktree" ] || usage
+if [ -n "$ticket_state" ]; then
+  ticket_state="$(cd "$(dirname "$ticket_state")" 2>/dev/null && pwd)/$(basename "$ticket_state")" \
+    || die 2 "cannot resolve --ticket-state $ticket_state"
+fi
+if [ "$legacy_body_flags" -eq 1 ]; then
+  say "warning: ignoring legacy body options (--body-has, --body-ends, --outside-plan); PR body text is generated output"
+fi
 case "$timeout" in ''|*[!0-9]*) usage ;; esac
 if [ "${#known_flakes[@]}" -gt 0 ] && [ "$known_by" != flywheel ]; then
   refuse KNOWN-FLAKE "--known-flake requires --by flywheel"
@@ -971,6 +973,116 @@ done
 here="$(cd "$(dirname "$script_path")" && pwd)"
 . "$here/lib/verify-section.sh"
 . "$here/lib/review-verdict.sh"
+ticket_state_get() { bash "$here/tkt-state" "$ticket_state" get "$1" 2>/dev/null; }
+ticket_state_list() { bash "$here/tkt-state" "$ticket_state" list "$1" 2>/dev/null; }
+ticket_round=0 ticket_closing="" ticket_plan=""
+ticket_outside=() ticket_fence=()
+if [ -n "$ticket_state" ]; then
+  [ -f "$ticket_state" ] && [ -r "$ticket_state" ] || die 2 "cannot read --ticket-state $ticket_state"
+  ticket_round="$(ticket_state_get round || printf '0')"
+  case "$ticket_round" in ''|*[!0-9]*) die 2 "invalid round in --ticket-state $ticket_state: $ticket_round" ;; esac
+  ticket_round=$((10#$ticket_round))
+  ticket_closing="$(ticket_state_get closing || true)"
+  ticket_plan="$(ticket_state_get plan || true)"
+  while IFS= read -r ticket_path; do [ -n "$ticket_path" ] && ticket_outside+=("$ticket_path"); done \
+    <<<"$(ticket_state_list outside_plan || true)"
+  while IFS= read -r ticket_path; do [ -n "$ticket_path" ] && ticket_fence+=("$ticket_path"); done \
+    <<<"$(ticket_state_list fence || true)"
+  for ((ticket_grant_round = 3; ticket_grant_round <= ticket_round; ticket_grant_round++)); do
+    ticket_grant="$(ticket_state_get "grant.$ticket_grant_round" || true)"
+    [[ "$ticket_grant" =~ ^[0-9]+[[:space:]]+[^[:space:]]+ ]] \
+      || refuse SHIP "missing state grant.$ticket_grant_round for counted round $ticket_grant_round"
+  done
+fi
+
+# Validate the Files fence and outside-plan evidence against the exact ship diff.
+ticket_check_fence() {
+  local record_sec record_new record_path p plan_is_takeover=0
+  local -a changed_paths=()
+  [ -n "$ticket_state" ] || return 0
+  . "$here/lib/plan-tokens.sh"
+  FILES="|" GLOBS=""
+  ticket_plan_add() {
+    case "$1" in
+      path) FILES="$FILES$2|" ;;
+      glob) : ;;
+      symbol) : ;;
+    esac
+    return 0
+  }
+  ticket_fence_add() {
+    local fp="$1"
+    while [[ "$fp" == ./* ]]; do fp="${fp#./}"; done
+    case "$fp" in
+      */\*\*) fp="${fp%/\*\*}/" ;;
+      */\*) fp="${fp%/\*}/" ;;
+    esac
+    case "$fp" in
+      */) FILES="$FILES$fp|" ;;
+      *\**|*\?*|*\[*|*\{*) GLOBS="$GLOBS$fp"$'\n' ;;
+      *)
+        case "${fp##*/}" in
+          *.*) FILES="$FILES$fp|" ;;
+          *) FILES="$FILES$fp|$fp/|" ;;
+        esac
+        ;;
+    esac
+  }
+  case "$ticket_plan" in
+    takeover*) plan_is_takeover=1 ;;
+    "") refuse SHIP "ticket state has no plan or takeover fence" ;;
+    *)
+      [ -r "$ticket_plan" ] || die 2 "cannot read state plan $ticket_plan"
+      while IFS=$'\t' read -r record_sec _record_line record_new _record_read record_path; do
+        case "$record_sec" in
+          files) ;;
+          tasks|interfaces|red) [ "$record_new" = 1 ] || continue ;;
+          *) continue ;;
+        esac
+        [ -n "$record_path" ] || continue
+        CUR_SEC=files
+        expand_token "$record_path" ticket_plan_add
+      done <<<"$(plan_records "$ticket_plan")"
+      ;;
+  esac
+  for p in ${ticket_fence[@]+"${ticket_fence[@]}"}; do ticket_fence_add "$p"; done
+  local_ticket_changed="$(git -C "$worktree" diff --name-only --no-renames "origin/main...$head0" 2>/dev/null)" \
+    || die 1 "cannot inspect changed paths for --ticket-state $ticket_state"
+  while IFS= read -r p || [ -n "$p" ]; do [ -n "$p" ] && changed_paths+=("$p"); done <<<"$local_ticket_changed"
+  ticket_outside_has() {
+    local candidate="$1" item
+    for item in ${ticket_outside[@]+"${ticket_outside[@]}"}; do [ "$item" = "$candidate" ] && return 0; done
+    return 1
+  }
+  ticket_diff_has() {
+    local candidate="$1" item
+    for item in ${changed_paths[@]+"${changed_paths[@]}"}; do [ "$item" = "$candidate" ] && return 0; done
+    return 1
+  }
+  ticket_additive_only() {
+    local candidate="$1" numstat
+    git -C "$worktree" cat-file -e "origin/main:$candidate" 2>/dev/null || return 1
+    numstat="$(git -C "$worktree" diff --numstat --no-renames "origin/main...$head0" -- "$candidate" 2>/dev/null)" || return 1
+    case "$numstat" in [0-9]*$'\t'0$'\t'*) return 0 ;; esac
+    return 1
+  }
+  for p in ${ticket_outside[@]+"${ticket_outside[@]}"}; do
+    ticket_diff_has "$p" || refuse SHIP "state outside_plan path is absent from the diff: $p"
+    covered "$p" && refuse SHIP "state outside_plan path is covered by the plan fence: $p"
+  done
+  for p in ${changed_paths[@]+"${changed_paths[@]}"}; do
+    covered "$p" && continue
+    case "$p" in .github/workflows/*|scripts/check|GLOSSARY.md|docs/*.md|docs/adr/*)
+      refuse SHIP "unfenced contract path is not covered by ticket state: $p" ;;
+    esac
+    if ticket_additive_only "$p"; then
+      ticket_outside_has "$p" && refuse SHIP "state outside_plan path is additive-only: $p"
+      continue
+    fi
+    ticket_outside_has "$p" || refuse SHIP "outside-plan path is missing from ticket state: $p"
+  done
+  : "$plan_is_takeover"
+}
 # rerun_cmd rebuilds this invocation against this file for the lost-race diagnostic.
 rerun_cmd="$(printf '%q ' bash "$here/$(basename "$0")" ${ship_args[@]+"${ship_args[@]}"})"
 rerun_cmd="${rerun_cmd% }"
@@ -1002,126 +1114,12 @@ fi
 git -C "$worktree" rev-parse --verify -q "$reviewed^{commit}" >/dev/null \
   || die 2 "--reviewed $reviewed is not a commit in $worktree"
 
-# Required PR body lines: checked now so a PR with wrong text costs no push and no CI wait.
-if [ "${#body_has[@]}" -gt 0 ] || [ -n "$body_ends" ] || [ "${#outside_plan[@]}" -gt 0 ]; then
-  body="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""')" \
-    || die 2 "cannot read PR $pr body"
-  missing=0
-  for prefix in ${body_has[@]+"${body_has[@]}"}; do
-    found=""
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "${line%$'\r'}" in "$prefix"*) found=1; break ;; esac
-    done <<<"$body"
-    [ -n "$found" ] || { echo "missing body line: $prefix"; missing=1; }
-  done
-  # An `Implemented by:` line must hold model ids: every comma-separated item
-  # is non-empty after trimming whitespace, and no item is `unknown` in any
-  # letter case. Every such line is checked; a bad one prints its text.
-  bad=0
-  for prefix in ${body_has[@]+"${body_has[@]}"}; do
-    [ "$prefix" = "Implemented by:" ] || continue
-    while IFS= read -r line || [ -n "$line" ]; do
-      text="${line%$'\r'}"
-      case "$text" in "Implemented by:"*) ;; *) continue ;; esac
-      rest="${text#Implemented by:},"
-      while [ -n "$rest" ]; do
-        item="${rest%%,*}"
-        rest="${rest#*,}"
-        trimmed="$(printf '%s' "$item" | tr -d '[:space:]')"
-        lowered="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
-        if [ -z "$trimmed" ] || [ "$lowered" = "unknown" ]; then
-          echo "bad body line: $text"
-          bad=1
-          break
-        fi
-      done
-    done <<<"$body"
-  done
-  # The body's last non-blank line must equal --body-ends exactly. Blank
-  # means empty or whitespace-only after stripping a trailing CR; the
-  # compare is a literal string compare, so glob and case syntax in the
-  # text stays literal.
-  if [ -n "$body_ends" ]; then
-    last=""
-    while IFS= read -r line || [ -n "$line" ]; do
-      text="${line%$'\r'}"
-      stripped="${text//[[:space:]]/}"
-      [ -z "$stripped" ] && continue
-      last="$text"
-    done <<<"$body"
-    [ "$last" = "$body_ends" ] || { echo "body does not end with (--body-ends): $body_ends"; missing=1; }
-  fi
-  if [ "${#outside_plan[@]}" -gt 0 ]; then
-    for path in "${outside_plan[@]}"; do
-      found=0 reason=0 missing_reason=0 in_section=0
-      while IFS= read -r line || [ -n "$line" ]; do
-        text="${line%$'\r'}"
-        if [[ "$text" =~ ^[[:space:]]*#{1,6}[[:space:]]+Outside-plan[[:space:]]+files[[:space:]]*$ ]]; then
-          in_section=1
-          continue
-        fi
-        if [[ "$text" =~ ^[[:space:]]*#{1,6}[[:space:]]+ ]]; then
-          in_section=0
-          continue
-        fi
-        [ "$in_section" -eq 1 ] || continue
-        entry="${text#"${text%%[![:space:]]*}"}"
-        case "$entry" in
-          '- '*) entry="${entry#- }" ;;
-          '* '*) entry="${entry#\* }" ;;
-          *) continue ;;
-        esac
-        matched=0
-        for candidate in "$path" "\`$path\`"; do
-          if [ "$entry" = "$candidate" ]; then
-            found=1
-            missing_reason=1
-            matched=1
-            break
-          fi
-          for separator in ' — ' ' - ' ': '; do
-            prefix="$candidate$separator"
-            case "$entry" in
-              "$prefix"*)
-                found=1
-                matched=1
-                detail="${entry#"$prefix"}"
-                if [ -n "${detail//[[:space:]]/}" ]; then reason=1; else missing_reason=1; fi
-                break 2
-                ;;
-            esac
-          done
-        done
-        if [ "$matched" -eq 0 ]; then
-          for candidate in "$path" "\`$path\`"; do
-            case "$entry" in
-              "$candidate "*|"$candidate"$'\t'*) found=1; missing_reason=1 ;;
-            esac
-          done
-        fi
-      done <<<"$body"
-      if [ "$found" -eq 0 ]; then
-        echo "missing outside-plan path: $path"
-        missing=1
-      elif [ "$reason" -eq 0 ] || [ "$missing_reason" -eq 1 ]; then
-        echo "outside-plan path has no one-line reason: $path"
-        missing=1
-      fi
-    done
-  fi
-  [ "$missing" = 0 ] && [ "$bad" = 0 ] || refuse BODY "PR body lacks required lines; edit the PR body, then rerun"
-fi
+ticket_check_fence
 
-# Authority claims in the body and in the round-closed comments, checked on every
-# run. Only a comment whose first line starts with `Review round closed` is the
-# review record; other comments are not scanned. Comment records start with a
-# record separator (0x1e) and the URL.
-body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""')" \
-  || die 2 "cannot read PR $pr body"
-if grep -Eiq '^[[:space:]]*([-*][[:space:]]*)?refs[[:space:]]+#[0-9]+([[:space:]]|$)' <<<"$body_text" \
-  && ! grep -Eiq '^[[:space:]]*([-*][[:space:]]*)?(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+([[:alnum:]_.-]+/)?#[0-9]+([[:space:]]|$)' <<<"$body_text"; then
-  [ -n "$keep_branch" ] || keep_branch="PR body references an issue without a closing line"
-fi
+# PR-body text is generated output. Only review-round comments remain a source
+# for claims that need citations.
+
+# Review-round comments are the authority source; PR bodies are not reviewed.
 pr_test_list="$(mktemp)" || die 1 "cannot create a temp file"
 git -C "$worktree" diff --name-only -z --diff-filter=ACMRT "origin/main...$head0" -- 'test/**' 'tests/**' '**/test/**' '**/tests/**' '*.test.*' '*.spec.*' '*_test.*' >"$pr_test_list" \
   || { rm -f "$pr_test_list"; die 1 "cannot inspect test paths on PR head $head0"; }
@@ -1131,12 +1129,11 @@ pr_test_paths=()
 while IFS= read -r -d '' p; do pr_test_paths+=(":(literal)$p"); done <"$pr_test_list"
 rm -f "$pr_test_list"
 authority_bad=0
-authority_scan <<<"$body_text"
 comments_text="$(gh api --paginate "repos/$repo/issues/$pr/comments" \
   --jq '.[] | select(((.body // "") | sub("^ +"; "") | split("\n") | .[0] | ascii_downcase | startswith("review round closed"))) | "\u001e" + .html_url + "\n" + (.body // "")')" \
   || die 2 "cannot read comments on PR $pr in $repo"
 authority_scan <<<"$comments_text"
-[ "$authority_bad" = 0 ] || refuse BODY "PR text claims authority without a citation on the same line or in the same bullet; cite it there (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun"
+[ "$authority_bad" = 0 ] || refuse BODY "review-round comments claim authority without a citation on the same line or in the same bullet; cite it there (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun"
 
 # A draft carries the mutants label when the repo defines one, so mutants
 # run on the draft from the first push. Checked here, beside --body-has, so
@@ -1157,9 +1154,16 @@ if [ -z "$mutants_gate" ]; then
   fi
 fi
 
-# Step 2: no stray closing keywords, before any gate, merge, push or CI wait.
+# Step 2: check title and commit closure keywords against ticket closing state;
+# generated PR-body prose supplies no closure evidence.
+closes_json="$(gh pr view "$pr" --repo "$repo" --json number,title,commits)" \
+  || die 2 "cannot read PR $pr closure metadata"
+closes_body="$ticket_closing"
+closes_body="${closes_body:+$closes_body$'\n'}Resolves $repo#$pr"
+closes_json="$(jq -c --arg body "$closes_body" '. + {body:$body}' <<<"$closes_json")" \
+  || die 2 "cannot prepare PR $pr closure metadata"
 rc=0
-closes_out="$(bash "$here/pr-closes" "$pr" --repo "$repo" 2>/dev/null)" || rc=$?
+closes_out="$(printf '%s\n' "$closes_json" | bash "$here/pr-closes" --check)" || rc=$?
 case "$rc" in
   0) ;;
   1)
@@ -1987,7 +1991,7 @@ report_open_resolves_issues() {
     elif [ "$issue_state" = "OPEN" ]; then
       open_issues="$open_issues #$issue"
     fi
-  done < <(grep -Eio '^[[:space:]]*([-*][[:space:]]*)?resolves[[:space:]]+#[0-9]+([[:space:]]*,[[:space:]]*#[0-9]+)*' <<<"$body_text" \
+  done < <(grep -Eio '^[[:space:]]*([-*][[:space:]]*)?resolves[[:space:]]+#[0-9]+([[:space:]]*,[[:space:]]*#[0-9]+)*' <<<"$ticket_closing" \
     | grep -Eo '[0-9]+' || true)
   if [ -n "$open_issues" ]; then
     case "$landed_pr_state" in

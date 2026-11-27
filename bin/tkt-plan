@@ -266,13 +266,13 @@ ticket_fail() {
   exit 2
 }
 
-# ticket_extra OUT CALLER: writes the ticket (body, then comments) to OUT, then
-# CALLER's bytes when set. One leading @ on CALLER is stripped. A blank body or
-# a failed read exits 2 before OUT is touched; OUT is built aside and moved in.
+# ticket_extra OUT CALLER: writes the ticket body, comments and caller bytes to OUT.
+# One leading @ on CALLER is stripped. A failed ticket/comments read exits 2
+# before OUT is touched; an empty or whitespace-only ticket body is valid input.
 ticket_extra() {
   local out="$1" caller="${2#@}" body comments tf
   if [ -n "$caller" ] && [ ! -r "$caller" ]; then echo "tkt-plan: cannot read extra file: $caller" >&2; exit 2; fi
-  if ! body="$(gh issue view "$issue" --repo "$repo" 2>"$tmp")" || [ -z "${body//[[:space:]]/}" ]; then ticket_fail; fi
+  if ! body="$(gh issue view "$issue" --repo "$repo" 2>"$tmp")"; then ticket_fail; fi
   if ! comments="$(gh issue view "$issue" --repo "$repo" --comments 2>"$tmp")"; then ticket_fail; fi
   tf="$(mktemp "${TMPDIR:-/tmp}/tkt-ticket.XXXXXX")"
   {
