@@ -1319,6 +1319,28 @@ EOF
 cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-pass-current-stale-body: stale body line was not rewritten: [$(cat "$T/prbody")]"
 grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-pass-current-stale-body: edited body after a current PASS"
 
+# A full PASS that records its tip case (#2016) still counts as a full gate.
+reset_stub; setup_case gateship-pass-tip-case
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+printf 'Title\n\nImplemented by: m/a\n' >"$T/prbody"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H tip=local-ahead" || fail "gateship-pass-tip-case: journal the gate PASS"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-pass-tip-case: exit $RC: $OUT $(cat "$CDIR/stderr")"
+expect_line1 "MERGED sha=" gateship-pass-tip-case
+grep -Fq "Local gate: pass at $H (bash test/gate.sh)" "$T/prbody" || fail "gateship-pass-tip-case: body misses the Local gate line: [$(cat "$T/prbody")]"
+
 # A checks-only PASS at B cannot replace a full PASS at A for ship coverage.
 reset_stub; setup_case gateship-checks-only-at-new-head
 printf '0' >"$T/exitcodes"
@@ -1343,7 +1365,7 @@ B="$(git -C "$WT" rev-parse HEAD)"
 bash "$REAL_BIN/tkt-state" "$S" set head "$B" || fail "gateship-checks-only-at-new-head: update state head"
 printf '%s' "$B" >"$T/prhead"
 H="$B"
-bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$B checks-only" || fail "gateship-checks-only-at-new-head: journal the checks-only PASS"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$B checks-only tip=local-ahead" || fail "gateship-checks-only-at-new-head: journal the checks-only PASS"
 printf 'Title\n\nImplemented by: m/a\n' >"$T/prbody"
 cp "$T/prbody" "$CDIR/body-before"
 run_ship
