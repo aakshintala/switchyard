@@ -11,6 +11,7 @@
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
 # --part N archives the prior state after its PR merges; merged-PR head drift tells you the next --part.
 # Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--split <label>] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]
+# Legacy body flags are accepted, warned about once and ignored.
 # PATHS are separated by commas or spaces, and repeats of --files add more paths.
 # Words after --files run to the next word starting with '-': write such a path as ./-name.
 # Example: --files a b c, the same as --files a,b,c.
@@ -18,7 +19,7 @@ set -euo pipefail
 usage() {
   echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--split <label>] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]" >&2
   echo "  --takeover PR-OR-BRANCH records plan=takeover PR-OR-BRANCH; --gate CMD records its required check command; non-blank --files PATHS is required for its file fence" >&2
-  echo "  --spec FILE: a file holding the ticket body; a Part-of closing needs 'Part of #N' in it" >&2
+  echo "  --spec FILE: ticket body/spec input; its shape does not decide --closing" >&2
   echo "  --spec-issue N: the issue holding the spec, when it is not this ticket; review-pr checks the spec axis against it" >&2
   echo "  --files PATHS: paths separated by commas or spaces, e.g. --files a b c or --files a,b,c; required and non-blank with --takeover" >&2
   echo "  With --takeover, --files records the takeover file fence." >&2
@@ -26,14 +27,13 @@ usage() {
 }
 run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
 env=""; extra=""; merge_gate=""; merge_check=""; mutant_job=""; files=""; no_preflight=0; part=""; part_given=0; split=""; split_given=0
-body_has=(); models=()
+legacy_body_flags=0; models=()
 model_roles=(lane fix map verifier verify review overbuild preflight planner)
-body_ends=""; body_ends_given=0; spec_issue=""; spec_issue_given=0
+spec_issue=""; spec_issue_given=0
 takeover_ref=""; takeover_given=0; takeover_gate=""; takeover_gate_given=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --body-has) [ $# -ge 2 ] || usage; body_has+=("$2"); shift 2 ;;
-    --body-ends) [ $# -ge 2 ] || usage; body_ends="$2"; body_ends_given=1; shift 2 ;;
+    --body-has|--body-ends) [ $# -ge 2 ] || usage; legacy_body_flags=1; shift 2 ;;
     --spec-issue) [ $# -ge 2 ] || usage; spec_issue="$2"; spec_issue_given=1; shift 2 ;;
     --model) [ $# -ge 2 ] || usage; models+=("$2"); shift 2 ;;
     --part) [ $# -ge 2 ] || usage; part="$2"; part_given=1; shift 2 ;;
@@ -89,6 +89,9 @@ if [ "$part_given" -eq 1 ] && printf '%s\n' "$closing" | grep -qiE '^[[:space:]]
 fi
 if [ "$spec_issue_given" -eq 1 ]; then
   if [[ ! $spec_issue =~ ^0*[1-9][0-9]*$ ]]; then echo "tkt-start: --spec-issue needs a positive integer: $spec_issue" >&2; exit 2; fi
+fi
+if [ "$legacy_body_flags" -eq 1 ]; then
+  echo "tkt-start: warning: ignoring legacy body flags; PR body text is generated output" >&2
 fi
 script_path="$0"
 case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
@@ -153,26 +156,7 @@ for m in ${models[@]+"${models[@]}"}; do
   fi
 done
 case "$merge_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $merge_gate" >&2; exit 2 ;; esac
-# A blank check line can never match a PR body, and a newline breaks the
-# state line, so both exit before any state write. The given flag tells a
-# repeat or an empty value apart from no flag at all.
-if [ "$body_ends_given" -eq 1 ]; then
-  if [ -z "${body_ends//[[:space:]]/}" ]; then echo "tkt-start: --body-ends needs a value that is not blank" >&2; exit 2; fi
-  case "$body_ends" in *$'\n'*) echo "tkt-start: --body-ends value holds a newline" >&2; exit 2 ;; esac
-fi
-spec_part=0; spec_exists=0
-if [ -f "$spec" ]; then spec_exists=1; grep -qiE 'part of[[:space:]]+#[0-9]+' "$spec" && spec_part=1; fi
-close_part=0; printf '%s' "$closing" | grep -qiE '^part of([[:space:]]|$)' && close_part=1
-if [ "$spec_part" -ne "$close_part" ]; then
-  if [ "$spec_part" -eq 1 ]; then
-    echo "tkt-start: --closing '$closing' is not a Part-of closing, but --spec '$spec' contains 'Part of #N'" >&2
-  elif [ "$spec_exists" -eq 0 ]; then
-    echo "tkt-start: --closing '$closing' is a Part-of closing, but --spec '$spec' does not exist (it must hold the ticket body with 'Part of #N')" >&2
-  else
-    echo "tkt-start: --closing '$closing' is a Part-of closing, but --spec '$spec' has no 'Part of #N'" >&2
-  fi
-  exit 2
-fi
+# Issue text remains available as a spec; its shape does not gate the closing value.
 tkt_state="$script_dir/tkt-state"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-start: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
@@ -496,9 +480,7 @@ if [ "$takeover_given" -eq 1 ]; then
     done
   fi
 fi
-if [ "$body_ends_given" -eq 1 ]; then tkt set body_ends "$body_ends"; fi
 if [ "$spec_issue_given" -eq 1 ]; then tkt set spec_issue "$spec_issue"; fi
-for b in ${body_has[@]+"${body_has[@]}"}; do tkt list body_has 2>/dev/null | grep -xF -- "$b" >/dev/null || tkt add body_has "$b"; done
 for m in ${models[@]+"${models[@]}"}; do
   model_role="${m%%=*}"; model_key="model.$model_role"; model_id="${m#*=}"
   old_model=""; old_model_found=0
@@ -533,9 +515,12 @@ for p in ${fpaths[@]+"${fpaths[@]}"}; do git -C "$worktree" cat-file -e "origin/
 if [ -z "$stale" ]; then
   body="$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>&1)" || fail_step github "$?" "$body"
   filing="$(printf '%s\n' "$body" | grep -oE '(Written against|filing commit:) [0-9a-f]{7,40}' | sed -n '1s/.* //p' || true)"
-  { [ -n "$filing" ] && git -C "$worktree" cat-file -e "$filing^{commit}" 2>/dev/null; } || { stale=1; reason="filing-commit:unreadable"; filing=""; }
+  # The issue body is spec input; the filing marker is optional, but a supplied marker must resolve.
+  if [ -n "$filing" ] && ! git -C "$worktree" cat-file -e "$filing^{commit}" 2>/dev/null; then
+    stale=1; reason="filing-commit:unreadable"; filing=""
+  fi
 fi
-if [ -z "$stale" ]; then rc=0; logout=""
+if [ -n "$filing" ] && [ -z "$stale" ]; then rc=0; logout=""
   logout="$(git -C "$worktree" log --oneline "$filing..origin/main" -- ${fpaths[@]+"${fpaths[@]}"} 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then stale=1; reason="log:failed"; lognote="failed"
   elif [ -n "$logout" ]; then stale=1; reason="log:$filing..origin/main"; lognote="$(printf '%s' "$logout" | grep -c . || true) lines"

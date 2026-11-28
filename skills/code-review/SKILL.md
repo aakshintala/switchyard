@@ -24,7 +24,7 @@ Done when the fixed point resolves (`git rev-parse <fixed-point>`) and the diff 
 
 ### 2. Find the spec
 
-In order: issue references in the commit messages or PR body (`#123`, `Resolves #45`), a path passed as an argument, a spec file under `docs/`, `specs/` or `.scratch/` matching the branch. With no spec, the Spec axis reports `no spec available` and its verdict is `CHANGES`.
+In order: issue references in the commit messages (`#123`, `Resolves #45`), a path passed as an argument, a spec file under `docs/`, `specs/` or `.scratch/` matching the branch. With no spec, the Spec axis reports `no spec available` and its verdict is `CHANGES`.
 
 ### 3. Find the standards
 
@@ -56,7 +56,7 @@ Each smell reads *what it is* → *how to fix*; match it against the diff:
 Read the diff once per axis, and follow each hunk into the code around it as far as the finding needs.
 
 - **Standards**: every place the diff breaks a documented standard (cite the file and rule), and any baseline smell the diff shows at named sites (name it, quote each site, such as both copies of duplicated code). A smell that rests on taste alone, such as a name, is written only when a documented standard covers it. Skip anything tooling enforces.
-- **Spec**: requirements missing or partial; requirements that look implemented but wrong (quote the spec line). A criterion that asks for evidence the code can no longer produce, such as a repro of a path this diff or a merged fix deleted, is met by a construction argument in the PR body, quoted from the code, that shows every candidate path is gone: judge whether it holds, and raise a finding only when it doesn't.
+- **Spec**: requirements missing or partial; requirements that look implemented but wrong (quote the spec line). A criterion that asks for evidence the code can no longer produce, such as a repro of a path this diff or a merged fix deleted, is met by a construction argument quoted from the code at HEAD that shows every candidate path is gone: judge whether it holds, and raise a finding only when it does not.
 - **Scope check** (Spec axis): every file or hunk the diff modified that the ticket didn't ask for. An unrequested edit is a finding even when it looks like an improvement.
 - When the change touches security, permission, authentication or persistence, add the adversarial branch: try spelling tricks, fail-open inputs, weaker fallback identities, unresolvable indirection and TOCTOU gaps, plus one bypass family beyond the list.
 
