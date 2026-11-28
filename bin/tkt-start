@@ -228,9 +228,10 @@ state_has_planner_model() {
   done <"$state"
   return 1
 }
-# A takeover never preflights, so only a fresh ticket reads its labels.
-needs_plan=0
+# A takeover keeps its currency check and reads no labels.
+needs_plan=1
 if [ "$takeover_given" -eq 0 ]; then
+  needs_plan=0
   issue_labels="$(gh issue view "$issue" --repo "$repo" --json labels 2>&1)" || {
     echo "tkt-start: cannot read labels for $repo#$issue: $(printf '%s' "$issue_labels" | tail -n 5)" >&2
     exit 2
