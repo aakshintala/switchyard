@@ -997,7 +997,7 @@ fi
 
 # Validate the Files fence and outside-plan evidence against the exact ship diff.
 ticket_check_fence() {
-  local record_sec record_new record_path p plan_is_takeover=0
+  local record_sec record_new record_path p
   local -a changed_paths=()
   [ -n "$ticket_state" ] || return 0
   . "$here/lib/plan-tokens.sh"
@@ -1029,7 +1029,7 @@ ticket_check_fence() {
     esac
   }
   case "$ticket_plan" in
-    takeover*) plan_is_takeover=1 ;;
+    takeover*) ;;
     "") refuse SHIP "ticket state has no plan or takeover fence" ;;
     *)
       [ -r "$ticket_plan" ] || die 2 "cannot read state plan $ticket_plan"
@@ -1081,7 +1081,6 @@ ticket_check_fence() {
     fi
     ticket_outside_has "$p" || refuse SHIP "outside-plan path is missing from ticket state: $p"
   done
-  : "$plan_is_takeover"
 }
 # rerun_cmd rebuilds this invocation against this file for the lost-race diagnostic.
 rerun_cmd="$(printf '%q ' bash "$here/$(basename "$0")" ${ship_args[@]+"${ship_args[@]}"})"
