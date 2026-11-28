@@ -627,4 +627,16 @@ else
   grep -Fq "$S13.lock" "$T/err-stale-lock.txt" || fail "unremovable stale-lock message names the lock directory"
 fi
 
+# A round grant lives in state and the journal, not in a PR-body requirement.
+source "$SCRIPT_DIR/../bin/lib/ruling-comment.sh"
+GRANT_STATE="$T/round-grant.state"
+grant_state_call() { bash "$TKT" "$GRANT_STATE" "$@"; }
+record_round_grant 717 'https://example.invalid/ruling' 3 grant_state_call || fail "record round grant"
+[ "$(bash "$TKT" "$GRANT_STATE" get grant.3)" = '717 https://example.invalid/ruling' ] \
+  || fail "round grant is recorded in state"
+[ "$(bash "$TKT" "$GRANT_STATE" list body_has 2>/dev/null || true)" = "" ] \
+  || fail "round grant creates no PR-body requirement"
+grep -q 'ruling https://example.invalid/ruling grants round 3' "${GRANT_STATE%.state}.journal" \
+  || fail "round grant is recorded in the journal"
+
 echo "tkt-state: all cases passed"

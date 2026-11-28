@@ -21,7 +21,7 @@ Posted rounds are context, never findings to judge. Changes answering findings i
 
 Verify output restates open/new findings only. Do not include a `Fixed` or `Not judged` section, or restate fixed/refuted findings under a closed heading; omit them. The parser remains tolerant of `Fixed` and `Not judged` headings in posted comments for compatibility, but that tolerance does not change this output contract.
 
-The PR body is provided as `.review-context/pr-body.md` when non-empty. It is the lane's claim, not ground truth: check the evidence it cites. A finding whose requested fix is text in the PR body itself (a stated behaviour, a check line) counts as fixed when the body now carries that text. A body sentence is never evidence that code, tests or docs at HEAD changed: judge those at HEAD as below.
+The PR body is generated output, not review context or implementation evidence. Judge every finding against code, tests, documentation and recorded ruling files at HEAD. A requirement met only by PR-body text is not fixed.
 
 Files in `.review-context/` are listed after this brief, or shown as `none`. No `pr.diff` or `issue-<n>.md` files are provided in verify mode unless listed there. A missing context file must be reported in your final message and never searched for. Report an unreadable context file there too. Do not use `find` or `locate`, or search outside your working directory. Continue the verify and return a verdict even when context is missing.
 

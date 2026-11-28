@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 # tkt-ship: run ship-pr from state, rerun on 124, digest red CI.
+# Full-gate coverage comes from the journal; a Local gate line is informational only.
 # Longest wait: four ship-pr attempts x five CI waits x 7200 s, plus the gate.
 # Usage: tkt-ship <state>
 # State key no_mutants_label: reason passed to ship-pr as --no-mutants-label.
 # State key mutant_job opts ship-pr into its --mutants-gate check.
 # State key merge_check: command passed to ship-pr as --merge-check unless merge_gate is gate.
-# State key body_ends: text passed to ship-pr as --body-ends; absent, unreadable,
-# empty or blank passes no flag and asks for no check.
-# State key outside_plan: each path is passed to ship-pr as --outside-plan.
+# State keys body_has and body_ends are legacy no-ops; tkt-ship warns once when set.
+# State outside_plan and plan/fence are passed as --ticket-state for ship-pr's diff check.
 # State key known_flake: each ticket number is passed as --known-flake.
 # State key known_flake_by: caller passed as --by (must be flywheel with known_flake).
 # State key unverified: path passed to ship-pr as --unverified-fixes.
 # State plan value `takeover <ref>` has no plan file; it requires state key
-# gate and adds a ticket-review line to the PR body.
+# gate and adds an informational ticket-review line to the PR body best-effort.
 set -euo pipefail
 
 usage() {
   echo "usage: tkt-ship <state>" >&2
   echo "       longest wait 144000 s (40 h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" >&2
-  echo "       state keys: no_mutants_label passes --no-mutants-label, mutant_job passes --mutants-gate, body_ends passes --body-ends, outside_plan passes --outside-plan, known_flake passes --known-flake, known_flake_by passes --by, unverified passes --unverified-fixes, merge_check passes --merge-check unless merge_gate is gate" >&2
-  echo "       takeover: plan=takeover <pr-or-branch> uses required state gate and adds a ticket-review line to the PR body" >&2
+  echo "       state keys: no_mutants_label passes --no-mutants-label, mutant_job passes --mutants-gate, outside_plan and plan/fence are checked from --ticket-state, known_flake passes --known-flake, known_flake_by passes --by, unverified passes --unverified-fixes, merge_check passes --merge-check unless merge_gate is gate" >&2
+  echo "       body_has/body_ends are legacy no-ops; takeover note and Local gate line are best-effort body updates" >&2
   exit 2
 }
 [ $# -eq 1 ] || usage
@@ -40,6 +40,7 @@ if [ ! -r "$namebase_lib" ]; then echo "tkt-ship: cannot read shared lib: $nameb
 # shellcheck disable=SC1090
 . "$namebase_lib"
 require_state_file tkt-ship "$state"
+state="$(cd "$(dirname "$state")" 2>/dev/null && pwd)/$(basename "$state")"
 tkt_state="$script_dir/tkt-state"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tkt() { "$tkt_state" "$state" "$@"; }
@@ -263,9 +264,9 @@ gate_diff_comparison() {
 }
 
 # The journal is the source of truth for full-gate coverage. The latest
-# full-gate PASS by journal order becomes the comparison base; a current PASS
-# replaces a missing or stale body line. A stale body line refuses only when
-# no full PASS exists in the journal. Current-PASS body writes remain best effort.
+# full-gate PASS by journal order becomes the comparison base; a stale or
+# missing Local gate body line never decides whether shipping may proceed.
+# A current-PASS line is written to the PR body best-effort for information.
 # A full PASS may end in the tip case tkt-gate recorded (#2016); a checks-only
 # PASS never matches.
 journal_path="${state%.state}.journal"
@@ -324,7 +325,6 @@ if [ -n "$last_pass" ] && [ "$last_pass_head" != "$pr_head" ]; then
 fi
 if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""' 2>/dev/null)"; then
   body_changed=0
-  takeover_line=""
   if [ "$takeover" -eq 1 ]; then
     takeover_line="Takeover of $takeover_ref: no plan; review against the ticket."
     if ! grep -Fqx -- "$takeover_line" <<<"$pr_body_text"; then
@@ -336,40 +336,11 @@ if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""
       body_changed=1
     fi
   fi
-  gate_line_sha="$(printf '%s\n' "$pr_body_text" | sed -n 's/^Local gate: pass at \([0-9a-fA-F]\{40\}\).*/\1/p' | head -n 1)"
-  if [ -z "$last_pass" ] && [ -n "$gate_line_sha" ] && [ "$gate_line_sha" != "$pr_head" ]; then
-    if ! gate_diff_comparison "$gate_line_sha" "$pr_head"; then
-      gate_line_full="$(printf '%s\n' "$pr_body_text" | grep -m1 '^Local gate:' || true)"
-      case "$gate_line_full" in
-        *\(*\)) gate_line_cmd="${gate_line_full#*\(}"; gate_line_cmd="${gate_line_cmd%\)*}" ;;
-        *) gate_line_cmd="" ;;
-      esac
-      msg="tkt-ship: Local gate sha $gate_line_sha is not PR head $pr_head; $gate_diff_error (gate: $gate_line_cmd)"
-      printf '%s\n' "$msg" >&2
-      emit "GATE-STALE gate=$gate_line_sha head=$pr_head" 1 "$msg"
-    fi
-  elif [ -n "$last_pass" ] && [ "$last_pass_head" = "$pr_head" ] \
-    && [ "$gate_line_sha" != "$pr_head" ]; then
+  if [ -n "$last_pass" ] && [ "$last_pass_head" = "$pr_head" ]; then
     gate_line="Local gate: pass at $last_pass_head ($local_gate_cmd)"
-    attr="$(tkt get body_ends 2>/dev/null || true)"
-    attr_mode="exact"
-    if [ -z "${attr//[[:space:]]/}" ]; then
-      attr="$(tkt list body_has 2>/dev/null | grep -i 'co-author' | head -n 1 || true)"
-      attr_mode="prefix"
-    fi
-    new_body="$(tkt_local_gate_body_insert "$pr_body_text" "$gate_line" "$attr" "$attr_mode")"
-    if tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-ship-body.XXXXXX" 2>/dev/null)"; then
-      tmp_redacted="$(mktemp "${TMPDIR:-/tmp}/tkt-ship-redacted.XXXXXX" 2>/dev/null)" || tmp_redacted=""
-      if [ -n "$tmp_redacted" ] && printf '%s\n' "$new_body" >"$tmp_body" \
-        && "$script_dir/lib/redact-paths" <"$tmp_body" >"$tmp_redacted" \
-        && gh pr edit "$pr" --repo "$repo" --body-file "$tmp_redacted" 2>/dev/null; then
-        body_changed=0
-      else
-        printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
-      fi
-      rm -f "$tmp_body" "$tmp_redacted"
-    else
-      printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
+    if ! grep -Fqx -- "$gate_line" <<<"$pr_body_text"; then
+      pr_body_text="$(tkt_local_gate_body_insert "$pr_body_text" "$gate_line")"
+      body_changed=1
     fi
   fi
   if [ "$body_changed" -eq 1 ]; then
@@ -378,7 +349,7 @@ if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""
       if [ -n "$tmp_redacted" ] && printf '%s\n' "$pr_body_text" >"$tmp_body" \
         && "$script_dir/lib/redact-paths" <"$tmp_body" >"$tmp_redacted" \
         && gh pr edit "$pr" --repo "$repo" --body-file "$tmp_redacted" 2>/dev/null; then
-        body_changed=0
+        :
       else
         printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
       fi
@@ -388,31 +359,15 @@ if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""
     fi
   fi
 else
-  if [ "$takeover" -eq 1 ]; then
-    emit "PRECONDITION takeover-note=unreadable" 2 "tkt-ship: cannot read PR $pr body to add the required takeover note"
-  fi
-  printf 'tkt-ship: warning: cannot read PR %s body; skipping the Local gate check\n' "$pr" >&2
-fi
-if [ "$takeover" -eq 1 ] && [ "$body_changed" -eq 1 ]; then
-  emit "PRECONDITION takeover-note=unwritten" 2 "tkt-ship: cannot add the required takeover note to PR $pr body"
+  printf 'tkt-ship: warning: cannot read PR %s body; skipping informational body updates\n' "$pr" >&2
 fi
 
-args=("$pr" --repo "$repo" --reviewed "$reviewed" --worktree "$worktree")
-# The check is opt-in: only a stored non-blank line asks ship-pr for it.
-# A missing key or failed read counts as absent and never fails the ship.
-if be="$(tkt get body_ends 2>/dev/null)"; then
-  if [ -n "${be//[[:space:]]/}" ]; then
-    args+=(--body-ends "$be")
-  fi
+args=("$pr" --repo "$repo" --reviewed "$reviewed" --worktree "$worktree" --ticket-state "$state")
+legacy_body_has="$(tkt list body_has 2>/dev/null || true)"
+legacy_body_ends="$(tkt get body_ends 2>/dev/null || true)"
+if [ -n "$legacy_body_has" ] || [ -n "$legacy_body_ends" ]; then
+  echo "tkt-ship: warning: ignoring legacy body state; PR body text is generated output" >&2
 fi
-while IFS= read -r b; do
-  [ -n "$b" ] || continue
-  args+=(--body-has "$b")
-done <<<"$(tkt list body_has 2>/dev/null || true)"
-while IFS= read -r p; do
-  [ -n "$p" ] || continue
-  args+=(--outside-plan "$p")
-done <<<"$(tkt list outside_plan 2>/dev/null || true)"
 while IFS= read -r n; do
   [ -n "$n" ] || continue
   args+=(--known-flake "$n")

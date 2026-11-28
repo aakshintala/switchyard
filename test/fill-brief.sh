@@ -22,7 +22,7 @@ out="$(bash "$FILL" "$T/t.md" 'A=1' 'B=2')" || fail "basic fill exits 0"
 lane_out="$(bash "$FILL" "$SCRIPT_DIR/../skills/planning/briefs/lane.md" \
   ISSUE=4271 REPO=aakshintala/switchyard WORKTREE=/tmp/claim-holder \
   BRANCH=claim-holder-1324 BASE=origin/main WORKFLOW_DOC=/dev/null \
-  PLAN=/tmp/plan GATE=true ATTRIBUTION=none LANE_MODEL=test \
+  PLAN=/tmp/plan GATE=true LANE_MODEL=test \
   CLOSING='Resolves #4271' CLAIM_HOLDER=fiber-4271 2>"$T/err-lane-brief")" || fail "lane brief fills its holder placeholder: $(cat "$T/err-lane-brief")"
 grep -qF -- 'file-claim claim --lane fiber-4271' <<<"$lane_out" || fail "lane brief uses the filled claim holder"
 
