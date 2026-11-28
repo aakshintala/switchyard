@@ -1474,17 +1474,17 @@ run_plan triaged --comment 12x
 [ "$RC" -eq 2 ] || fail "triaged rejects a non-numeric comment id"
 grep -Fq 'tkt-plan: comment id must contain only digits' "$CDIR/stderr.txt" || fail "triaged invalid comment explains the numeric requirement"
 
-# Editing the plan's Base invalidates the accepted triaged verdict.
+# A stale triaged Verifier result does not lock posting.
 setup_case triaged-stale
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-stale seed rounds"
 seed_triaged_stop
 run_plan triaged --comment 456789
 [ "$RC" -eq 0 ] || fail "triaged-stale records its verdict"
-set_plan_base 0000000000000000000000000000000000000000
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(git -C "$WT" rev-parse HEAD^)" || fail "triaged-stale seed stale base"
 run_plan post
-[ "$RC" -eq 1 ] || fail "triaged verdict with changed Base is refused"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=none log=*" "edited triaged plan reads as absent"
+[ "$RC" -eq 0 ] || fail "triaged verdict does not lock post after Base changes"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "triaged verdict does not lock post"
 
 setup_case grant-ask
 rebase_plan
@@ -2727,26 +2727,6 @@ CB="$CDIR/run/switchyard-518-confirm-1.md"
 [ -r "$CB" ] || fail "real confirm fills the confirm brief"
 grep -q 'BODY-TEXT-791' "$CB" && grep -q 'COMMENT-TEXT-791' "$CB" || fail "real confirm brief carries the ticket text"
 
-# --- a LINES verify is recorded and blocks post before post-plan ---
-setup_case verdict-lines-post
-rebase_plan
-base_now="$(cat "$CDIR/base")"
-bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed prior verdict"
-bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed prior verdict base"
-printf 'lines' >"$T/mode"
-posts_before="$(grep -c '^post|' "$T/stub.log" || true)"
-run_plan verify
-[ "$RC" -eq 1 ] || fail "LINES verify exits 1"
-expect_verdict "TKT tkt-plan LINES report_lines=3 out=* log=*" "LINES verify stores verdict"
-expect_plan_verdict lines "$base_now" "LINES verify"
-expect_current_plan_verdict_hash "LINES verify stores current plan hash"
-run_plan post
-[ "$RC" -eq 1 ] || fail "post after LINES exits 1"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=lines log=*" "post after LINES"
-grep -q "plan_verdict=lines plan_verdict_base=$base_now plan_base=$base_now" <<<"$OUT" || fail "post refusal prints the verdict digest"
-[ "$(grep -c '^post|' "$T/stub.log" || true)" = "$posts_before" ] || fail "post after LINES does not run post-plan"
-expect_plan_verdict lines "$base_now" "post keeps LINES verdict"
-
 # --- PLAN OK permits post, then a new plan path clears the recorded pair ---
 setup_case verdict-ok-post-set
 rebase_plan
@@ -2761,44 +2741,10 @@ expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post after PLAN OK"
 printf 'Base: %s\n\n## Files\n\n- `f.txt`\n\n## Gate\n\n`true`\n' "$base_now" >"$CDIR/other.md"
 run_plan set "$CDIR/other.md"
 [ "$RC" -eq 0 ] || fail "set of a new plan path exits 0"
-expect_plan_verdict "" "" "set of a new plan path"
+expect_plan_verdict skipped "$(cat "$CDIR/base")" "set of a new plan path skips the Verifier by default"
 run_plan post
-[ "$RC" -eq 1 ] || fail "post after new-path set exits 1"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=none log=*" "post after new-path set"
-
-# --- set --no-verifier records skipped; a same-path set without it clears skipped ---
-setup_case verdict-set-skip
-rebase_plan
-base_now="$(cat "$CDIR/base")"
-run_plan set "$CDIR/plan.md" --no-verifier
-[ "$RC" -eq 0 ] || fail "set --no-verifier exits 0"
-expect_plan_verdict skipped "$base_now" "set --no-verifier"
-expect_current_plan_verdict_hash "set --no-verifier stores current plan hash"
-run_plan post
-[ "$RC" -eq 0 ] || fail "post after skipped set exits 0"
-run_plan set "$CDIR/plan.md"
-[ "$RC" -eq 0 ] || fail "same-path set without --no-verifier exits 0"
-expect_plan_verdict "" "" "same-path set clears skipped"
-run_plan post
-[ "$RC" -eq 1 ] || fail "post after clearing skipped exits 1"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=none log=*" "post after clearing skipped"
-
-# --- post --no-verifier records or refreshes skipped and preserves other verdicts ---
-setup_case verdict-post-skip
-rebase_plan
-base_now="$(cat "$CDIR/base")"
-run_plan post --no-verifier
-[ "$RC" -eq 0 ] || fail "post --no-verifier with no verdict exits 0"
-expect_plan_verdict skipped "$base_now" "post --no-verifier fills empty verdict"
-expect_current_plan_verdict_hash "post --no-verifier stores current plan hash"
-posts_before="$(grep -c '^post|' "$T/stub.log" || true)"
-bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed stored LINES verdict"
-bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed stored LINES base"
-run_plan post --no-verifier
-[ "$RC" -eq 1 ] || fail "post --no-verifier cannot replace LINES"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=lines log=*" "post --no-verifier preserves LINES"
-[ "$(grep -c '^post|' "$T/stub.log" || true)" = "$posts_before" ] || fail "post --no-verifier over LINES does not post"
-expect_plan_verdict lines "$base_now" "post --no-verifier preserves stored verdict"
+[ "$RC" -eq 0 ] || fail "post after new-path set exits 0"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post after new-path set"
 
 # --- editing the Base invalidates the accepted verdict text ---
 setup_case verdict-stale-base
@@ -2809,13 +2755,13 @@ run_plan verify
 [ "$RC" -eq 0 ] || fail "stale-base setup verify exits 0"
 expect_plan_verdict ok "$base_now" "stale-base setup"
 {
-  printf 'Base: %s\n' 0000000000000000000000000000000000000000
+  printf 'Base: %s\n' "$(git -C "$WT" rev-parse HEAD^)"
   tail -n +2 "$CDIR/plan.md"
 } >"$CDIR/changed.md"
 mv "$CDIR/changed.md" "$CDIR/plan.md"
 run_plan post
-[ "$RC" -eq 1 ] || fail "post after Base changes exits 1"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=none log=*" "edited plan reads as no verdict"
+[ "$RC" -eq 0 ] || fail "post after Base changes exits 0"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "edited plan Base does not lock post"
 
 # --- verdict-ok-ancestor-unchanged: an unchanged Files path survives a descendant Base ---
 setup_case verdict-ok-ancestor-unchanged
@@ -2830,37 +2776,6 @@ set_plan_base "$current_base"
 run_plan post
 [ "$RC" -eq 0 ] || fail "ancestor-unchanged: descendant base with unchanged Files exits 0"
 expect_verdict "TKT tkt-plan POSTED urls=* log=*" "ancestor-unchanged"
-
-# --- verdict-ok-ancestor-files-changed: changing a Files path on a descendant Base is stale ---
-setup_case verdict-ok-ancestor-files-changed
-stored_base="$(git -C "$WT" rev-parse HEAD)"
-bash "$TKT_STATE" "$S" set plan_verdict ok || fail "ancestor-files-changed: seed ok verdict"
-bash "$TKT_STATE" "$S" set plan_verdict_base "$stored_base" || fail "ancestor-files-changed: seed verdict base"
-printf 'changed\n' >"$WT/f.txt"
-git -C "$WT" add f.txt
-git -C "$WT" -c user.email=t@t -c user.name=t commit -qm changed-file
-current_base="$(git -C "$WT" rev-parse HEAD)"
-set_plan_base "$current_base"
-run_plan post
-[ "$RC" -eq 1 ] || fail "ancestor-files-changed: changed Files path exits 1"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "ancestor-files-changed"
-
-# --- verdict-ok-sibling-base: a sibling current Base is stale ---
-setup_case verdict-ok-sibling-base
-stored_base="$(git -C "$WT" rev-parse HEAD)"
-common_base="$(git -C "$WT" rev-list --max-parents=0 "$stored_base")"
-bash "$TKT_STATE" "$S" set plan_verdict ok || fail "sibling-base: seed ok verdict"
-bash "$TKT_STATE" "$S" set plan_verdict_base "$stored_base" || fail "sibling-base: seed verdict base"
-git -C "$WT" checkout -q --detach "$common_base"
-printf 'sibling\n' >"$WT/sibling.txt"
-git -C "$WT" add sibling.txt
-git -C "$WT" -c user.email=t@t -c user.name=t commit -qm sibling
-current_base="$(git -C "$WT" rev-parse HEAD)"
-git -C "$WT" checkout -q "$stored_base"
-set_plan_base "$current_base"
-run_plan post
-[ "$RC" -eq 1 ] || fail "sibling-base: non-descendant base exits 1"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "sibling-base"
 
 # --- every verify refusal after argument parsing, except ROUND-LIMIT, clears the previous verdict ---
 seed_ok_verdict() {
@@ -2969,15 +2884,15 @@ run_plan confirm --edits "$CDIR/edits.md"
 expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "limited confirm keeps previous verdict"
 expect_plan_verdict lines "$base_now" "limited confirm keeps pair"
 
-# --- same-path --no-verifier does not overwrite an existing word ---
+# --- same-path default set clears an advisory LINES verdict ---
 setup_case verdict-set-preserves
 rebase_plan
 base_now="$(cat "$CDIR/base")"
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed same-path LINES verdict"
 bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed same-path LINES base"
-run_plan set "$CDIR/plan.md" --no-verifier
-[ "$RC" -eq 0 ] || fail "same-path set --no-verifier exits 0"
-expect_plan_verdict lines "$base_now" "same-path --no-verifier preserves LINES"
+run_plan set "$CDIR/plan.md"
+[ "$RC" -eq 0 ] || fail "same-path default set exits 0"
+expect_plan_verdict skipped "$base_now" "same-path default set clears advisory LINES"
 setup_case verdict-set-preserves-ok
 rebase_plan
 old_base="$(git -C "$WT" rev-parse HEAD^)"
@@ -2987,16 +2902,16 @@ run_plan set "$CDIR/plan.md" --no-verifier
 [ "$RC" -eq 0 ] || fail "same-path set --no-verifier preserves OK"
 expect_plan_verdict ok "$old_base" "same-path --no-verifier preserves OK pair"
 
-# --- an accepted word with a mismatched base is stale even with the fast-path flag ---
+# --- an accepted word with a mismatched base is advisory even with --no-verifier ---
 setup_case verdict-stale-flag
 rebase_plan
 base_now="$(cat "$CDIR/base")"
 bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed stale flag verdict"
 bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "seed stale flag base"
 run_plan post --no-verifier
-[ "$RC" -eq 1 ] || fail "post --no-verifier with stale pair exits 1"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "post --no-verifier with stale pair"
-expect_plan_verdict ok 0000000000000000000000000000000000000000 "post --no-verifier does not overwrite stale word"
+[ "$RC" -eq 0 ] || fail "post --no-verifier with stale pair exits 0"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post --no-verifier with stale pair"
+expect_plan_verdict skipped "$base_now" "post --no-verifier refreshes stale advisory word"
 
 # --- verify refuses a report without a fresh report verdict ---
 setup_case verdict-clear-blocked
@@ -3020,7 +2935,7 @@ run_plan set "$CDIR/plan.md" --no-verifier
 [ "$RC" -eq 0 ] || fail "set --no-verifier refreshes an old skipped verdict"
 expect_plan_verdict skipped "$base_now" "set --no-verifier refreshes skipped"
 
-# --- post --no-verifier refreshes skipped; post without it keeps stale refusal ---
+# --- post refreshes an old skipped snapshot by default ---
 setup_case verdict-post-skipped-old-base
 rebase_plan
 base_now="$(cat "$CDIR/base")"
@@ -3028,13 +2943,13 @@ old_base="$(git -C "$WT" rev-parse HEAD^)"
 bash "$TKT_STATE" "$S" set plan_verdict skipped || fail "seed old skipped verdict for post"
 bash "$TKT_STATE" "$S" set plan_verdict_base "$old_base" || fail "seed old skipped base for post"
 run_plan post
-[ "$RC" -eq 1 ] || fail "post without --no-verifier refuses old skipped verdict"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "post without flag refuses stale skipped"
-expect_plan_verdict skipped "$old_base" "post without flag preserves stale skipped pair"
+[ "$RC" -eq 0 ] || fail "default post accepts old skipped verdict"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "default post accepts stale skipped"
+expect_plan_verdict skipped "$base_now" "default post refreshes skipped"
 run_plan post --no-verifier
-[ "$RC" -eq 0 ] || fail "post --no-verifier refreshes an old skipped verdict"
-expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post --no-verifier refreshes skipped"
-expect_plan_verdict skipped "$base_now" "post --no-verifier refreshes skipped"
+[ "$RC" -eq 0 ] || fail "post --no-verifier accepts old skipped verdict"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post --no-verifier accepts old skipped"
+expect_plan_verdict skipped "$base_now" "post --no-verifier preserves refreshed skipped"
 
 # --- a verify never overwrites an earlier Verifier report ---
 # A Verifier report already on disk still reserves its name; SET no longer resets the count to make it look like round 1.
@@ -3858,6 +3773,44 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = rule-ok ]; then
     || fail "rule-ok-success-spaced-state prints the %q-quoted tkt-build route"
   grep -Fq 'tkt-plan rule-ok by=surveyor ruling=RULING-1604 comment=654010' "$CDIR/tkt state.journal" \
     || fail "rule-ok-success-spaced-state journals its ruling provenance"
+fi
+
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = advisory-set ]; then
+  # A needs-plan ticket may get one advisory Verifier pass, but no verdict is
+  # required to set its plan.
+  setup_case advisory-default-set
+  rebase_plan
+  base_now="$(cat "$CDIR/base")"
+  run_plan set "$CDIR/plan.md"
+  [ "$RC" -eq 0 ] || fail "default set without a Verifier exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  expect_plan_verdict skipped "$base_now" "default set without a Verifier"
+  bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed advisory LINES before set"
+  bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed advisory LINES base before set"
+  run_plan set "$CDIR/plan.md"
+  [ "$RC" -eq 0 ] || fail "default set accepts an advisory LINES verdict"
+  expect_plan_verdict skipped "$base_now" "default set clears advisory LINES"
+fi
+
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = advisory-missing-post ]; then
+  setup_case advisory-missing-post
+  rebase_plan
+  run_plan post
+  [ "$RC" -eq 0 ] || fail "post without a Verifier exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post without a Verifier"
+fi
+
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = advisory-lines ]; then
+  setup_case advisory-lines-post
+  rebase_plan
+  base_now="$(cat "$CDIR/base")"
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "advisory Verifier LINES exits 1"
+  expect_plan_verdict lines "$base_now" "advisory Verifier LINES"
+  run_plan post
+  [ "$RC" -eq 0 ] || fail "advisory LINES does not lock post (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  expect_verdict "TKT tkt-plan POSTED urls=* log=*" "advisory LINES does not lock post"
+  expect_plan_verdict skipped "$base_now" "advisory LINES does not lock lane dispatch"
 fi
 
 echo "tkt-plan: all cases passed"

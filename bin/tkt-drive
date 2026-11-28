@@ -259,7 +259,7 @@ plan="$(get plan)"
 if [ -z "$plan" ]; then
   t journal "tkt-drive NEEDS-PLAN trigger=$trigger" 2>/dev/null || true
   printf 'TKT tkt-drive NEEDS-PLAN\n'
-  printf 'NEEDS-PLAN is not a block: do not report it. Run the planning skill now (planner, Verifier, `tkt-plan <state> set <plan>`), then rerun tkt-drive. For a `Flaky test:` or `Flaky tests:` ticket, take the determined path instead: the repro is the plan, so run `tkt-plan <state> set <plan> --no-verifier` with no planner and no Verifier, then rerun tkt-drive.\n' >&2
+  printf 'NEEDS-PLAN is not a block: write the plan from the ticket; run the planner and one advisory Verifier round only when the ticket has the `needs-plan` label. Otherwise use `tkt-plan <state> set <plan> --no-verifier`. Then rerun tkt-drive.\n' >&2
   exit 5
 fi
 [ -r "$plan" ] || internal_stop "tkt-drive: cannot read plan: $plan"
@@ -308,7 +308,7 @@ while :; do
     *)
       plan_verdict="$(get plan_verdict)"
       case "$plan_verdict" in
-        ok|triaged|skipped)
+        ok|triaged|skipped|lines)
           if plan_posted; then
             tool=tkt-build
           else
@@ -340,7 +340,7 @@ while :; do
   }
 
   case "$verdict" in
-    SET|PLAN-OK|POSTED) ;;
+    SET|PLAN-OK|POSTED|LINES) ;;
     *) stop_with_tool "$tool" "$verdict" "$rc" "$output" "$error" ;;
   esac
 

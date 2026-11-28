@@ -19,11 +19,11 @@ plan_verdict_read() {
 plan_verdict_write() {
   local state_tool="$1" state="$2" verdict="$3" base="$4" plan="$5" worktree="$6" hash verdict_at
   hash="$(git -C "$worktree" hash-object -w "$plan" 2>/dev/null)" || return 1
-  verdict_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  if [ "$verdict" != skipped ]; then verdict_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; fi
   "$state_tool" "$state" set plan_verdict "$verdict"
   "$state_tool" "$state" set plan_verdict_base "$base"
   "$state_tool" "$state" set plan_verdict_hash "$hash"
-  "$state_tool" "$state" set plan_verdict_at "$verdict_at"
+  [ "$verdict" = skipped ] || "$state_tool" "$state" set plan_verdict_at "$verdict_at"
   "$state_tool" "$state" set plan_verdict_by ""
   "$state_tool" "$state" set plan_verdict_ruling ""
   "$state_tool" "$state" set plan_verdict_comment ""

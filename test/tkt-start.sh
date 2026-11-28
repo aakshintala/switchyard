@@ -20,7 +20,6 @@ TEMPLATE="$HOME/.agents/skills/planning/briefs/preflight.md"
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
-if [ -f "$T/gh-fail" ]; then exit 4; fi
 case " \$* " in
   *" api --paginate "*)
     if [ -f "$T/api-fail" ]; then echo "gh: api files boom" >&2; exit 5; fi
@@ -36,12 +35,19 @@ case " \$* " in
   *" graphql "*) cat "$T/edited"; exit 0 ;;
   *" issue view "*" lastEditedAt "*)
     printf 'Unknown JSON field: "lastEditedAt"\n' >&2; exit 1 ;;
-  *" pr view "*" --json state "*) cat "$T/prstate"; exit 0 ;;
-  *" pr view "*) cat "$T/prhead"; exit 0 ;;
+  *" pr view "*" --json state "*)
+    [ ! -f "$T/prstate-fail" ] || { echo "gh: PR state boom" >&2; exit 4; }
+    cat "$T/prstate"; exit 0 ;;
+  *" pr view "*)
+    [ ! -f "$T/prhead-fail" ] || { echo "gh: PR head boom" >&2; exit 4; }
+    cat "$T/prhead"; exit 0 ;;
+  *" issue view "*"--json labels"*)
+    cat "$T/issue-labels"; exit 0 ;;
   *" issue view "*"state,comments"*)
     if [ -f "$T/issue-fail" ]; then echo "gh: issue view boom" >&2; exit 5; fi
     cat "$T/issue"; exit 0 ;;
   *)
+    if [ -f "$T/gh-fail" ]; then echo "gh: issue body boom" >&2; exit 4; fi
     if [ -f "$T/body-fail" ]; then echo "gh: issue body boom" >&2; exit 4; fi
     cat "$T/body"; exit 0 ;;
 esac
@@ -181,9 +187,11 @@ build_case_template "$TEMPLATES/TWO" yes
 # setup NAME ONE|TWO AGAINST|FILING|SKIP: copy a private seed, origin and
 # clone from the matching common fixture. Sets CDIR CLONE WT RUN FILING.
 setup() {
-  : >"$T/calls.log"; : >"$T/job-results.log"; rm -f "$T/job-dispatch.count" "$T/job-resume.count" "$T/jobresumeout" "$T/job-resume-fail" "$T/job-resume-ask" "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
+  : >"$T/calls.log"; : >"$T/job-results.log"; rm -f "$T/job-dispatch.count" "$T/job-resume.count" "$T/jobresumeout" "$T/job-resume-fail" "$T/job-resume-ask" "$T/gh-fail" "$T/prlist-fail" "$T/prstate-fail" "$T/prhead-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"; : >"$T/prstate"; printf '[]\n' >"$T/prlist"
   printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
+  printf '%s\n' '{"labels":[{"name":"needs-plan"}]}' >"$T/issue-labels"
+  ISSUE_LABELS_SET=0
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\nCore items: 2\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
   FW_RUN="$CDIR/fw-run"; export FW_RUN; mkdir -p "$FW_RUN"
@@ -199,8 +207,12 @@ setup() {
   [ "$3" = FILING ] && printf 'Work for #42.\n\nfiling commit: %s\n' "$FILING" >"$T/body"
   reload
 }
-# run_start [EXTRA...]: run tkt-start in CLONE on ARGS; sets OUT and RC.
+# Legacy --no-preflight cases model an unlabelled ticket; tests that need a label set it explicitly.
 run_start() {
+  case " $* " in
+    *" --no-preflight "*)
+      if [ "${ISSUE_LABELS_SET:-0}" -eq 0 ]; then set_issue_labels '{"labels":[]}'; fi ;;
+  esac
   RC=0; OUT="$(cd "$CLONE" && bash "$TKT" "${ARGS[@]}" "$@" 2>"$CDIR/stderr")" || RC=$?
   [ -n "$OUT" ] || OUT="$(cat "$CDIR/stderr")"
 }
@@ -237,6 +249,8 @@ expect_resume_calls() {
   [ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq "$1" ] \
     || fail "$2: expected $1 tkt-job-resume call(s)"
 }
+set_issue_labels() { ISSUE_LABELS_SET=1; printf '%s\n' "$1" >"$T/issue-labels"; }
+if [ -z "${TKT_START_TEST_ONLY:-}" ]; then
 # A missing worktree needs a repository checkout as its starting point.
 setup norepo ONE AGAINST
 mkdir -p "$T/nonrepo"
@@ -432,7 +446,7 @@ run_start --no-preflight
 want "SKIPPED filing=" 0 duplicate-pr-unreadable-first
 "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set pr 124
 : >"$T/prstate"
-touch "$T/gh-fail"
+touch "$T/prstate-fail"
 existing_state="$(cd "$RUN" && pwd -P)/widget-42.state"; existing_run="$RUN"
 RUN="$CDIR/sibling-run"; reload
 run_start --no-preflight
@@ -846,7 +860,7 @@ bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set pr 7
 printf '%s\n' "$ACTUAL" >"$T/prhead"; : >"$T/prstate"; run_start
 want "CURRENT " 0 prmatch
 [ "$(grep -cF -- '--json state' "$T/calls.log")" -eq 0 ] || fail "prmatch: merged-state lookup must not run without drift"
-printf '1' >"$T/gh-fail"; run_start
+printf '1' >"$T/prhead-fail"; run_start
 want "PRECONDITION pr=unreadable" 2 prunreadable
 # A stored plan bypasses currency checks when its files changed after filing.
 setup planned-stale TWO FILING
@@ -887,12 +901,11 @@ case "$OUT" in *STALE*|*CURRENT*|*reason=*) fail "skipstale: SKIPPED must carry 
 case "$OUT" in *"files=missing.txt"*) ;; *) fail "skipstale: digest misses files=missing.txt" ;; esac
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "skipstale: tkt-job must not run"
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "skipstale: plan-sweep must not run"
-: >"$T/calls.log"; run_start --files missing.txt
-case "$OUT" in *"reason=missing-file:missing.txt"*) ;; *) fail "skipstale: without the flag the ticket must be stale" ;; esac
-# --no-preflight never reads the issue body: a failing body read still ends SKIPPED.
+# The label, not --no-preflight, controls currency checks and issue-body reads.
 setup skipbody ONE AGAINST
 printf '1' >"$T/body-fail"; run_start --no-preflight
 want "SKIPPED filing=none" 0 skipbody
+set_issue_labels '{"labels":[{"name":"needs-plan"}]}'
 run_start
 want "STEP-FAIL step=github" 4 skipbody
 rm -f "$T/body-fail"
@@ -1515,7 +1528,8 @@ grep -Fxq 'tkt-start: missing required role: model.planner' "$CDIR/stderr" \
   || fail "planner-missing: stderr does not name model.planner: $(cat "$CDIR/stderr")"
 [ ! -e "$RUN/widget-42.state" ] || fail "planner-missing: state was written"
 [ ! -e "$WT" ] || fail "planner-missing: worktree was created"
-[ ! -s "$T/calls.log" ] || fail "planner-missing: external calls ran before refusal"
+[ "$(cat "$T/calls.log")" = 'gh|issue view 42 --repo acme/widget --json labels' ] \
+  || fail "planner-missing: expected only the issue-label lookup before role refusal: $(cat "$T/calls.log")"
 
 # A planner explicitly supplied on start is accepted.
 setup planner-given ONE AGAINST
@@ -1783,7 +1797,7 @@ case " \$* " in
     if [ -f "$T/labels-fail" ]; then echo "gh: labels boom" >&2; exit 5; fi
     if [ -f "$T/labels-nomutants" ]; then printf 'bug\\n'; else printf 'bug\\nmutants\\n'; fi
     exit 0 ;;
-  *" --json labels "*)
+  *" pr view "*" --json labels "*)
     printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
     if [ -f "$T/pr-labeled" ]; then printf 'mutants\\n'; else printf 'bug\\n'; fi
     exit 0 ;;
@@ -1811,5 +1825,31 @@ rm -f "$T/edit-fail"
 want "STEP-FAIL step=github rc=5" 5 mutantlabellistfail
 rm -f "$T/labels-fail"
 mv "$T/bin/gh.shared" "$T/bin/gh"
+fi
+
+# An unlabelled ticket takes the lane path without planner or preflight.
+if [ -z "${TKT_START_TEST_ONLY:-}" ] || [ "$TKT_START_TEST_ONLY" = shortpath ]; then
+setup short-path-unlabelled ONE AGAINST
+set_issue_labels '{"labels":[]}'
+remove_model_role planner
+: >"$T/calls.log"
+run_start
+want "SKIPPED filing=" 0 short-path-unlabelled
+! grep -q '^tkt-job|' "$T/calls.log" || fail "short-path-unlabelled: dispatched a preflight, planner or Verifier job"
+! grep -q '^plan-sweep|' "$T/calls.log" || fail "short-path-unlabelled: ran the Files sweep"
+! grep -q '^model\.planner=' "$RUN/widget-42.state" || fail "short-path-unlabelled: stored a planner model"
+grep -q 'issue view 42 --repo acme/widget --json labels' "$T/calls.log" \
+  || fail "short-path-unlabelled: did not read issue labels"
+fi
+
+# --no-preflight is a no-op: needs-plan still runs preflight.
+if [ -z "${TKT_START_TEST_ONLY:-}" ] || [ "$TKT_START_TEST_ONLY" = needs-plan ]; then
+setup needs-plan-no-preflight TWO FILING
+set_issue_labels '{"labels":[{"name":"needs-plan"}]}'
+run_start --no-preflight
+want "PREFLIGHT core=2" 1 needs-plan-no-preflight
+grep -q '^tkt-job|.*--slot preflight ' "$T/calls.log" \
+  || fail "needs-plan-no-preflight: did not dispatch preflight"
+fi
 
 echo "tkt-start: all cases passed"
