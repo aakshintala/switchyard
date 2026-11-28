@@ -2587,11 +2587,21 @@ ticket_fail_case() {
   [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-keep" ] || fail "$1 keeps the job slot"
 }
 
-ticket_fail_case ticket-empty empty
-ticket_fail_case ticket-blank blank
 ticket_fail_case ticket-fail fail
 ticket_fail_case ticket-comments-fail comments-fail
 ticket_fail_case ticket-fail-round fail 1
+
+# A missing or whitespace-only ticket body is still passed through as a spec;
+# the empty shape itself does not refuse the Verifier dispatch.
+for ticket_case in ticket-empty-allowed ticket-blank-allowed; do
+  setup_case "$ticket_case"
+  rebase_plan
+  if [ "$ticket_case" = ticket-empty-allowed ]; then printf 'empty' >"$T/ghmode"; else printf 'blank' >"$T/ghmode"; fi
+  run_plan verify
+  printf 'ok' >"$T/ghmode"
+  [ "$RC" -eq 0 ] || fail "$ticket_case dispatches despite an empty-shaped body (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  grep -q '^job|slot=verifier' "$T/stub.log" || fail "$ticket_case starts the Verifier"
+done
 
 # --- the ticket is read only once a job is about to start ---
 gh_count() { grep -c '^gh|' "$T/gh.log" || true; }
@@ -2693,9 +2703,17 @@ confirm_fail_case() {
   cmp -s "$S" "$CDIR/before.state" || fail "$1 writes no state"
 }
 
-confirm_fail_case confirm-empty empty
-confirm_fail_case confirm-blank blank
 confirm_fail_case confirm-fail fail
+
+# --- confirm also reads an empty-shaped issue body without treating its shape as a refusal ---
+setup_case confirm-empty-body
+rebase_plan
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+printf 'empty' >"$T/ghmode"
+run_plan confirm --edits "$CDIR/edits.md"
+printf 'ok' >"$T/ghmode"
+[ "$RC" -eq 0 ] || fail "confirm-empty-body dispatches (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^job|slot=confirm' "$T/stub.log" || fail "confirm-empty-body starts confirm"
 
 setup_case confirm-order
 rebase_plan

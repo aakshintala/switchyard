@@ -11,9 +11,9 @@
 # comment fetch failure exits 1; rerun once the API is reachable.
 # Usage:
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] [--state PATH] --model M [--overbuild-model M2] [--axes LIST] [--context PATH]... [--workflow-doc PATH] [--head SHA] [--full-rereview REASON]
-#     LIST is standards[,spec][,overbuild], default all three: one job per
+#     LIST is standards[,spec][,overbuild], default standards,spec: one job per
 #     axis. Review mode fetches the diff and tickets into each review worktree;
-#     review and verify also fetch the PR body and provide it as context.
+#     review and verify never fetch or stage the PR body.
 #     --state supplies the ticket state whose fence is shown to reviewers.
 #     --overbuild-model is required only when overbuild is listed.
 #     --full-rereview is review mode only; it skips the comment check.
@@ -31,8 +31,7 @@
 #     delegation tool's wait command (delegate watch), in the wait mode your
 #     harness instructions prescribe.
 #     --verify ignores --issue, --spec and --overbuild-model for review input;
-#     with --ruling, the first --issue identifies the ticket comment. A non-empty PR body is provided automatically;
-#     --context files are added alongside it.
+#     with --ruling, the first --issue identifies the ticket comment. --context files are added alongside the ruling files.
 #   review-pr collect <job-id>... [--findings-out PATH]
 #     posts the one PR comment with the patch-id, prints the verdict digest,
 #     writes the open findings (or "no open findings") to PATH when asked,
@@ -101,6 +100,7 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 . "$script_dir/lib/findings-history.sh"
 . "$script_dir/lib/ruling-comment.sh"
 . "$script_dir/lib/ruling-refutes.sh"
+. "$script_dir/lib/pr-body.sh"
 skills_dir="$(dirname "$script_dir")/skills"
 briefs_dir="$skills_dir/review-loop/briefs"
 fill_brief="$script_dir/fill-brief"
@@ -575,7 +575,7 @@ cmd_start() {
     if [ -n "$verify" ]; then usage; fi
     echo "review-pr: full re-review: $full_rereview" >&2
   fi
-  if [ -z "$axes" ]; then axes="standards,spec,overbuild"; fi
+  if [ -z "$axes" ]; then axes="standards,spec"; fi
   # One job starts per listed axis; an unknown name is a usage error.
   axes_rest="$axes,"
   while [ -n "$axes_rest" ]; do
@@ -662,11 +662,9 @@ cmd_start() {
           exit 2
         };;
     esac
-    # A PR with no ticket is its own spec: gh issue view accepts a PR number.
-    # Otherwise SPEC defaults to the first --issue, never the PR number.
+    # PR descriptions are generated output, not ticket context. A spec needs an explicit issue.
     if [ "$issue_count" -eq 0 ]; then
-      issue="$pr"
-      specn="${specn:-$pr}"
+      issue="none"
     else
       specn="${specn:-${issues[0]}}"
       issue="${issues[0]}"
@@ -756,6 +754,12 @@ cmd_start() {
   mkdir -p "$state_dir"
   mkdir -p "$run_root"
   run_dir="$(mktemp -d "$run_root/review-pr.run.XXXXXX")"
+
+  if [ "$mode" = verify ] && tkt_has_pr_body_findings "$verify"; then
+    verify_without_body="$run_dir/findings-without-pr-body.md"
+    tkt_filter_pr_body_findings "$verify" "$verify_without_body"
+    verify="$verify_without_body"
+  fi
 
   started_ok=""
   wt_list=()
@@ -868,37 +872,28 @@ cmd_start() {
       exit 1
     fi
   fi
-  # debt: FIX-OK pins the head, not the PR body; record the body's sha256 in the verify comment when a body edit after FIX-OK removes a line a finding required.
-  if ! gh pr view "$pr" --repo "$repo" --json body -q .body >"$review_context/pr-body.md"; then
-    echo "review-pr: could not fetch the body of PR $pr" >&2
-    exit 1
-  fi
-  if ! grep -q '[^[:space:]]' "$review_context/pr-body.md"; then
-    rm -f "$review_context/pr-body.md"
-  fi
-
   if [ "$mode" = "review" ]; then
     ticket_numbers=()
-    if [ "$issue_count" -eq 0 ]; then
-      ticket_numbers[0]="$pr"
-    else
-      issue_index=0
-      while [ "$issue_index" -lt "$issue_count" ]; do
-        ticket_numbers[${#ticket_numbers[@]}]="${issues[$issue_index]}"
-        issue_index=$((issue_index + 1))
+    issue_index=0
+    while [ "$issue_index" -lt "$issue_count" ]; do
+      ticket_number="${issues[$issue_index]}"
+      [ "$ticket_number" = "$pr" ] || ticket_numbers+=("$ticket_number")
+      issue_index=$((issue_index + 1))
+    done
+    if [ -n "$specn" ] && [ "$specn" != "$pr" ]; then
+      spec_is_ticket=""
+      for ticket_n in ${ticket_numbers[@]+"${ticket_numbers[@]}"}; do
+        [ "$ticket_n" = "$specn" ] && spec_is_ticket=1
       done
+      [ -n "$spec_is_ticket" ] || ticket_numbers+=("$specn")
     fi
-    case " ${ticket_numbers[*]} " in
-      *" $specn "*) ;;
-      *) ticket_numbers[${#ticket_numbers[@]}]="$specn";;
-    esac
     ticket_files=""
-    for ticket_n in "${ticket_numbers[@]}"; do
+    for ticket_n in ${ticket_numbers[@]+"${ticket_numbers[@]}"}; do
       ticket_files="${ticket_files}${ticket_files:+ }.review-context/issue-$ticket_n.md"
     done
     case ",$axes," in
       *,standards,*|*,spec,*|*,overbuild,*)
-        for ticket_n in "${ticket_numbers[@]}"; do
+        for ticket_n in ${ticket_numbers[@]+"${ticket_numbers[@]}"}; do
           ticket_file="$review_context/issue-$ticket_n.md"
           if ! gh issue view "$ticket_n" --repo "$repo" >"$ticket_file"; then
             echo "review-pr: could not fetch ticket #$ticket_n body" >&2
@@ -1088,7 +1083,7 @@ cmd_start() {
         ;;
       spec)
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" "ISSUE=$issue" \
-          "SPEC=$specn" "DIFF_FILE=.review-context/pr.diff" "TICKET_FILES=$ticket_files" \
+          "SPEC=${specn:-none}" "DIFF_FILE=.review-context/pr.diff" "TICKET_FILES=$ticket_files" \
           "FENCE=$fence" "OUTSIDE_PLAN=$outside_plan" "SKILLS=$skills_dir" "WORKFLOW_DOC=$wdoc" >"$brief"
         ;;
       overbuild)
@@ -1101,20 +1096,14 @@ cmd_start() {
           "CHECKOUT=$wt" "SINCE=$since" "FINDINGS=@$verify_for_job" "POSTED_ROUNDS=@$verify_round_file" >"$brief"
         ;;
     esac
-    if [ "$mode" = "review" ] && [ -f "$review_context/pr-body.md" ]; then
-      printf "\nThe PR body is the lane's claim, not ground truth. Check evidence it cites; do not trust it.\nRead it at .review-context/pr-body.md.\n" >>"$brief"
-    fi
 
     if [ "$mode" = "review" ]; then
       rm -rf "$wt/.review-context"
       mkdir -p "$wt/.review-context"
       cp "$review_context/pr.diff" "$wt/.review-context/pr.diff"
-      if [ -f "$review_context/pr-body.md" ]; then
-        cp "$review_context/pr-body.md" "$wt/.review-context/pr-body.md"
-      fi
       case "$role" in
         spec|overbuild|standards)
-          for ticket_n in "${ticket_numbers[@]}"; do
+          for ticket_n in ${ticket_numbers[@]+"${ticket_numbers[@]}"}; do
             cp "$review_context/issue-$ticket_n.md" "$wt/.review-context/issue-$ticket_n.md"
           done
           ;;
@@ -1126,21 +1115,15 @@ cmd_start() {
     if [ "$mode" = "verify" ]; then
       rm -rf "$wt/.review-context"
       mkdir -p "$wt/.review-context"
-      if [ -f "$review_context/pr-body.md" ]; then
-        cp "$review_context/pr-body.md" "$wt/.review-context/pr-body.md"
-      fi
       for ruling_id in "${ruling_ids[@]+${ruling_ids[@]}}"; do
         cp "$review_context/ruling-$ruling_id.md" "$wt/.review-context/ruling-$ruling_id.md"
       done
     fi
-    if [ "${#context_files[@]}" -gt 0 ] || [ "${#ruling_ids[@]}" -gt 0 ] || { [ "$mode" = "verify" ] && [ -f "$review_context/pr-body.md" ]; }; then
+    if [ "${#context_files[@]}" -gt 0 ] || [ "${#ruling_ids[@]}" -gt 0 ]; then
       mkdir -p "$wt/.review-context"
       {
         if [ "$mode" = "verify" ]; then
           printf '\nFiles in .review-context/ for this verify:\n'
-          if [ -f "$review_context/pr-body.md" ]; then
-            printf '.review-context/pr-body.md\n'
-          fi
           for ruling_id in "${ruling_ids[@]+${ruling_ids[@]}}"; do
             printf '.review-context/ruling-%s.md\n' "$ruling_id"
           done
@@ -1241,6 +1224,18 @@ write_findings() {
   fi
 }
 
+is_collect_body_finding() {
+  tkt_is_pr_body_finding "$1"
+}
+
+count_body_findings() {
+  local text="$1" line count=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if is_collect_body_finding "$line"; then count=$((count + 1)); fi
+  done <<<"$text"
+  printf '%s\n' "$count"
+}
+
 # reprint_collected SRC JOB_ID...: an id with no state file but a job record is
 # reprinted from the record. Follow resume links so the latest result is used.
 # It is COLLECTED only when the result matches its posted-record hash. Append
@@ -1290,9 +1285,15 @@ reprint_collected() {
             printf '%s\n' "$line"
           fi;;
       esac
+      if is_collect_body_finding "$line"; then
+        dropped_body_findings=$((dropped_body_findings + 1))
+        continue
+      fi
       if finding_rows input <(printf '%s\n' "$line") >/dev/null 2>&1; then
-        printf '%s\n' "$line"
-        printf '%s\n' "$line" >>"$src_f"
+        if [ "$rrole" != overbuild ]; then
+          printf '%s\n' "$line"
+          printf '%s\n' "$line" >>"$src_f"
+        fi
       fi
     done <<<"$text"
   done
@@ -1300,6 +1301,7 @@ reprint_collected() {
 
 cmd_collect() {
   findings_out=""
+  dropped_body_findings=0
   ids=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -1519,6 +1521,7 @@ cmd_collect() {
     # Nothing left to post or remove: every id was collected before.
     if [ "${#id_list[@]}" -eq 0 ] && [ ! -s "$unknown_f" ]; then
       if [ -n "$findings_out" ]; then write_findings "$findings_out" "$reprint_f"; fi
+      printf 'dropped-body-findings=%s\n' "$dropped_body_findings"
       [ "$unposted" -eq 0 ] && [ "$recollect_bad" -eq 0 ] || exit 1
       exit 0
     fi
@@ -1527,11 +1530,11 @@ cmd_collect() {
   missing_axes_f="$tmp/missing-axes.txt"
   : >"$missing_axes_f"
   roles_ok=""
-  expected_axes="standards,spec,overbuild"
+  expected_axes="standards,spec"
   if [ "${#group_dirs[@]}" -gt 0 ]; then
     roles_ok="1"
     expected_axes="$(state_get "${group_first_state[0]}" axes)"
-    [ -n "$expected_axes" ] || expected_axes="standards,spec,overbuild"
+    [ -n "$expected_axes" ] || expected_axes="standards,spec"
     for gi in ${!group_dirs[@]}; do
       g_standards=""; g_spec=""; g_overbuild=""; g_verify=""
       for jid in ${group_ids[$gi]}; do
@@ -1545,7 +1548,7 @@ cmd_collect() {
       done
       [ "${group_posted[$gi]}" = "1" ] && continue
       g_expected="$(state_get "${group_first_state[$gi]}" axes)"
-      [ -n "$g_expected" ] || g_expected="standards,spec,overbuild"
+      [ -n "$g_expected" ] || g_expected="standards,spec"
       if [ -n "$g_verify" ] && [ -z "$g_standards" ] && [ -z "$g_spec" ] && [ -z "$g_overbuild" ]; then
         continue
       elif [ -z "$g_verify" ] && { [ -n "$g_standards" ] || [ -n "$g_spec" ] || [ -n "$g_overbuild" ]; }; then
@@ -1571,7 +1574,6 @@ cmd_collect() {
   else
     printf 'UNFINISHED standards MISSING gate=none collect needs every role job id\n' >>"$missing_axes_f"
     printf 'UNFINISHED spec MISSING gate=none collect needs every role job id\n' >>"$missing_axes_f"
-    printf 'UNFINISHED overbuild MISSING gate=none collect needs every role job id\n' >>"$missing_axes_f"
   fi
   short="unknown"
   if [ -n "$sha" ]; then short="${sha:0:8}"; fi
@@ -1630,6 +1632,14 @@ cmd_collect() {
     group_full_rereview="$(state_get "$first_state" full_rereview)"
     group_since="$(state_get "$first_state" since)"
     body="$tmp/comment-$gi.md"
+    group_dropped_body_findings=0
+    for jid in ${group_state_ids[$gi]}; do
+      dropped_rec="$(job_latest_rec "$jid")"
+      [ -f "$dropped_rec" ] || continue
+      dropped_text="$(jq -r '.result.text // empty' "$dropped_rec" 2>/dev/null || true)"
+      dropped_count="$(count_body_findings "$dropped_text")"
+      group_dropped_body_findings=$((group_dropped_body_findings + dropped_count))
+    done
     {
       if [ -n "$group_since" ]; then
         if [ -n "$group_full_rereview" ]; then
@@ -1644,6 +1654,7 @@ cmd_collect() {
       else
         printf 'review-pr: patch-id %s, head %s\n' "${group_patch_id:-none}" "${group_sha:-unknown}"
       fi
+      printf 'dropped-body-findings=%s\n\n' "$group_dropped_body_findings"
       for jid in ${group_state_ids[$gi]}; do
         role="$(state_get "$state_dir/$jid" role)"
         rmodel="$(state_get "$state_dir/$jid" model)"
@@ -1660,18 +1671,15 @@ cmd_collect() {
           --arg result_hash "$result_hash" \
           '{job_id: $job_id, repo: $repo, pr: $pr, result_hash: $result_hash}' \
           >"$tmp/posted-$jid"
-        if [ "$role" = "verify" ]; then
-          comment_text="$(while IFS= read -r line || [ -n "$line" ]; do
-            norm="$(norm_line "$line")"
-            if is_verdict verify "$norm"; then
-              label_verdict verify "$norm"
-            else
-              printf '%s\n' "$line"
-            fi
-          done <<<"$text")"
-        else
-          comment_text="$text"
-        fi
+        comment_text="$(while IFS= read -r line || [ -n "$line" ]; do
+          is_collect_body_finding "$line" && continue
+          norm="$(norm_line "$line")"
+          if [ "$role" = verify ] && is_verdict verify "$norm"; then
+            label_verdict verify "$norm"
+          else
+            printf '%s\n' "$line"
+          fi
+        done <<<"$text")"
         if [ -n "$rruling" ]; then
           printf '\n## %s (%s, model-ruling %s)\n\n%s\n' "$role" "$rmodel" "$rruling" "$comment_text"
         else
@@ -1761,10 +1769,18 @@ cmd_collect() {
           bad=$((bad + 1))
           continue
         fi
+        if is_collect_body_finding "$line"; then
+          dropped_body_findings=$((dropped_body_findings + 1))
+          continue
+        fi
         if finding_rows input <(printf '%s\n' "$line") >/dev/null 2>&1; then
-          printf '%s\n' "$line" >>"$verdicts_f"
-          case "$line" in
-            P1\ *|P2\ *) blocking_finding="1";;
+          case "$role" in
+            overbuild) ;;
+            *)
+              printf '%s\n' "$line" >>"$verdicts_f"
+              case "$line" in
+                P1\ *|P2\ *) blocking_finding="1";;
+              esac;;
           esac
         fi
       done <<<"$text"
@@ -1853,6 +1869,7 @@ cmd_collect() {
   fi
 
   printf '%s\n' "$head_line"
+  printf 'dropped-body-findings=%s\n' "$dropped_body_findings"
   cat "$verdicts_f"
   printf 'CI %s %s\n' "$short" "$ci"
   cat "$bad_f"

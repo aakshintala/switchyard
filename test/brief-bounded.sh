@@ -31,7 +31,7 @@ fail_over_budget() {
 # (https://github.com/aakshintala/switchyard/pull/1583#issuecomment-6786694697):
 # "#1575's "no rule dropped" outranks its 1 KiB headroom. If restoring the
 # rules leaves less than 1 KiB, find the bytes elsewhere without dropping a
-# rule, or ship with whatever headroom is left and say so in the PR body."
+# rule, or ship with whatever headroom is left and record the choice in the review notes."
 # With every rule restored, the pi template left 256 B before #1731.
 # Switchyard #1731 tightened wording (no rule dropped) to leave about 1 KiB under this cap.
 BRIEF_MAX_BYTES=33280

@@ -671,10 +671,8 @@ digest="commits=$commits merges=$merges
 gate=$gate_word"
 tkt set head "$local_head"
 # On PASS the gate records `Local gate: pass at <sha> (<command>)` in the
-# PR body, replacing any earlier Local gate line. The line goes directly
-# above the first Implemented by line, else above the attribution line
-# (state body_ends, else the body_has co-author line), else at the end. A
-# --checks-only PASS ran no gate, so it writes nothing. A failed read or
+# PR body, replacing any earlier Local gate line and appending the new line.
+# A --checks-only PASS ran no gate, so it writes nothing. A failed read or
 # write only warns.
 if [ "$checks_only" -eq 0 ] && gate_pr="$(tkt get pr 2>/dev/null)"; then
   gate_pr_repo="$(git -C "$worktree" config --get remote.origin.url 2>/dev/null || true)"
@@ -682,22 +680,17 @@ if [ "$checks_only" -eq 0 ] && gate_pr="$(tkt get pr 2>/dev/null)"; then
     echo "tkt-gate: warning: cannot read origin URL in $worktree; leaving the PR body unchanged" >&2
   elif pr_body="$(gh pr view "$gate_pr" --repo "$gate_pr_repo" --json body --jq '.body // ""' 2>/dev/null)"; then
     gate_line="Local gate: pass at $local_head ($gate_cmd)"
-    if [ -z "$pr_body" ]; then
-      new_body="$gate_line"
-    else
-      # body_ends wins; a missing or blank body_ends falls through to the body_has co-author.
-      attr="$(tkt get body_ends 2>/dev/null || true)"
-      attr_mode="exact"
-      if [ -z "${attr//[[:space:]]/}" ]; then
-        attr="$(tkt list body_has 2>/dev/null | grep -i 'co-author' | head -n 1 || true)"
-        attr_mode="prefix"
+    new_body="$(tkt_local_gate_body_insert "$pr_body" "$gate_line")"
+    if tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-gate-body.XXXXXX" 2>/dev/null)"; then
+      if printf '%s\n' "$new_body" >"$tmp_body"; then
+        tkt_publish_pr_body_file "$tmp_body" "$gate_pr" "$gate_pr_repo" tkt-gate || true
+      else
+        echo "tkt-gate: warning: cannot update PR $gate_pr body; leaving it unchanged" >&2
       fi
-      new_body="$(tkt_local_gate_body_insert "$pr_body" "$gate_line" "$attr" "$attr_mode")"
+      rm -f "$tmp_body" || true
+    else
+      echo "tkt-gate: warning: cannot update PR $gate_pr body; leaving it unchanged" >&2
     fi
-    tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-gate-body.XXXXXX")"
-    printf '%s\n' "$new_body" >"$tmp_body"
-    tkt_publish_pr_body_file "$tmp_body" "$gate_pr" "$gate_pr_repo" tkt-gate || true
-    rm -f "$tmp_body"
   else
     echo "tkt-gate: warning: cannot read PR $gate_pr body; leaving it unchanged" >&2
   fi

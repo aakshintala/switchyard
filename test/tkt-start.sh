@@ -141,7 +141,7 @@ reload() {
   for a in --run "$RUN" --repo acme/widget --issue 42 --spec 42 --branch tkt-start \
     --worktree "$WT" --workflow-doc "$CDIR/wf.md" --closing "Resolves #42" --env "FOO=1" \
     --body-has "Resolves #42" --body-has "Co-authored with Claude Code." --extra "$CDIR/extra.md" \
-    --merge-gate ci --merge-check 'cargo check --all-targets' --mutant-job Selection --model lane=sol --model planner=plan --model preflight=luna --files f.txt; do
+    --merge-gate ci --merge-check 'cargo check --all-targets' --model lane=sol --model planner=plan --model preflight=luna --files f.txt; do
     if [ "$skip" -eq 1 ]; then skip=0; elif [ "$a" = "${1:-}" ]; then skip=1; else ARGS+=("$a"); fi
   done
 }
@@ -229,11 +229,11 @@ expect_state() {
   [ -f "$S" ] || fail "$1: no state file [$S]"
   for kv in "repo=acme/widget" "issue=42" "spec=42" "branch=tkt-start" "worktree=$WT" "run=$RUN" \
     "workflow_doc=$CDIR/wf.md" "closing=Resolves #42" "env=FOO=1" "extra=$CDIR/extra.md" \
-    "merge_gate=ci" "merge_check=cargo check --all-targets" "mutant_job=Selection"; do
+    "merge_gate=ci" "merge_check=cargo check --all-targets"; do
     grep -qF "$kv" "$S" || fail "$1: state misses [$kv]"
   done
-  [ "$(grep -c '^body_has=' "$S")" -eq 2 ] || fail "$1: state wants 2 body_has lines"
-  grep -qF "body_has=Resolves #42" "$S" || fail "$1: state misses body line 1"
+  [ "$(grep -c '^body_has=' "$S" || true)" -eq 0 ] || fail "$1: legacy body_has values are not stored"
+  [ "$(grep -c '^body_ends=' "$S" || true)" -eq 0 ] || fail "$1: legacy body_ends values are not stored"
   [ "$(grep -c '^model\.lane=' "$S")" -eq 1 ] || fail "$1: state wants 1 model.lane"
   [ "$(grep -c '^model\.planner=' "$S")" -eq 1 ] || fail "$1: state wants 1 model.planner"
   [ "$(grep -c '^model\.preflight=' "$S")" -eq 1 ] || fail "$1: state wants 1 model.preflight"
@@ -265,6 +265,17 @@ case "$OUT" in *"run from inside acme/widget's checkout"*) ;; *) fail "norepo: f
 setup gate-script-absent ONE AGAINST; run_start --no-preflight
 want "SKIPPED filing=" 0 gate-script-absent
 if grep -q '^gate\.script=' "$RUN/widget-42.state"; then fail "gate-script-absent: unexpected gate.script key"; fi
+
+# --- --mutant-job is accepted as one warning and stores no state
+setup mutant-job-noop ONE AGAINST
+run_start --no-preflight --mutant-job Selection
+want "SKIPPED filing=" 0 mutant-job-noop
+[ "$(grep -Fxc 'tkt-start: --mutant-job is a no-op; CI runs mutation testing on every ready PR' "$CDIR/stderr")" -eq 1 ] \
+  || fail "mutant-job-noop: prints exactly one no-op warning"
+! grep -q '^mutant_job=' "$RUN/widget-42.state" \
+  || fail "mutant-job-noop: does not store mutant_job"
+! grep -Fq 'gh|pr edit' "$T/calls.log" \
+  || fail "mutant-job-noop: does not change PR labels"
 
 setup gate-script-present ONE AGAINST
 git -C "$CLONE" worktree add --no-track -b tkt-start "$WT" origin/main >/dev/null
@@ -335,7 +346,7 @@ git -C "$WT" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1 
 case "$OUT" in *"no edit info"*) ;; *) fail "current: digest misses edit evidence" ;; esac
 run_start
 want "CURRENT " 0 rerun
-[ "$(grep -c '^body_has=' "$RUN/widget-42.state")" -eq 2 ] || fail "rerun: body_has duplicated"
+[ "$(grep -c '^body_has=' "$RUN/widget-42.state" || true)" -eq 0 ] || fail "rerun: body_has is not stored"
 [ "$(grep -c '^model\.lane=' "$RUN/widget-42.state")" -eq 1 ] || fail "rerun: model.lane duplicated"
 # Resume the same physical run through a symlinked --run path. The duplicate
 # scan must compare physical paths, not spellings of the same state file.
@@ -542,12 +553,11 @@ setup flagfirst ONE AGAINST
 reload --files; run_start --files --no-preflight
 [ "$RC" -eq 2 ] || fail "flagfirst: --files then a flag exits $RC"
 grep -qF -- --files "$CDIR/stderr" || fail "flagfirst: stderr does not name --files"
-# unreadable or unresolvable filing commit preflights with a reason.
+# An issue body without an optional filing-commit line remains readable input; its shape does not refuse preflight.
 setup badfiling ONE SKIP
 printf 'Work for #42 with no filing line.\n' >"$T/body"; run_start
-want "PREFLIGHT core=2 out=" 1 badfiling
-grep -q '^tkt-job|' "$T/calls.log" || fail "badfiling: tkt-job must run"
-case "$OUT" in *"reason=filing-commit:unreadable"*) ;; *) fail "badfiling: digest misses the reason" ;; esac
+want "CURRENT " 0 body-without-filing-marker
+grep -q 'gh|issue view 42 --repo acme/widget --json body' "$T/calls.log" || fail "body-without-filing-marker: issue body was not read"
 printf 'Work for #42.\n\nWritten against deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' >"$T/body"; run_start
 want "PREFLIGHT core=2 out=" 1 badsha
 case "$OUT" in *"reason=filing-commit:unreadable"*) ;; *) fail "badsha: digest misses the reason" ;; esac
@@ -991,26 +1001,20 @@ grep -qF -- '-F owner=acme' "$T/calls.log" || fail "gqlvars: owner not passed wi
 grep -qF -- '-F name=widget' "$T/calls.log" || fail "gqlvars: name not passed with -F"
 grep -qF -- '-F number=42' "$T/calls.log" || fail "gqlvars: number not passed with -F"
 grep -q 'owner: "acme"' "$T/calls.log" && fail "gqlvars: owner still interpolated into the query"
-# --closing must agree with the spec on Part-of vs Resolves.
+# The --closing value is ticket state, independent of the issue body's prose.
 setup partclose ONE AGAINST
 printf 'Batch part.\n\nPart of #9\n' >"$CDIR/spec.md"
 run_start --spec "$CDIR/spec.md"
-[ "$RC" -eq 2 ] || fail "partclose: exit $RC, want 2"
-grep -qF -- '--closing' "$CDIR/stderr" || fail "partclose: stderr does not name --closing"
-grep -qF -- "$CDIR/spec.md" "$CDIR/stderr" || fail "partclose: stderr does not name the spec it read"
+want "CURRENT " 0 partclose
 run_start --spec "$CDIR/spec.md" --closing "Part of #9"
 want "CURRENT " 0 partok
-# a missing --spec file is named, instead of grep's redirect hiding it.
+# A missing local spec file and a spec without Part-of prose do not gate the start.
 setup specmissing ONE AGAINST
 run_start --spec "$CDIR/nope.md" --closing "Part of #9"
-[ "$RC" -eq 2 ] || fail "specmissing: exit $RC, want 2"
-grep -qF -- "$CDIR/nope.md" "$CDIR/stderr" || fail "specmissing: stderr does not name the path"
-grep -qF -- 'does not exist' "$CDIR/stderr" || fail "specmissing: stderr does not say the file is missing"
-[ ! -e "$RUN/widget-42.state" ] || fail "specmissing: state must not be written"
+want "CURRENT " 0 specmissing
 setup partrev ONE AGAINST
 run_start --closing "Part of #9"
-[ "$RC" -eq 2 ] || fail "partrev: exit $RC, want 2"
-grep -qF -- '--closing' "$CDIR/stderr" || fail "partrev: stderr does not name --closing"
+want "CURRENT " 0 partrev
 # a non-numeric --issue exits 2 naming it, before any state or worktree.
 setup numissue ONE AGAINST
 run_start --issue abc
@@ -1325,35 +1329,28 @@ run_start
 want "CURRENT " 0 specissueabsent
 [ "$(grep -c '^spec_issue=' "$RUN/widget-42.state")" -eq 0 ] || fail "specissueabsent: unexpected spec_issue line"
 
-# --body-ends writes one body_ends line; a repeat keeps only the last value.
+# Legacy body flags remain accepted but are not stored as ship requirements.
 setup bodyends ONE AGAINST
-run_start --body-ends 'X'
+run_start --body-ends 'X' --body-has 'Doc friction:'
 want "CURRENT " 0 bodyends
-[ "$(grep -c '^body_ends=' "$RUN/widget-42.state")" -eq 1 ] || fail "bodyends: wants one body_ends line"
-grep -qF 'body_ends=X' "$RUN/widget-42.state" || fail "bodyends: state misses [body_ends=X]"
+[ "$(grep -c '^body_ends=' "$RUN/widget-42.state" || true)" -eq 0 ] || fail "bodyends: no body_ends state"
+[ "$(grep -c '^body_has=' "$RUN/widget-42.state" || true)" -eq 0 ] || fail "bodyends: no body_has state"
+[ "$(grep -c 'ignoring legacy body' "$CDIR/stderr")" -eq 1 ] || fail "bodyends: one ignored-flags warning: $(cat "$CDIR/stderr")"
 setup bodyendsrepeat ONE AGAINST
 run_start --body-ends 'A' --body-ends 'B'
 want "CURRENT " 0 bodyendsrepeat
-[ "$(grep -c '^body_ends=' "$RUN/widget-42.state")" -eq 1 ] || fail "bodyendsrepeat: wants one body_ends line"
-grep -qF 'body_ends=B' "$RUN/widget-42.state" || fail "bodyendsrepeat: state misses [body_ends=B]"
-grep -qF 'body_ends=A' "$RUN/widget-42.state" && fail "bodyendsrepeat: stale value [body_ends=A] remains"
-# an empty or blank --body-ends exits 2 naming the rule, before any state write.
+[ "$(grep -c '^body_ends=' "$RUN/widget-42.state" || true)" -eq 0 ] || fail "bodyendsrepeat: no body_ends state"
+[ "$(grep -c 'ignoring legacy body' "$CDIR/stderr")" -eq 1 ] || fail "bodyendsrepeat: one warning: $(cat "$CDIR/stderr")"
 setup bodyendsempty ONE AGAINST
 run_start --body-ends ''
-[ "$RC" -eq 2 ] || fail "bodyendsempty: exit $RC"
-grep -qF 'tkt-start: --body-ends needs a value that is not blank' "$CDIR/stderr" || fail "bodyendsempty: stderr misses the blank rule"
-[ ! -e "$RUN/widget-42.state" ] || fail "bodyendsempty: state must not be written"
+want "CURRENT " 0 bodyendsempty
 setup bodyendsblank ONE AGAINST
 run_start --body-ends '  '
-[ "$RC" -eq 2 ] || fail "bodyendsblank: exit $RC"
-grep -qF 'tkt-start: --body-ends needs a value that is not blank' "$CDIR/stderr" || fail "bodyendsblank: stderr misses the blank rule"
-[ ! -e "$RUN/widget-42.state" ] || fail "bodyendsblank: state must not be written"
-# a value holding a newline exits 2 naming the rule, before any state write.
+want "CURRENT " 0 bodyendsblank
+# A newline in an ignored body value does not make tkt-start refuse.
 setup bodyendsnewline ONE AGAINST
 run_start --body-ends "$(printf 'a\nb')"
-[ "$RC" -eq 2 ] || fail "bodyendsnewline: exit $RC"
-grep -qF 'tkt-start: --body-ends value holds a newline' "$CDIR/stderr" || fail "bodyendsnewline: stderr misses the newline rule"
-[ ! -e "$RUN/widget-42.state" ] || fail "bodyendsnewline: state must not be written"
+want "CURRENT " 0 bodyendsnewline
 # --body-ends with no value exits 2 through usage.
 setup bodyendsnovalue ONE AGAINST
 run_start --body-ends
@@ -1365,7 +1362,7 @@ setup bodyendsabsent ONE AGAINST
 run_start
 want "CURRENT " 0 bodyendsabsent
 [ "$(grep -c '^body_ends=' "$RUN/widget-42.state")" -eq 0 ] || fail "bodyendsabsent: unexpected body_ends line"
-# end to end: tkt-start stores --body-ends, tkt-ship passes it to ship-pr.
+# end to end: tkt-start accepts body flags, but tkt-ship does not forward them.
 setup bodyendse2e ONE AGAINST
 cat >"$T/tktbin/ship-pr" <<EOF
 #!/usr/bin/env bash
@@ -1386,7 +1383,6 @@ chmod +x "$T/tktbin/lanecheck"
 rm -f "$T/lanecheck-called"
 run_start --body-ends 'X'
 want "CURRENT " 0 bodyendse2e
-grep -qF 'body_ends=X' "$RUN/widget-42.state" || fail "bodyendse2e: state misses [body_ends=X]"
 S2E_STATE="$RUN/widget-42.state"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set pr 7
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set reviewed "$(git -C "$WT" rev-parse HEAD)"
@@ -1397,9 +1393,8 @@ S2E_OUT="$(bash "$SCRIPT_DIR/../bin/tkt-ship" "$S2E_STATE" 2>"$CDIR/ship-stderr"
 case "$S2E_OUT" in "TKT tkt-ship MERGED"*) ;; *) fail "bodyendse2e: tkt-ship [$S2E_OUT] wants MERGED" ;; esac
 grep -Fxq 'RETIRE issue=42' <<<"$S2E_OUT" || fail "bodyendse2e: missing RETIRE instruction"
 [ ! -e "$T/lanecheck-called" ] || fail "bodyendse2e: tkt-ship called lanecheck"
-[ "$(grep -c -x -F 'arg|--body-ends' "$T/shipcalls.log")" -eq 1 ] || fail "bodyendse2e: body-ends once: $(cat "$T/shipcalls.log")"
-got="$(grep -A1 -x -F 'arg|--body-ends' "$T/shipcalls.log" | sed -n 2p)"
-[ "$got" = 'arg|X' ] || fail "bodyendse2e: body-ends value, got [$got]"
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/shipcalls.log" || true)" -eq 0 ] || fail "bodyendse2e: body-ends not forwarded: $(cat "$T/shipcalls.log")"
+[ "$(grep -c -x -F 'arg|--ticket-state' "$T/shipcalls.log")" -eq 1 ] || fail "bodyendse2e: state path forwarded: $(cat "$T/shipcalls.log")"
 part_seed_pr() {
   run_start
   [ "$RC" -eq 0 ] || fail "$1 setup: exit $RC"
@@ -1715,6 +1710,45 @@ want "CURRENT " 0 partnostate
 grep -qF -- 'part=2' "$RUN/widget-42.state" || fail "partnostate: state misses [part=2]"
 [ ! -e "$RUN/widget-42.state.part1" ] || fail "partnostate: unexpected archive"
 
+# A changed --model on a rerun replaces its old value and journals the correction.
+setup modelrerun ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 modelrerun-first
+S="$RUN/widget-42.state"
+reload; remove_model_role lane; ARGS+=(--model lane=new-model)
+run_start --no-preflight
+want "SKIPPED filing=" 0 modelrerun-corrected
+[ "$(grep -c '^model\.lane=' "$S")" -eq 1 ] || fail "modelrerun: state wants one model.lane value"
+grep -qxF 'model.lane=new-model' "$S" || fail "modelrerun: state misses corrected model.lane"
+grep -qF 'tkt-start model.lane from=sol to=new-model' "${S%.state}.journal" \
+  || fail "modelrerun: journal misses model correction"
+
+# A reader refuses a duplicated model.lane rather than choosing its first value.
+setup modelambiguous ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 modelambiguous-first
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set model.review review-model
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" add model.lane second-model
+run_start --no-preflight
+[ "$RC" -eq 2 ] || fail "modelambiguous: exit $RC, want 2"
+case "$OUT" in *"TKT tkt-start MODEL-AMBIGUOUS key=model.lane"*) ;; *) fail "modelambiguous: verdict missing: $OUT" ;; esac
+case "$OUT" in *'values=sol,second-model'*) ;; *) fail "modelambiguous: values missing: $OUT" ;; esac
+case "$OUT" in *"tkt-state $S set model.lane <id>"*) ;; *) fail "modelambiguous: repair command missing: $OUT" ;; esac
+
+# Starting again refuses duplicate known roles even when that role was not supplied.
+setup modelambiguousunscoped ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 modelambiguousunscoped-first
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" add model.lane second-model
+reload; remove_model_role lane
+run_start --no-preflight
+[ "$RC" -eq 2 ] || fail "modelambiguousunscoped: exit $RC, want 2"
+case "$OUT" in *"TKT tkt-start MODEL-AMBIGUOUS key=model.lane"*) ;; *) fail "modelambiguousunscoped: verdict missing: $OUT" ;; esac
+case "$OUT" in *'values=sol,second-model'*) ;; *) fail "modelambiguousunscoped: values missing: $OUT" ;; esac
+case "$OUT" in *"tkt-state $S set model.lane <id>"*) ;; *) fail "modelambiguousunscoped: repair command missing: $OUT" ;; esac
+
 # The requested model wins over the archived value for the same role.
 setup partmodel ONE AGAINST; part_seed_pr partmodel
 S="$RUN/widget-42.state"
@@ -1782,50 +1816,6 @@ want "PRECONDITION part=3" 2 partmissingn
 case "$OUT" in *'part is missing'*) ;; *) fail "partmissingn: message misses [part is missing]" ;; esac
 cmp -s "$S" "$CDIR/state.before" || fail "partmissingn: state changed"
 [ ! -e "$S.lock" ] || fail "partmissingn: lock was not released"
-
-# --mutant-job adds the mutants label to the branch PR when the repo defines
-# the label; otherwise, or when the PR already carries it, nothing is edited.
-setup mutantlabel ONE AGAINST
-cp "$T/bin/gh" "$T/bin/gh.shared"
-cat >"$T/bin/gh" <<EOF
-#!/usr/bin/env bash
-case " \$* " in
-  *" pr list --head "*)
-    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
-    printf '7\\n'; exit 0 ;;
-  *"labels?per_page=100"*)
-    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
-    if [ -f "$T/labels-fail" ]; then echo "gh: labels boom" >&2; exit 5; fi
-    if [ -f "$T/labels-nomutants" ]; then printf 'bug\\n'; else printf 'bug\\nmutants\\n'; fi
-    exit 0 ;;
-  *" pr view "*" --json labels "*)
-    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
-    if [ -f "$T/pr-labeled" ]; then printf 'mutants\\n'; else printf 'bug\\n'; fi
-    exit 0 ;;
-  *" pr edit "*" --add-label mutants "*)
-    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
-    if [ -f "$T/edit-fail" ]; then echo "gh: edit boom" >&2; exit 5; fi
-    exit 0 ;;
-  *) exec "$T/bin/gh.shared" "\$@" ;;
-esac
-EOF
-chmod +x "$T/bin/gh"
-run_start
-want "CURRENT " 0 mutantlabel
-grep -qF -- 'gh|pr edit 7 --repo acme/widget --add-label mutants' "$T/calls.log" || fail "mutantlabel: no mutants label edit"
-: >"$T/calls.log"; printf '1' >"$T/labels-nomutants"; run_start
-want "CURRENT " 0 mutantlabelnolabel
-grep -qF -- 'pr edit' "$T/calls.log" && fail "mutantlabelnolabel: no edit without a repo mutants label"
-: >"$T/calls.log"; rm -f "$T/labels-nomutants"; printf '1' >"$T/pr-labeled"; run_start
-want "CURRENT " 0 mutantlabellabeled
-grep -qF -- 'pr edit' "$T/calls.log" && fail "mutantlabellabeled: no edit when the PR already carries mutants"
-: >"$T/calls.log"; rm -f "$T/pr-labeled"; printf '1' >"$T/edit-fail"; run_start
-want "STEP-FAIL step=github rc=5" 5 mutantlabeleditfail
-rm -f "$T/edit-fail"
-: >"$T/calls.log"; printf '1' >"$T/labels-fail"; run_start
-want "STEP-FAIL step=github rc=5" 5 mutantlabellistfail
-rm -f "$T/labels-fail"
-mv "$T/bin/gh.shared" "$T/bin/gh"
 fi
 
 # An unlabelled ticket takes the lane path without planner or preflight.

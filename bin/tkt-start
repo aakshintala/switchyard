@@ -12,6 +12,7 @@
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
 # --part N archives the prior state after its PR merges; merged-PR head drift tells you the next --part.
 # Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--split <label>] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]
+# Legacy body flags are accepted, warned about once and ignored.
 # PATHS are separated by commas or spaces, and repeats of --files add more paths.
 # Words after --files run to the next word starting with '-': write such a path as ./-name.
 # Example: --files a b c, the same as --files a,b,c.
@@ -19,22 +20,21 @@ set -euo pipefail
 usage() {
   echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--split <label>] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]" >&2
   echo "  --takeover PR-OR-BRANCH records plan=takeover PR-OR-BRANCH; --gate CMD records its required check command; non-blank --files PATHS is required for its file fence" >&2
-  echo "  --spec FILE: a file holding the ticket body; a Part-of closing needs 'Part of #N' in it" >&2
+  echo "  --spec FILE: ticket body/spec input; its shape does not decide --closing" >&2
   echo "  --spec-issue N: the issue holding the spec, when it is not this ticket; review-pr checks the spec axis against it" >&2
   echo "  --files PATHS: paths separated by commas or spaces, e.g. --files a b c or --files a,b,c; required and non-blank with --takeover" >&2
   echo "  With --takeover, --files records the takeover file fence." >&2
   exit 2
 }
 run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
-env=""; extra=""; merge_gate=""; merge_check=""; mutant_job=""; files=""; part=""; part_given=0; split=""; split_given=0
-body_has=(); models=()
+env=""; extra=""; merge_gate=""; merge_check=""; files=""; part=""; part_given=0; split=""; split_given=0
+mutant_job=""; mutant_job_given=0; legacy_body_flags=0; models=()
 model_roles=(lane fix map verifier verify review overbuild preflight planner)
-body_ends=""; body_ends_given=0; spec_issue=""; spec_issue_given=0
+spec_issue=""; spec_issue_given=0
 takeover_ref=""; takeover_given=0; takeover_gate=""; takeover_gate_given=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --body-has) [ $# -ge 2 ] || usage; body_has+=("$2"); shift 2 ;;
-    --body-ends) [ $# -ge 2 ] || usage; body_ends="$2"; body_ends_given=1; shift 2 ;;
+    --body-has|--body-ends) [ $# -ge 2 ] || usage; legacy_body_flags=1; shift 2 ;;
     --spec-issue) [ $# -ge 2 ] || usage; spec_issue="$2"; spec_issue_given=1; shift 2 ;;
     --model) [ $# -ge 2 ] || usage; models+=("$2"); shift 2 ;;
     --part) [ $# -ge 2 ] || usage; part="$2"; part_given=1; shift 2 ;;
@@ -43,11 +43,13 @@ while [ $# -gt 0 ]; do
     --gate) [ $# -ge 2 ] || usage; takeover_gate="$2"; takeover_gate_given=1; shift 2 ;;
     --files) [ $# -ge 2 ] && [[ $2 != -* ]] || usage; shift; while [ $# -gt 0 ] && [[ $1 != -* ]]; do files="${files:+$files,}${1//[[:space:]]/,}"; shift; done ;;
     --no-preflight) shift ;;
-    --run|--repo|--issue|--spec|--branch|--worktree|--closing|--env|--extra|--merge-gate|--merge-check|--mutant-job|--workflow-doc)
+    --mutant-job) [ $# -ge 2 ] || usage; mutant_job="$2"; mutant_job_given=1; shift 2 ;;
+    --run|--repo|--issue|--spec|--branch|--worktree|--closing|--env|--extra|--merge-gate|--merge-check|--workflow-doc)
       [ $# -ge 2 ] || usage; v="${1#--}"; printf -v "${v//-/_}" '%s' "$2"; shift 2 ;;
     --help|-h|-*|*) usage ;;
   esac
 done
+[ "$mutant_job_given" -eq 0 ] || echo "tkt-start: --mutant-job is a no-op; CI runs mutation testing on every ready PR" >&2
 # --files: repeats and spaces both separate paths; squeeze the commas they leave.
 while [[ $files == *,,* ]]; do files="${files//,,/,}"; done
 files="${files#,}"; files="${files%,}"
@@ -90,6 +92,9 @@ if [ "$part_given" -eq 1 ] && printf '%s\n' "$closing" | grep -qiE '^[[:space:]]
 fi
 if [ "$spec_issue_given" -eq 1 ]; then
   if [[ ! $spec_issue =~ ^0*[1-9][0-9]*$ ]]; then echo "tkt-start: --spec-issue needs a positive integer: $spec_issue" >&2; exit 2; fi
+fi
+if [ "$legacy_body_flags" -eq 1 ]; then
+  echo "tkt-start: warning: ignoring legacy body flags; PR body text is generated output" >&2
 fi
 script_path="$0"
 case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
@@ -154,26 +159,7 @@ for m in ${models[@]+"${models[@]}"}; do
   fi
 done
 case "$merge_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $merge_gate" >&2; exit 2 ;; esac
-# A blank check line can never match a PR body, and a newline breaks the
-# state line, so both exit before any state write. The given flag tells a
-# repeat or an empty value apart from no flag at all.
-if [ "$body_ends_given" -eq 1 ]; then
-  if [ -z "${body_ends//[[:space:]]/}" ]; then echo "tkt-start: --body-ends needs a value that is not blank" >&2; exit 2; fi
-  case "$body_ends" in *$'\n'*) echo "tkt-start: --body-ends value holds a newline" >&2; exit 2 ;; esac
-fi
-spec_part=0; spec_exists=0
-if [ -f "$spec" ]; then spec_exists=1; grep -qiE 'part of[[:space:]]+#[0-9]+' "$spec" && spec_part=1; fi
-close_part=0; printf '%s' "$closing" | grep -qiE '^part of([[:space:]]|$)' && close_part=1
-if [ "$spec_part" -ne "$close_part" ]; then
-  if [ "$spec_part" -eq 1 ]; then
-    echo "tkt-start: --closing '$closing' is not a Part-of closing, but --spec '$spec' contains 'Part of #N'" >&2
-  elif [ "$spec_exists" -eq 0 ]; then
-    echo "tkt-start: --closing '$closing' is a Part-of closing, but --spec '$spec' does not exist (it must hold the ticket body with 'Part of #N')" >&2
-  else
-    echo "tkt-start: --closing '$closing' is a Part-of closing, but --spec '$spec' has no 'Part of #N'" >&2
-  fi
-  exit 2
-fi
+# Issue text remains available as a spec; its shape does not gate the closing value.
 tkt_state="$script_dir/tkt-state"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-start: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
@@ -181,32 +167,44 @@ if [ ! -r "$namebase_lib" ]; then echo "tkt-start: cannot read shared lib: $name
 . "$namebase_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"; sweep="$bin_dir/plan-sweep"; tktjob="$bin_dir/tkt-job"
 set_namebase "$repo" "$issue"; state="$run/$namebase.state"
+part_notes=()
+emit() {
+  local rest="$1" code="$2"; shift 2; local twelve log out note
+  twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf nohead)"
+  log="$run/$namebase-tkt-start-$twelve-$(date +%H%M%S).log"; out="TKT tkt-start $rest log=$log"
+  [ $# -eq 0 ] || out="$out
+$(printf '%s\n' "$@" | head -n 40)"
+  for note in ${part_notes[@]+"${part_notes[@]}"}; do out="$out
+$note"; done
+  printf '%s\n' "$out" | tee "$log"; exit "$code"
+}
+read_state_model() {
+  local role="$1"
+  STATE_MODEL=""; STATE_MODEL_FOUND=0
+  [ -f "$state" ] || return 1
+  if tkt_get_model emit "model.$role" "$tkt_state" "$state" get "model.$role"; then
+    STATE_MODEL="$MODEL_VALUE"; STATE_MODEL_FOUND=1
+    return 0
+  fi
+  return 1
+}
+if [ -f "$state" ]; then
+  for known_role in "${model_roles[@]}"; do read_state_model "$known_role" || true; done
+fi
 model_for_start() {
-  local role="$1" model="" line arg
-  if [ -f "$state" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "model.$role="*) model="${line#*=}"; break ;;
-      esac
-    done <"$state"
-  fi
-  if [ "$part_given" -eq 1 ]; then
-    for arg in ${models[@]+"${models[@]}"}; do
-      if [ "${arg%%=*}" = "$role" ]; then model="${arg#*=}"; break; fi
-    done
-  elif [ -z "$model" ]; then
-    for arg in ${models[@]+"${models[@]}"}; do
-      if [ "${arg%%=*}" = "$role" ]; then model="${arg#*=}"; break; fi
-    done
-  fi
-  printf '%s\n' "$model"
+  local role="$1" model="" arg
+  if read_state_model "$role"; then model="$STATE_MODEL"; fi
+  for arg in ${models[@]+"${models[@]}"}; do
+    if [ "${arg%%=*}" = "$role" ]; then model="${arg#*=}"; fi
+  done
+  MODEL_FOR_START="$model"
 }
 for scoped_role in verify review; do
-  scoped_model="$(model_for_start "$scoped_role")"
+  model_for_start "$scoped_role"; scoped_model="$MODEL_FOR_START"
   [ -n "$scoped_model" ] || continue
   implement_models=()
   for implement_role in fix lane; do
-    implement_model="$(model_for_start "$implement_role")"
+    model_for_start "$implement_role"; implement_model="$MODEL_FOR_START"
     [ -n "$implement_model" ] || continue
     implement_models+=("model.$implement_role=$implement_model")
   done
@@ -216,16 +214,7 @@ for scoped_role in verify review; do
   fi
 done
 state_has_planner_model() {
-  local state_line model_id
-  [ -f "$state" ] || return 1
-  while IFS= read -r state_line || [ -n "$state_line" ]; do
-    case "$state_line" in
-      model.planner=*)
-        model_id="${state_line#*=}"
-        if [ -n "${model_id//[[:space:]]/}" ]; then return 0; fi
-        ;;
-    esac
-  done <"$state"
+  if read_state_model planner && [ -n "${STATE_MODEL//[[:space:]]/}" ]; then return 0; fi
   return 1
 }
 needs_plan=0
@@ -263,17 +252,6 @@ clear_preflight_slot() {
   tkt set job.preflight.prompt ""
   tkt set preflight.resume_attempted ""
   tkt journal "tkt-start preflight cleared job=$job_id"
-}
-part_notes=()
-emit() {
-  local rest="$1" code="$2"; shift 2; local twelve log out note
-  twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf nohead)"
-  log="$run/$namebase-tkt-start-$twelve-$(date +%H%M%S).log"; out="TKT tkt-start $rest log=$log"
-  [ $# -eq 0 ] || out="$out
-$(printf '%s\n' "$@" | head -n 40)"
-  for note in ${part_notes[@]+"${part_notes[@]}"}; do out="$out
-$note"; done
-  printf '%s\n' "$out" | tee "$log"; exit "$code"
 }
 fail_step() {
   local msg="tkt-start: $1 failed (rc=$2)"
@@ -409,7 +387,7 @@ if [ "$part_given" -eq 1 ]; then
         if [ -e "$archive" ]; then
           deny "PRECONDITION part=$part archive=$archive" 2 "tkt-start: archive already exists: $archive"
         fi
-        carried_models=()
+        carried_models=(); carried_model_roles=()
         carried_verdict=""; carried_verdict_base=""; carried_verdict_hash=""
         verdict_seen=0; verdict_base_seen=0; verdict_hash_seen=0
         while IFS= read -r state_line || [ -n "$state_line" ]; do
@@ -424,13 +402,20 @@ if [ "$part_given" -eq 1 ]; then
               carried_verdict="${state_line#plan_verdict=}"; verdict_seen=1
               ;;
             model.*=*)
-              model_key="${state_line%%=*}"; model_role="${model_key#model.}"; model_replaced=0
+              model_key="${state_line%%=*}"; model_role="${model_key#model.}"; model_seen=0
+              for seen_role in ${carried_model_roles[@]+"${carried_model_roles[@]}"}; do
+                [ "$seen_role" = "$model_role" ] && model_seen=1
+              done
+              [ "$model_seen" -eq 0 ] || continue
+              carried_model_roles+=("$model_role")
+              read_state_model "$model_role" || continue
+              model_line="$model_key=$STATE_MODEL"; model_replaced=0
               for m in ${models[@]+"${models[@]}"}; do
                 if [ "${m%%=*}" = "$model_role" ]; then model_replaced=1; fi
               done
               if [ "$model_replaced" -eq 0 ]; then
-                carried_models+=("$state_line")
-                part_notes+=("carried $state_line from part $((part - 1)); pass --model ${state_line#model.} to change it")
+                carried_models+=("$model_line")
+                part_notes+=("carried $model_line from part $((part - 1)); pass --model ${model_line#model.} to change it")
               fi
               ;;
           esac
@@ -492,7 +477,7 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
 fi
 for k in repo issue spec branch worktree run workflow_doc closing; do tkt set "$k" "${!k}"; done
 [ "$split_given" -eq 0 ] || tkt set split "$split"
-for k in env extra merge_gate merge_check mutant_job; do [ -n "${!k}" ] && tkt set "$k" "${!k}"; done
+for k in env extra merge_gate merge_check; do [ -n "${!k}" ] && tkt set "$k" "${!k}"; done
 if [ "$takeover_given" -eq 1 ]; then
   tkt set plan "takeover $takeover_ref"
   tkt set gate "$takeover_gate"
@@ -505,10 +490,16 @@ if [ "$takeover_given" -eq 1 ]; then
     done
   fi
 fi
-if [ "$body_ends_given" -eq 1 ]; then tkt set body_ends "$body_ends"; fi
 if [ "$spec_issue_given" -eq 1 ]; then tkt set spec_issue "$spec_issue"; fi
-for b in ${body_has[@]+"${body_has[@]}"}; do tkt list body_has 2>/dev/null | grep -xF -- "$b" >/dev/null || tkt add body_has "$b"; done
-for m in ${models[@]+"${models[@]}"}; do tkt list "model.${m%%=*}" 2>/dev/null | grep -xF -- "${m#*=}" >/dev/null || tkt add "model.${m%%=*}" "${m#*=}"; done
+for m in ${models[@]+"${models[@]}"}; do
+  model_role="${m%%=*}"; model_key="model.$model_role"; model_id="${m#*=}"
+  old_model=""; old_model_found=0
+  if read_state_model "$model_role"; then old_model="$STATE_MODEL"; old_model_found=1; fi
+  tkt set "$model_key" "$model_id"
+  if [ "$old_model_found" -eq 1 ] && [ "$old_model" != "$model_id" ]; then
+    tkt journal "tkt-start $model_key from=$old_model to=$model_id"
+  fi
+done
 tkt journal "tkt-start state repo=$repo issue=$issue branch=$branch"
 # Repo reads go through the worktree once it exists, so a rerun works from
 # any directory; creating it still runs in the caller's repo.
@@ -534,9 +525,12 @@ for p in ${fpaths[@]+"${fpaths[@]}"}; do git -C "$worktree" cat-file -e "origin/
 if [ -z "$stale" ]; then
   body="$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>&1)" || fail_step github "$?" "$body"
   filing="$(printf '%s\n' "$body" | grep -oE '(Written against|filing commit:) [0-9a-f]{7,40}' | sed -n '1s/.* //p' || true)"
-  { [ -n "$filing" ] && git -C "$worktree" cat-file -e "$filing^{commit}" 2>/dev/null; } || { stale=1; reason="filing-commit:unreadable"; filing=""; }
+  # The issue body is spec input; the filing marker is optional, but a supplied marker must resolve.
+  if [ -n "$filing" ] && ! git -C "$worktree" cat-file -e "$filing^{commit}" 2>/dev/null; then
+    stale=1; reason="filing-commit:unreadable"; filing=""
+  fi
 fi
-if [ -z "$stale" ]; then rc=0; logout=""
+if [ -n "$filing" ] && [ -z "$stale" ]; then rc=0; logout=""
   logout="$(git -C "$worktree" log --oneline "$filing..origin/main" -- ${fpaths[@]+"${fpaths[@]}"} 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then stale=1; reason="log:failed"; lognote="failed"
   elif [ -n "$logout" ]; then stale=1; reason="log:$filing..origin/main"; lognote="$(printf '%s' "$logout" | grep -c . || true) lines"
@@ -594,25 +588,6 @@ if [ -n "$stop_pr" ] && [ "$recur_ok" -eq 1 ]; then
 fi
 [ -n "$stop_pr" ] && deny "MERGED-STOP pr=$stop_pr" 1 "tkt-start: issue #$issue already resolved by merged PR #$stop_pr"
 part_notes+=(${notes[@]+"${notes[@]}"})
-# With --mutant-job, the branch PR must carry the mutants label, or ship-pr
-# later refuses the draft for lacking it. When the repo defines the label
-# (the same labels read ship-pr checks), add it to the branch's open PR when
-# missing. No PR yet still skips, but a failed lookup fails loud like a
-# refused edit instead of leaving the PR unlabelled.
-if [ -n "$mutant_job" ]; then
-  branch_pr="$(gh pr list --head "$branch" --repo "$repo" --json number --jq '.[0].number // empty' 2>&1)" || fail_step github "$?" "$branch_pr"
-  if [ -n "$branch_pr" ]; then
-    repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name' 2>&1)" || fail_step github "$?" "$repo_labels"
-    if grep -qx 'mutants' <<<"$repo_labels"; then
-      pr_labels="$(gh pr view "$branch_pr" --repo "$repo" --json labels --jq '.labels[].name' 2>&1)" || fail_step github "$?" "$pr_labels"
-      if ! grep -qx 'mutants' <<<"$pr_labels"; then
-        edit_err="$(gh pr edit "$branch_pr" --repo "$repo" --add-label mutants 2>&1)" \
-          || fail_step github "$?" "$edit_err"
-        tkt journal "tkt-start mutants label pr=$branch_pr"
-      fi
-    fi
-  fi
-fi
 # Every deny is behind us: only a start that gets this far drops the last
 # run's plan-comment id, so a refused start leaves it alone (#1517).
 tkt set post_run ""

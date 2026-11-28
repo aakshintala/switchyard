@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Tests for bin/tkt-build: lane, gate, mutant list, review beside the map job,
-# one merged findings file. Stubs on a temp TKT_BIN: delegate (mints DONE/ASK
-# records), gh (pr list/view, run list/view), gh-ci (wait, with a separate
-# run-wait code) and review-pr (canned start/collect), plus mutant-verdicts
-# (canned verdict rows). Real tkt-job and tkt-gate run behind logging
-# wrappers; symlinks reach the real tkt-state, fill-brief, plan-gate and lib.
-# Real git on throwaway repos (a bare origin plus a clone). HOME and TMPDIR
-# point at temp dirs; nothing touches the network.
+# Tests for bin/tkt-build: lane, gate and review jobs, with one findings file.
+# Stubs on a temp TKT_BIN: delegate (mints DONE/ASK records), gh (PR reads),
+# and review-pr (canned start/collect). Real tkt-job and tkt-gate run behind
+# logging wrappers; symlinks reach the real tkt-state, fill-brief, plan-gate
+# and lib. Real git on throwaway repos (a bare origin plus a clone). HOME and
+# TMPDIR point at temp dirs; nothing touches the network.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -68,7 +66,7 @@ ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
 export FW_NO_FENCE="test/tkt-build.sh exercises the build flow, not the fence"
 
 # Stub delegate: run mints a DONE record at once (lane carries one commit for
-# --expect-commits; map carries $T/map-text); ask modes mint NEEDS_CONTEXT.
+# --expect-commits); ask modes mint NEEDS_CONTEXT.
 # Watch only logs: every record already exists, so one watch covers all ids.
 printf '0' >"$T/dcounter"
 printf '0' >"$T/rcounter"
@@ -101,18 +99,13 @@ case "\$cmd" in
     printf 'run|id=%s|model=%s|prompt=%s\n' "\$id" "\$model" "\$prompt" >>"$T/calls.log"
     if [ -n "\$model_ruling" ]; then printf 'runmodelruling=%s\n' "\$model_ruling" >>"$T/calls.log"; fi
     slot="other"
-    case "\$prompt" in *-lane-*) slot="lane" ;; *-map-*) slot="map" ;; esac
+    case "\$prompt" in *-lane-*) slot="lane" ;; esac
     status="DONE"
     commits='["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]'
     concerns='null'
     uncommitted='[]'; dirty_after=false
-    if [ "\$slot" = "map" ]; then
-      text="\$(cat "$T/map-text")"
-      commits='[]'
-    else
-      text="lane done
+    text="lane done
 STATUS: DONE"
-    fi
     if [ "\$mode" = "stray-run" ] && [ "\$slot" = "lane" ]; then
       mkdir -p "\$cwd/run"
       printf 'scratch one\\n' >"\$cwd/run/fiber-77-one.log"
@@ -136,7 +129,7 @@ STATUS: DONE"
       text="PLAN OK
 held: every invariant survived its breaking input"
     fi
-    if { [ "\$mode" = "ask-lane" ] && [ "\$slot" = "lane" ]; } || { [ "\$mode" = "ask-map" ] && [ "\$slot" = "map" ]; }; then
+    if [ "\$mode" = "ask-lane" ] && [ "\$slot" = "lane" ]; then
       status="NEEDS_CONTEXT"
       text="\$(cat "$T/ask-text")"
       commits='[]'
@@ -159,11 +152,7 @@ EOF
 chmod +x "$T/bin/delegate"
 
 # Stub gh: the PR list and head from $T/prnum and $T/prhead (empty with
-# $T/empty-pr, failing pr view with $T/noview); one run holding the mutant job;
-# the job log from $T/mutant-log (failing with $T/log-fail, cause in
-# $T/log-err); jobs from $T/jobs-json when present (failing with
-# $T/jobs-fail, cause in $T/jobs-err); artifacts from $T/artifacts-json
-# (failing with $T/artifacts-fail, cause in $T/artifacts-err).
+# $T/empty-pr, failing pr view with $T/noview).
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
 current_pr_head() {
@@ -192,35 +181,6 @@ case " \$* " in
     ;;
   *" headRefOid "*)
     current_pr_head
-    ;;
-  *" run list "*)
-    if [ -f "$T/no-runs" ]; then printf '[]\n'; else printf '[{"databaseId":101}]\n'; fi
-    ;;
-  *"artifacts"*)
-    if [ -f "$T/artifacts-fail" ]; then
-      if [ -f "$T/artifacts-err" ]; then cat "$T/artifacts-err" >&2; fi
-      exit 1
-    fi
-    cat "$T/artifacts-json"
-    ;;
-  *" --job "*)
-    if [ -f "$T/log-fail" ]; then
-      if [ -f "$T/log-err" ]; then cat "$T/log-err" >&2; fi
-      exit 1
-    fi
-    cat "$T/mutant-log"
-    ;;
-  *" --json jobs "*)
-    if [ -f "$T/jobs-fail" ] && [ -f "$T/jobs-first-done" ]; then
-      if [ -f "$T/jobs-err" ]; then cat "$T/jobs-err" >&2; fi
-      exit 1
-    fi
-    if [ -f "$T/jobs-first-done" ] && [ -f "$T/jobs-json2" ]; then
-      cat "$T/jobs-json2"
-    else
-      if [ -f "$T/jobs-json" ]; then cat "$T/jobs-json"; else printf '{"jobs":[{"databaseId":201,"name":"%s"}]}\n' "\$(cat "$T/mutant-job")"; fi
-    fi
-    touch "$T/jobs-first-done"
     ;;
   *" api "*"/issues/comments/"*)
     if [ -f "$T/comment-fetch-fail" ]; then
@@ -252,32 +212,6 @@ esac
 EOF
 chmod +x "$T/bin/file-claim"
 export FW_FILE_CLAIM="$T/bin/file-claim" FILE_CLAIM_CALLS="$T/file-claim.log"
-
-# Stub gh-ci: wait only, logging its args. A `--run` wait exits the run-wait
-# code; every other wait exits the listing code. A $T/ghci-err file, when
-# present, goes to stderr (the first line is the wait's failure cause).
-cat >"$T/bin/gh-ci" <<EOF
-#!/usr/bin/env bash
-printf 'ghci|%s\n' "\$*" >>"$T/calls.log"
-rc="\$(cat "$T/ghci-rc")"
-case " \$* " in
-  *" --run "*) rc="\$(cat "$T/ghci-run-rc")" ;;
-esac
-if [ -f "$T/ghci-err" ]; then cat "$T/ghci-err" >&2; fi
-exit "\$rc"
-EOF
-chmod +x "$T/bin/gh-ci"
-
-# Stub mutant-verdicts: stdout from $T/verdicts, stderr from $T/verdicts-err,
-# exit from $T/verdicts-rc; logs its args.
-cat >"$T/bin/mutant-verdicts" <<EOF
-#!/usr/bin/env bash
-printf 'mverd|%s\n' "\$*" >>"$T/calls.log"
-cat "$T/verdicts"
-if [ -f "$T/verdicts-err" ]; then cat "$T/verdicts-err" >&2; fi
-exit "\$(cat "$T/verdicts-rc")"
-EOF
-chmod +x "$T/bin/mutant-verdicts"
 
 # Stub review-pr: start launches one id per requested axis (--axes, default all
 # three); tkt-build persists each id as it launches. collect copies $T/findings-src
@@ -342,7 +276,7 @@ EOF
 chmod +x "$T/bin/review-pr"
 
 # Briefs under the temp HOME, with the same tokens the real ones carry.
-mkdir -p "$T/home/.agents/skills/planning/briefs" "$T/home/.agents/skills/review-loop/briefs"
+mkdir -p "$T/home/.agents/skills/planning/briefs"
 cat >"$T/home/.agents/skills/planning/briefs/lane.md" <<'EOF'
 Implement issue #__ISSUE__ in __REPO__ in worktree `__WORKTREE__` on branch `__BRANCH__`, starting from __BASE__.
 
@@ -350,21 +284,15 @@ The project's workflow doc is __WORKFLOW_DOC__; it wins where it speaks.
 
 Read the plan at `__PLAN__` before anything else.
 
-Push the branch. The body starts with `__CLOSING__` and holds `__ATTRIBUTION__`.
-
-Implemented by: __LANE_MODEL__
+Push the branch. Ticket closure intent: `__CLOSING__`. Finish the job in the PR; the PR body is generated output.
 
 The gate passes: `__GATE__`.
 __EXTRA__
 EOF
-cat >"$T/home/.agents/skills/review-loop/briefs/mutant-map.md" <<'EOF'
-Map every mutant CI listed for PR #__PR__ (issue #__ISSUE__) in __REPO__, in worktree `__WORKTREE__`.
 
-__MUTANTS__
-EOF
 
 # Build the common local Git history once. Each case copies its own origin and
-# worktree so fetch/push and mutation checks still run against isolated repos.
+# worktree so fetch/push and gate checks still run against isolated repos.
 CASE_TEMPLATE="$T/case-template"
 mkdir -p "$CASE_TEMPLATE"
 git init -q --bare "$CASE_TEMPLATE/origin.git"
@@ -410,7 +338,6 @@ setup_case() {
   printf '%s' "$H" >"$T/prhead"
   printf '7' >"$T/prnum"
   rm -f "$T/pr-origin"
-  printf 'Selection' >"$T/mutant-job"
   cat >"$CDIR/plan.md" <<EOF
 Base: $H
 
@@ -435,7 +362,6 @@ EOF
     printf 'model.lane=%s\n' codex/test-model
     printf 'model.review=%s\n' codex/default-review-model
     printf 'model.overbuild=%s\n' cursor/default-overbuild-model
-    printf 'model.map=%s\n' mm
     printf 'extra=%s\n' "$CDIR/extra.md"
     printf 'body_has=%s\n' 'Resolves #528' 'Co-authored with Test <t@t>'
     printf 'plan_verdict=%s\n' ok
@@ -445,14 +371,9 @@ EOF
   printf 'done' >"$T/delegate-mode"
   printf 'ok' >"$T/review-mode"
   printf '0' >"$T/collect-rc"
-  printf '0' >"$T/ghci-rc"
-  printf '0' >"$T/ghci-run-rc"
-  printf '0' >"$T/verdicts-rc"
-  printf 'src/c.rs:5:6: MISSED\tcaught\n' >"$T/verdicts"
-  printf '{"artifacts":[]}\n' >"$T/artifacts-json"
-  rm -f "$T/empty-pr" "$T/pr-list-fail" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err" "$T/collect-nowrite" "$T/comment.json" "$T/comment-fetch-fail"
   printf '0' >"$T/dcounter"
   printf '0' >"$T/rcounter"
+  rm -f "$T/comment-fetch-fail" "$T/empty-pr" "$T/pr-list-fail" "$T/noview" "$T/collect-nowrite"
   : >"$T/calls.log"
   : >"$T/file-claim.log"
   cat >"$T/collect-out" <<'EOF'
@@ -463,20 +384,6 @@ VERDICT overbuild: APPROVE
 CI deadbeef pass
 EOF
   printf 'no open findings\n' >"$T/findings-src"
-  cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-src/b.rs:3:4: TIMEOUT => removed: helper gone at head
-src/c.rs:5:6: MISSED => caught by test/foo::bar
-src/d.rs:7:8: MISSED => unviable
-src/e.rs:1:1: MISSED => exempted: covered elsewhere
-EOF
-  cat >"$T/mutant-log" <<'EOF'
-waiting for logs
-src/a.rs:10:20: MISSED
-noise without a location
-mutants in the diff: 2
-src/b.rs:3:4: TIMEOUT
-EOF
   printf 'which scope rules the retry?\n' >"$T/ask-text"
 }
 
@@ -610,7 +517,7 @@ expect_verdict "TKT tkt-build ROUND-LIMIT round=1 log=*" "round-set-no-ruling-hi
 grep -Fq "tkt-build $S --from review --ruling <comment id>" <<<"$OUT" || fail "round-set-no-ruling-hint names the ruled full re-review command"
 ! grep -q '^review-start|' "$T/calls.log" || fail "round-set-no-ruling-hint dispatches no review"
 
-# --- happy path: no mutants, every axis APPROVE ---
+# --- happy path: every review axis APPROVE ---
 setup_case happy
 run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
 [ "$RC" -eq 0 ] || fail "happy exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
@@ -621,14 +528,14 @@ grep -q '^concerns=' <<<"$OUT" && fail "happy: no empty concerns digest line"
 grep -q "BASE=$H" "$T/calls.log" || fail "happy: BASE reaches the lane"
 grep -q "GATE=true" "$T/calls.log" || fail "happy: GATE reaches the lane"
 grep -q "CLOSING=Resolves #528" "$T/calls.log" || fail "happy: CLOSING reaches the lane"
-grep -q "ATTRIBUTION=Co-authored with Test" "$T/calls.log" || fail "happy: ATTRIBUTION reaches the lane"
+! grep -q "ATTRIBUTION=" "$T/calls.log" || fail "happy: no body attribution reaches the lane"
 grep -q "^run|id=stub-1|model=codex/test-model|prompt=.*-lane-1.md$" "$T/calls.log" || fail "happy: --lane-model wins"
 grep -q '^quota: provider=codex status=healthy$' <<<"$OUT" || fail "happy: quota pick is reported"
 grep -q '^job|.*--gate-from-plan' "$T/calls.log" || fail "happy: lane tkt-job builds its gate from the plan (stray run handling)"
 brief="$(grep '^run|' "$T/calls.log" | sed 's/.*prompt=//')"
 grep -q "$H" "$brief" || fail "happy: the filled brief holds the base"
 grep -q "Resolves #528" "$brief" || fail "happy: the filled brief holds CLOSING"
-grep -q "Co-authored with Test" "$brief" || fail "happy: the filled brief holds ATTRIBUTION"
+! grep -q "Co-authored with Test" "$brief" || fail "happy: the filled brief has no body attribution requirement"
 grep -q "^gate|.*--expect-head $H$" "$T/calls.log" || fail "happy: the gate checks the lane head"
 grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issue 528 --model codex/test-review-model --overbuild-model composer-2.5 --axes standards --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: standards starts with state and flag values"
 grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issue 528 --model codex/test-review-model --overbuild-model composer-2.5 --axes spec --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: spec starts per axis"
@@ -637,9 +544,6 @@ grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issu
 rvh="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$(printf '%s' "$rvh" | wc -w | tr -d ' ')" -eq 3 ] || fail "happy: three review ids persisted"
 grep -q "^watch|r1 r2 r3$" "$T/calls.log" || fail "happy: one delegate watch covers the review ids"
 [ "$(grep -c '^watch|' "$T/calls.log")" -eq 2 ] || fail "happy: the lane watch plus one build watch"
-grep -q "^ghci|" "$T/calls.log" && fail "happy: no mutant wait without mutant_job"
-grep -q "prompt=.*-map-" "$T/calls.log" && fail "happy: no map job without mutants"
-[ -e "$CDIR/run/switchyard-528-mutants-${H:0:12}.txt" ] && fail "happy: no mutants file without mutant_job"
 expect_state reviewed "$H" happy
 expect_state review_status done happy
 [ -n "$(bash "$TKT_STATE" "$S" get verdict_at 2>/dev/null || true)" ] || fail "happy: review collection records verdict_at"
@@ -650,6 +554,13 @@ expect_state round 0 happy
 grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is journaled"
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
+
+# --- a legacy mutant_job state key dispatches no mapping job ---
+setup_case no-mutation-analysis
+printf 'mutant_job=%s\n' Selection >>"$S"
+run_build
+! grep -q '^gh|run list ' "$T/calls.log" || fail "no-mutation-analysis: does not list mutation runs"
+! grep -q 'prompt=.*-map-' "$T/calls.log" || fail "no-mutation-analysis: no mapping job dispatches"
 
 # --- collect keeps one trailing period on a verdict (review-pr's contract) ---
 setup_case verdict-period
@@ -674,7 +585,7 @@ CI deadbeef pass
 EOF
 run_build
 grep -q "REVIEW-INCOMPLETE" <<<"$OUT" && fail "verdict-period-changes: a CHANGES. verdict is not missing: $OUT"
-expect_verdict "TKT tkt-build CHANGES p1=* p2=* p3=* mutants=* findings=* log=*" "verdict-period-changes"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "verdict-period-changes"
 
 # --- a lane's untracked root run/ is moved before delegate records its change set ---
 setup_case stray-run-moved
@@ -714,7 +625,7 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "lane-claim
 grep -F -q "claim --lane fiber-528 --diff $WT" "$T/file-claim.log" || fail "lane-claim-failure: hunk claim helper is invoked"
 grep -q 'WARN tkt: could not record pushed hunk claims for #528' "$CDIR/stderr.txt" || fail "lane-claim-failure: claim failure warns without failing the push"
 
-# --- the real lane brief fills and carries the second-patch stop rule (#982) ---
+# The real lane brief still carries the second-patch stop rule and no body instructions.
 setup_case real-lane-brief
 cp "$T/home/.agents/skills/planning/briefs/lane.md" "$T/lane-stub.md" || fail "real-lane-brief: keep the stub lane brief"
 cp "$SCRIPT_DIR/../skills/planning/briefs/lane.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: install the real lane brief"
@@ -725,80 +636,26 @@ cp "$T/lane-stub.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "r
 grep -q 'second patch' "$brief" || fail "real-lane-brief: the filled brief carries the second-patch stop rule"
 grep -q 'STATUS: BLOCKED' "$brief" || fail "real-lane-brief: the filled brief names the BLOCKED stop"
 
-# --- body_ends wins over body_has for the lane ATTRIBUTION ---
-setup_case attr-ends
-bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-ends: set body_has"
-bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "attr-ends: set body_ends"
+# --- body state no longer supplies a lane attribution instruction ---
+for attr_case in attr-ends attr-body attr-both attr-empty; do
+  setup_case "$attr_case"
+  case "$attr_case" in
+    attr-ends) bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "$attr_case: set body_has"; bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "$attr_case: set body_ends" ;;
+    attr-body) bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "$attr_case: set body_has" ;;
+    attr-both) bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "$attr_case: set body_has"; bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "$attr_case: set body_ends" ;;
+    attr-empty) bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "$attr_case: set body_has" ;;
+  esac
+  run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
+  [ "$RC" -eq 0 ] || fail "$attr_case exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  ! grep -q 'ATTRIBUTION=' "$T/calls.log" || fail "$attr_case: body state does not reach lane instructions"
+done
+
+# --- with no body requirements, the lane instruction has no attribution slot ---
+setup_case attr-empty-slot
+bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-empty-slot: seed legacy body_has"
 run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
-[ "$RC" -eq 0 ] || fail "attr-ends exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q "ATTRIBUTION=Co-authored with Ends" "$T/calls.log" || fail "attr-ends: ATTRIBUTION reaches the lane"
-
-# --- with no body_ends, a body_has co-author reaches the lane ---
-setup_case attr-body
-bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "attr-body: set body_has"
-run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
-[ "$RC" -eq 0 ] || fail "attr-body exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q "ATTRIBUTION=Co-authored with Body" "$T/calls.log" || fail "attr-body: ATTRIBUTION reaches the lane"
-
-# --- when both keys are set, body_ends wins ---
-setup_case attr-both
-bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "attr-both: set body_has"
-bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "attr-both: set body_ends"
-run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
-[ "$RC" -eq 0 ] || fail "attr-both exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q "ATTRIBUTION=Co-authored with Ends" "$T/calls.log" || fail "attr-both: ATTRIBUTION reaches the lane"
-
-# --- with neither key, the ATTRIBUTION slot stays empty ---
-setup_case attr-empty
-bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-empty: set body_has"
-run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
-[ "$RC" -eq 0 ] || fail "attr-empty exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q "ATTRIBUTION= LANE_MODEL=" "$T/calls.log" || fail "attr-empty: ATTRIBUTION stays empty"
-
-# --- mutants present: the map runs beside review, needs-test and removed merge ---
-setup_case mutants
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf 'P1 open null check\nP3 docs note\n' >"$T/findings-src"
-run_build
-[ "$RC" -eq 1 ] || fail "mutants exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=1 p2=2 p3=1 mutants=2 findings=* log=*" "mutants"
-run_build
-[ "$RC" -eq 1 ] || fail "mutants rerun exits 1 (rc=$RC)"
-expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "mutants rerun"
-[ "$(grep -c '^run|id=stub-2' "$T/calls.log")" -eq 1 ] || fail "mutants rerun: no second map job"
-grep -Fxq "ghci|wait 7 --job Selection --timeout 600 --repo switchyard" "$T/calls.log" || fail "mutants: gh-ci waits on the mutant job with the 600 s bound"
-mfile="$CDIR/run/switchyard-528-mutants-${H:0:12}.txt"
-[ "$(grep -c . "$mfile")" -eq 3 ] || fail "mutants: three log lines match"
-grep -q "^run|id=stub-1|model=codex/test-model|" "$T/calls.log" || fail "mutants: the lane defaults to model.lane"
-grep -q "^run|id=stub-2|model=mm|prompt=.*-map-1.md$" "$T/calls.log" || fail "mutants: the map job dispatches once"
-grep -q "^review-start|.*--model codex/default-review-model --overbuild-model cursor/default-overbuild-model" "$T/calls.log" || fail "mutants: review defaults to state models"
-grep -q "^watch|r1 r2 r3 stub-2$" "$T/calls.log" || fail "mutants: one watch covers review and map ids"
-mapbrief="$(grep '^run|id=stub-2' "$T/calls.log" | sed 's/.*prompt=//')"
-grep -q "src/a.rs:10:20" "$mapbrief" || fail "mutants: MUTANTS reaches the map brief"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -qx "P1 open null check" "$ffile" || fail "mutants: review findings stay first"
-grep -qx "P3 docs note" "$ffile" || fail "mutants: P3 findings stay listed"
-grep -qx "P2 src/a.rs:10:20: MISSED => needs-test: bounds check unpinned \\[mutants $mfile\\]" "$ffile" || fail "mutants: the needs-test line merges"
-grep -qx "P2 src/b.rs:3:4: TIMEOUT => removed: helper gone at head \\[mutants $mfile\\]" "$ffile" || fail "mutants: the removed line merges"
-grep -q "caught by" "$ffile" && fail "mutants: caught lines stay out"
-grep -q "unviable" "$ffile" && fail "mutants: unviable lines stay out"
-grep -q "exempted" "$ffile" && fail "mutants: exempted lines stay out"
-expect_state reviewed "$H" mutants
-expect_state round 0 mutants
-
-# --- the mutant map reads through the lookup: an override record merges ---
-setup_case mutants-override
-rm -rf "$T/tmp/delegate-jobs" "$T/override"
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf 'P1 open null check\nP3 docs note\n' >"$T/findings-src"
-DELEGATE_JOBS_DIR="$T/override" run_build
-[ "$RC" -eq 1 ] || fail "mutants-override exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=* p2=* p3=* mutants=* findings=* log=*" "mutants-override"
-grep -q "map failed" <<<"$OUT" && fail "mutants-override: no map failed note"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -q "needs-test: bounds check unpinned" "$ffile" || fail "mutants-override: the override map record merges"
-grep -q "removed: helper gone at head" "$ffile" || fail "mutants-override: the removed line merges"
-[ -e "$T/tmp/delegate-jobs/stub-2.json" ] && fail "mutants-override: the map record stays out of the tmp dir"
+[ "$RC" -eq 0 ] || fail "attr-empty-slot exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+! grep -q 'ATTRIBUTION=' "$T/calls.log" || fail "attr-empty-slot: no attribution slot"
 
 # --- a CHANGES axis with clean findings still reports CHANGES ---
 setup_case changes-clean
@@ -812,7 +669,7 @@ CI deadbeef pass
 EOF
 run_build
 [ "$RC" -eq 1 ] || fail "changes-clean exits 1 (rc=$RC)"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "changes-clean"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 findings=* log=*" "changes-clean"
 
 # --- an unfinished collect stops the build with its rerun line ---
 setup_case incomplete
@@ -890,7 +747,7 @@ i=1
 while [ "$i" -le 60 ]; do printf 'P1 finding %s\n' "$i" >>"$T/findings-src"; i=$((i + 1)); done
 run_build
 [ "$RC" -eq 1 ] || fail "concerns-changes exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=* p2=* p3=* mutants=* findings=* log=*" "concerns-changes"
+expect_verdict "TKT tkt-build CHANGES p1=* p2=* p3=* findings=* log=*" "concerns-changes"
 concerns_file="$CDIR/run/switchyard-528-concerns-lane.md"
 [ "$(sed -n '2p' <<<"$OUT")" = "concerns=$concerns_file" ] || fail "concerns-changes: digest starts with the concerns path"
 grep -qx "concerns=$concerns_file" <<<"$OUT" || fail "concerns-changes: digest keeps concerns ahead of truncated findings"
@@ -928,7 +785,7 @@ grep -q "model.lane" <<<"$OUT" || fail "lane-error: the digest names the key"
 grep -q "model.lane" "$CDIR/stderr.txt" || fail "lane-error: stderr names the key"
 grep -q -- "-lane-" "$T/calls.log" && fail "lane-error: the lane never dispatches"
 
-# --- the lane brief carries the state lane model, never unknown ---
+# --- the lane uses its configured model without a PR-body attribution line ---
 setup_case lane-model
 run_build
 [ "$RC" -eq 0 ] || fail "lane-model exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
@@ -936,9 +793,7 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "lane-model
 grep -q "^run|id=stub-1|model=codex/test-model|" "$T/calls.log" || fail "lane-model: the lane runs on model.lane"
 brief="$(grep '^run|' "$T/calls.log" | sed 's/.*prompt=//')"
 case "$brief" in "$CDIR/run/"*) ;; *) fail "lane-model: the brief is written under \$CDIR/run";; esac
-impl="$(grep '^Implemented by:' "$brief")"
-[ "$impl" = "Implemented by: codex/test-model" ] || fail "lane-model: the brief holds [$impl]"
-case "$impl" in *unknown*) fail "lane-model: the Implemented by line never holds unknown";; esac
+! grep -q '^Implemented by:' "$brief" || fail "lane-model: no PR-body attribution requirement in the brief"
 
 # --- mapped provider refusals name their provider and stop before dispatch ---
 quota_refusal_case() {
@@ -1654,85 +1509,6 @@ case "$(head -n 1 <<<"$REPLAN_OUT")" in
   *) fail "replan-reviewed: replan verdict lists the cleared review markers: $(head -n 1 <<<"$REPLAN_OUT")" ;;
 esac
 
-# --- an incomplete map never approves, but stays in the digest ---
-setup_case mapfail
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf 'ask-map' >"$T/delegate-mode"
-printf 'which mutant matters?\n' >"$T/ask-text"
-run_build
-[ "$RC" -eq 1 ] || fail "mapfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "mapfail"
-grep -q "map failed" <<<"$OUT" || fail "mapfail: the digest notes the map stop"
-
-# --- a map-only tooling note leaves the build state re-runnable ---
-setup_case map-note-only
-printf 'mutant_job=%s\n' Selection >>"$S"
-grep -v '^model\.map=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
-run_build
-[ "$RC" -eq 1 ] || fail "map-note-only exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "map-note-only"
-grep -q "map failed: missing model.map" <<<"$OUT" || fail "map-note-only: the digest notes the map stop"
-for key in reviewed findings round; do
-  if bash "$TKT_STATE" "$S" get "$key" >/dev/null 2>&1; then
-    fail "map-note-only: state $key should remain unset"
-  fi
-done
-bash "$TKT_STATE" "$S" set model.map mm || fail "map-note-only: restore map model"
-run_build
-[ "$RC" -eq 1 ] || fail "map-note-only retry exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=0 mutants=2 findings=* log=*" "map-note-only retry"
-expect_state reviewed "$H" "map-note-only retry"
-expect_state round 0 "map-note-only retry with findings"
-
-# --- a mutant job with no such job name lists no mutants and skips the map ---
-setup_case mutants-nojob
-printf 'mutant_job=%s\n' Other >>"$S"
-run_build
-[ "$RC" -eq 0 ] || fail "mutants-nojob exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "mutants-nojob"
-grep -q "prompt=.*-map-" "$T/calls.log" && fail "mutants-nojob: no map job dispatches"
-[ -e "$CDIR/run/switchyard-528-mutants-${H:0:12}.txt" ] || fail "mutants-nojob: the empty mutants file exists"
-[ -s "$CDIR/run/switchyard-528-mutants-${H:0:12}.txt" ] && fail "mutants-nojob: the mutants file is empty"
-
-# --- P1: transport-prefixed mutant log lines still list mutants ---
-setup_case prefixed-log
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-Selection Build 2026-10-17T00:00:00Z src/a.rs:10:20: MISSED
-Selection Build 2026-10-17T00:00:00Z noise without a location
-Selection Build 2026-10-17T00:00:00Z mutants in the diff: 2
-Selection Build 2026-10-17T00:00:00Z src/b.rs:3:4: TIMEOUT
-EOF
-run_build
-[ "$RC" -eq 1 ] || fail "prefixed-log exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=0 mutants=2 findings=* log=*" "prefixed-log"
-mfile="$CDIR/run/switchyard-528-mutants-${H:0:12}.txt"
-[ "$(grep -c . "$mfile")" -eq 3 ] || fail "prefixed-log: three stripped lines match"
-grep -q "^src/a.rs:10:20:" "$mfile" || fail "prefixed-log: prefixes stripped"
-
-# --- summary and echoed script lines are not mutants (fiber #4683) ---
-setup_case summary-only-log
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-Selection Build 2026-10-17T00:00:00Z   echo "mutants in the diff: $listed (not run: no Rust changes)"
-Selection Build 2026-10-17T00:00:00Z   echo "mutants in the diff: $count"
-Selection Build 2026-10-17T00:00:00Z mutants in the diff: 0
-EOF
-run_build
-[ "$RC" -eq 0 ] || fail "summary-only-log exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build APPROVE*" "summary-only-log"
-grep -q "prompt=.*-map-" "$T/calls.log" && fail "summary-only-log: no map job for zero mutants"
-
-# --- an incomplete map does not APPROVE ---
-setup_case map-incomplete
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf 'ask-map' >"$T/delegate-mode"
-printf 'which mutant matters?\n' >"$T/ask-text"
-run_build
-[ "$RC" -eq 1 ] || fail "map-incomplete exits 1 (rc=$RC)"
-case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-incomplete: incomplete map must not APPROVE";; esac
-grep -q "map failed" <<<"$OUT" || fail "map-incomplete: the digest notes the map stop"
-
 # --- a rerun reuses the persisted review ids ---
 setup_case review-reuse
 run_build
@@ -1743,87 +1519,6 @@ expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "review-reuse second"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "review-reuse: three axis starts across both runs"
 rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ -n "$rv" ] || fail "review-reuse: review_ids persisted"
 [ "$(bash "$TKT_STATE" "$S" get review_head)" = "$H" ] || fail "review-reuse: review_head is the head"
-
-# --- a missing mutant verdict fails the map ---
-setup_case map-missing
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 2
-src/b.rs:3:4: TIMEOUT
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-EOF
-run_build
-[ "$RC" -eq 1 ] || fail "map-missing exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-missing: missing verdict must not APPROVE";; esac
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "map-missing"
-grep -q "map failed: no verdict for src/b.rs:3:4: TIMEOUT" <<<"$OUT" || fail "map-missing: the digest names the missing mutant"
-
-# --- a short location never covers its longer prefix sibling ---
-setup_case map-prefix
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-foo.rs:1:1: MISSED
-mutants in the diff: 2
-foo.rs:1:12: MISSED
-EOF
-cat >"$T/map-text" <<'EOF'
-foo.rs:1:12: MISSED => needs-test: long line only
-EOF
-run_build
-[ "$RC" -eq 1 ] || fail "map-prefix exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-prefix: prefix cover must not APPROVE";; esac
-grep -q "map failed: no verdict for foo.rs:1:1: MISSED" <<<"$OUT" || fail "map-prefix: the short mutant stays uncovered"
-
-# --- needs-test without the colon fails the map ---
-setup_case map-nocolon
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test bounds missing
-EOF
-run_build
-[ "$RC" -eq 1 ] || fail "map-nocolon exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-nocolon: colonless verdict must not APPROVE";; esac
-grep -q "map failed: bad verdict for src/a.rs:10:20: MISSED" <<<"$OUT" || fail "map-nocolon: the digest names the off-grammar mutant"
-
-# --- a duplicate verdict fails the map ---
-setup_case map-duplicate
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: first claim
-src/a.rs:10:20: MISSED => removed: second claim
-EOF
-run_build
-[ "$RC" -eq 1 ] || fail "map-duplicate exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-duplicate: duplicate verdict must not APPROVE";; esac
-grep -q "map failed: duplicate verdict for src/a.rs:10:20: MISSED" <<<"$OUT" || fail "map-duplicate: the digest names the duplicated mutant"
-
-# --- a valid needs-test line merges exactly one P2 finding ---
-setup_case map-valid-oneneeds
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-EOF
-run_build
-[ "$RC" -eq 1 ] || fail "map-valid-oneneeds exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=0 mutants=1 findings=* log=*" "map-valid-oneneeds"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-[ "$(grep -c '^P2 ' "$ffile")" -eq 1 ] || fail "map-valid-oneneeds: exactly one P2 finding"
-grep -qx "P2 src/a.rs:10:20: MISSED => needs-test: bounds check unpinned \\[mutants $CDIR/run/switchyard-528-mutants-${H:0:12}.txt\\]" "$ffile" || fail "map-valid-oneneeds: the P2 line merges"
 
 # --- a dispatch that dies after one review launch reuses that id on rerun ---
 setup_case review-partial
@@ -1900,15 +1595,6 @@ expect_verdict "TKT tkt-build DRIFT state=$H worktree=$H pr=aaa* log=*" "moved-h
 expect_state head "$H" moved-head
 grep -q "^run|" "$T/calls.log" && fail "moved-head: the lane never dispatches"
 
-# --- one delegate watch covers review and map ids ---
-setup_case single-watch
-printf 'mutant_job=%s\n' Selection >>"$S"
-run_build
-[ "$RC" -eq 1 ] || fail "single-watch exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q "^watch|r1 r2 r3 stub-2$" "$T/calls.log" || fail "single-watch: one watch covers all ids"
-[ "$(grep -c '^watch|' "$T/calls.log")" -eq 2 ] || fail "single-watch: lane plus one build watch"
-grep -q "^watch|stub-2$" "$T/calls.log" && fail "single-watch: no solo map watch"
-
 # --- --help and -h print usage and exit 0, running nothing ---
 out="$(bash "$BUILD" --help 2>"$T/help-err.txt")"; [ "$?" -eq 0 ] || fail "--help exits 0"
 [ ! -s "$T/help-err.txt" ] || fail "--help prints nothing on stderr"
@@ -1927,369 +1613,6 @@ for ax in standards spec overbuild; do
   grep -q -- "--axes $ax --full-rereview tkt-build round-0 full review" "$T/calls.log" || fail "full-rereview-flag: $ax starts with the override"
 done
 [ "$(grep -c -- '--full-rereview tkt-build round-0 full review' "$T/calls.log")" -eq 3 ] || fail "full-rereview-flag: one override per axis"
-
-# --- shard survivors merge into the round-0 findings: mapped survivors stay
-# single, a survivor the map called caught gains a CI P2, rows outside the
-# diff and non-surviving rows stay out ---
-setup_case shards-survivors
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 4
-src/b.rs:3:4: TIMEOUT
-src/c.rs:5:6: MISSED
-src/d.rs:7:8: MISSED
-EOF
-printf 'src/a.rs:10:20: MISSED\tmissed\nsrc/b.rs:3:4: TIMEOUT\ttimeout\nsrc/c.rs:5:6: MISSED\tmissed\nsrc/z.rs:9:9: X\tmissed\nsrc/e.rs:1:1: MISSED\tcaught\nsrc/d.rs:7:8: MISSED\tunviable\n' >"$T/verdicts"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-survivors exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=3 p3=0 mutants=3 findings=* log=*" "shards-survivors"
-grep -Fxq "ghci|wait 7 --job Selection --timeout 600 --repo switchyard" "$T/calls.log" || fail "shards-survivors: the listing wait carries --timeout 600"
-grep -Fxq "ghci|wait --run 101 --pr 7 --timeout 2400 --repo switchyard" "$T/calls.log" || fail "shards-survivors: the shard wait names the run, the pr and 2400"
-grep -Fxq "mverd|101 --repo switchyard" "$T/calls.log" || fail "shards-survivors: the verdicts read the waited run"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-[ "$(grep -cF 'P2 src/a.rs:10:20: MISSED => ' "$ffile")" -eq 1 ] || fail "shards-survivors: the mapped missed survivor is not duplicated"
-[ "$(grep -cF 'P2 src/b.rs:3:4: TIMEOUT => ' "$ffile")" -eq 1 ] || fail "shards-survivors: the mapped timeout survivor is not duplicated"
-grep -Fxq "P2 src/c.rs:5:6: MISSED => survived in CI (missed) [mutants-ci run 101 head ${H:0:12}]" "$ffile" || fail "shards-survivors: the survivor the map called caught becomes a CI P2"
-grep -q "z.rs" "$ffile" && fail "shards-survivors: a survivor outside the diff stays out"
-grep -Fq "src/e.rs" "$ffile" && fail "shards-survivors: a caught row stays out"
-grep -Fq "src/d.rs" "$ffile" && fail "shards-survivors: an unviable row stays out"
-grep -q "mutant shards unread" "$ffile" && fail "shards-survivors: a clean read reports no unread shards"
-
-# --- a survivor the map exempted stays out of the findings ---
-setup_case shards-exempted
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => exempted: covered elsewhere
-EOF
-printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
-run_build
-[ "$RC" -eq 0 ] || fail "shards-exempted exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "shards-exempted"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fq "src/a.rs" "$ffile" && fail "shards-exempted: an exempted survivor stays out"
-grep -q "mutant shards unread" "$ffile" && fail "shards-exempted: a clean read reports no unread shards"
-
-# --- when the map failed, every in-diff survivor becomes a CI P2 ---
-setup_case shards-mapfailed
-printf 'mutant_job=%s\n' Selection >>"$S"
-grep -v '^model\.map=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
-printf 'src/a.rs:10:20: MISSED\tmissed\nsrc/b.rs:3:4: TIMEOUT\ttimeout\n' >"$T/verdicts"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-mapfailed exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=0 mutants=2 findings=* log=*" "shards-mapfailed"
-grep -q "map failed" <<<"$OUT" || fail "shards-mapfailed: the digest notes the map stop"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P2 src/a.rs:10:20: MISSED => survived in CI (missed) [mutants-ci run 101 head ${H:0:12}]" "$ffile" || fail "shards-mapfailed: the missed survivor becomes a P2 without the map"
-grep -Fxq "P2 src/b.rs:3:4: TIMEOUT => survived in CI (timeout) [mutants-ci run 101 head ${H:0:12}]" "$ffile" || fail "shards-mapfailed: the timeout survivor becomes a P2 without the map"
-
-# --- a run-wait timeout reports the shards unread and reads no verdicts ---
-setup_case shards-unread-timeout
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf '124' >"$T/ghci-run-rc"
-printf 'P1 open null check\nP3 docs note\n' >"$T/findings-src"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-unread-timeout exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=1 p2=2 p3=2 mutants=2 findings=* log=*" "shards-unread-timeout"
-grep -q '^mverd|' "$T/calls.log" && fail "shards-unread-timeout: verdicts never read after a timeout"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -q "survived in CI" "$ffile" && fail "shards-unread-timeout: no survivor P2 without verdicts"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: timeout after 2400s" "$ffile" || fail "shards-unread-timeout: the timeout is reported unread"
-grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-timeout: the digest carries the unread note"
-
-# --- a failed run-wait reports its first stderr line as the cause ---
-setup_case shards-unread-waitfail
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf '2' >"$T/ghci-run-rc"
-printf 'gh-ci: cannot watch runs here\nsecond line stays out\n' >"$T/ghci-err"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-unread-waitfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=1 mutants=2 findings=* log=*" "shards-unread-waitfail"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh-ci: cannot watch runs here" "$ffile" || fail "shards-unread-waitfail: the wait's cause is reported unread"
-grep -q "second line stays out" "$ffile" && fail "shards-unread-waitfail: only the first stderr line is kept"
-
-# --- a failed run-wait with silent stderr still names its exit ---
-setup_case shards-unread-waitsilent
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf '2' >"$T/ghci-run-rc"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-unread-waitsilent exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=1 mutants=2 findings=* log=*" "shards-unread-waitsilent"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh-ci wait --run failed with exit 2" "$ffile" || fail "shards-unread-waitsilent: the wait's exit is reported unread"
-
-# --- failed verdicts report their first stderr line as the cause ---
-setup_case shards-unread-verdicts
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf '1' >"$T/verdicts-rc"
-printf 'mutant-verdicts: run 101 is in_progress, not completed\nsecond line stays out\n' >"$T/verdicts-err"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-unread-verdicts exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=1 mutants=2 findings=* log=*" "shards-unread-verdicts"
-grep -Fxq "mverd|101 --repo switchyard" "$T/calls.log" || fail "shards-unread-verdicts: the verdicts are read before reporting unread"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: mutant-verdicts: run 101 is in_progress, not completed" "$ffile" || fail "shards-unread-verdicts: the verdicts cause is reported unread"
-grep -q "second line stays out" "$ffile" && fail "shards-unread-verdicts: only the first stderr line is kept"
-
-# --- failed verdicts with silent stderr still name the run ---
-setup_case shards-unread-verdictssilent
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf '1' >"$T/verdicts-rc"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-unread-verdictssilent exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=1 mutants=2 findings=* log=*" "shards-unread-verdictssilent"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: mutant-verdicts failed for run 101" "$ffile" || fail "shards-unread-verdictssilent: the verdicts failure is reported unread"
-
-# --- no run holding the mutant job reports the shards unread ---
-setup_case shards-unread-norun
-printf 'mutant_job=%s\n' Selection >>"$S"
-touch "$T/no-runs"
-run_build
-[ "$RC" -eq 0 ] || fail "shards-unread-norun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "shards-unread-norun"
-grep -q -- '--run' "$T/calls.log" && fail "shards-unread-norun: nothing waited on without a run"
-grep -q '^mverd|' "$T/calls.log" && fail "shards-unread-norun: verdicts never read without a run"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run none head ${H:0:12}: no run with Selection on head" "$ffile" || fail "shards-unread-norun: the missing run is reported unread"
-grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-norun: the digest carries the unread note"
-
-# --- without mutant_job, no run waits and no verdicts read ---
-setup_case shards-nojob
-run_build
-[ "$RC" -eq 0 ] || fail "shards-nojob exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q -- '--run' "$T/calls.log" && fail "shards-nojob: no run wait without mutant_job"
-grep -q '^mverd|' "$T/calls.log" && fail "shards-nojob: no verdicts read without mutant_job"
-
-# --- with an empty diff list, no run waits and no verdicts read ---
-setup_case shards-emptydiff
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-log noise without any mutant location
-more noise
-EOF
-run_build
-[ "$RC" -eq 0 ] || fail "shards-emptydiff exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "shards-emptydiff"
-grep -q -- '--run' "$T/calls.log" && fail "shards-emptydiff: no run wait for an empty diff list"
-grep -q '^mverd|' "$T/calls.log" && fail "shards-emptydiff: no verdicts read for an empty diff list"
-grep -q "prompt=.*-map-" "$T/calls.log" && fail "shards-emptydiff: no map job without mutants"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -q "mutant shards unread" "$ffile" && fail "shards-emptydiff: an empty diff list stays silent"
-
-# --- a rerun reads no shard verdicts twice ---
-setup_case shards-rerun
-printf 'mutant_job=%s\n' Selection >>"$S"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-rerun first exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-rerun second exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "shards-rerun second"
-[ "$(grep -c -- '--run' "$T/calls.log")" -eq 1 ] || fail "shards-rerun: one run wait across both runs"
-[ "$(grep -c '^mverd|' "$T/calls.log")" -eq 1 ] || fail "shards-rerun: one verdicts read across both runs"
-
-# --- a listing wait failure reports unread with its cause and reads no verdicts ---
-setup_case listing-unread
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf '2' >"$T/ghci-rc"
-printf 'gh-ci: listing blew up\nsecond line stays out\n' >"$T/ghci-err"
-run_build
-[ "$RC" -eq 1 ] || fail "listing-unread exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=1 mutants=2 findings=* log=*" "listing-unread"
-grep -q '^mverd|' "$T/calls.log" && fail "listing-unread: verdicts never read when the list is unread"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh-ci: listing blew up" "$ffile" || fail "listing-unread: the listing cause is reported unread"
-grep -q "second line stays out" "$ffile" && fail "listing-unread: only the first stderr line is kept"
-grep -q "mutant shards unread" <<<"$OUT" || fail "listing-unread: the digest carries the unread note"
-
-# --- a failed log read reports unread even when the count is zero ---
-setup_case logread-unread
-printf 'mutant_job=%s\n' Selection >>"$S"
-touch "$T/log-fail"
-printf 'cannot fetch job log\nsecond line stays out\n' >"$T/log-err"
-printf 'no open findings\n' >"$T/findings-src"
-run_build
-[ "$RC" -eq 0 ] || fail "logread-unread exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "logread-unread"
-grep -q '^mverd|' "$T/calls.log" && fail "logread-unread: verdicts never read when the log read fails"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: cannot fetch job log" "$ffile" || fail "logread-unread: the log cause is reported unread"
-grep -q "second line stays out" "$ffile" && fail "logread-unread: only the first stderr line is kept"
-grep -q "mutant shards unread" <<<"$OUT" || fail "logread-unread: the digest carries the unread note"
-
-# --- CR and ANSI bytes in the log are stripped before the map reads them ---
-setup_case cr-ansi
-printf 'mutant_job=%s\n' Selection >>"$S"
-printf 'src/a.rs:10:20: MISSED\r\n\x1b[31msrc/b.rs:3:4: TIMEOUT\x1b[0m\nmutants in the diff: 2\n' >"$T/mutant-log"
-run_build
-[ "$RC" -eq 1 ] || fail "cr-ansi exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=0 mutants=2 findings=* log=*" "cr-ansi"
-mfile="$CDIR/run/switchyard-528-mutants-${H:0:12}.txt"
-grep -q "$(printf '\r')" "$mfile" && fail "cr-ansi: the mutants file holds no CR"
-grep -q "$(printf '\033')" "$mfile" && fail "cr-ansi: the mutants file holds no ANSI"
-grep -q "map failed" <<<"$OUT" && fail "cr-ansi: stripped lines map cleanly"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -qx "P2 src/a.rs:10:20: MISSED => needs-test: bounds check unpinned \\[mutants $mfile\\]" "$ffile" || fail "cr-ansi: the stripped needs-test line merges"
-
-# --- shards all skipped hold no survivors and report no unread ---
-setup_case shards-skipped-all
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-EOF
-printf '1' >"$T/verdicts-rc"
-printf 'mutant-verdicts: no mutants-* artifacts for run 101\n' >"$T/verdicts-err"
-printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"skipped"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"skipped"}]}\n' >"$T/jobs-json"
-printf '{"artifacts":[]}\n' >"$T/artifacts-json"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-skipped-all exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=0 mutants=1 findings=* log=*" "shards-skipped-all"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -q "mutant shards unread" "$ffile" && fail "shards-skipped-all: skipped shards report no unread"
-grep -q "survived in CI" "$ffile" && fail "shards-skipped-all: skipped shards hold no survivors"
-
-# --- fewer artifacts than non-skipped shards report N of M unread ---
-setup_case shards-partial
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-EOF
-printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
-printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"},{"databaseId":303,"name":"Mutants (shard 3)","conclusion":"success"}]}\n' >"$T/jobs-json"
-printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-partial exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-partial"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: only 2 of 3 shard artifacts present for run 101" "$ffile" || fail "shards-partial: the N of M count is reported unread"
-grep -q "survived in CI" "$ffile" && fail "shards-partial: no survivor P2 without full artifacts"
-grep -q "mutant shards unread" <<<"$OUT" || fail "shards-partial: the digest carries the unread note"
-
-# --- paginated artifacts sum across pages: two pages of one artifact each
-# count as two, so two of three expected shards still report unread ---
-setup_case shards-paginated-partial
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-EOF
-printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
-printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"},{"databaseId":303,"name":"Mutants (shard 3)","conclusion":"success"}]}\n' >"$T/jobs-json"
-printf '{"artifacts":[{"name":"mutants-a"}]}\n{"artifacts":[{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-paginated-partial exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-paginated-partial"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: only 2 of 3 shard artifacts present for run 101" "$ffile" || fail "shards-paginated-partial: paginated pages sum to 2 of 3 unread"
-grep -q "survived in CI" "$ffile" && fail "shards-paginated-partial: no survivor P2 without full artifacts"
-grep -q "mutant shards unread" <<<"$OUT" || fail "shards-paginated-partial: the digest carries the unread note"
-
-# --- a failed shard-jobs request reports unread with its cause and reads no survivors ---
-setup_case shards-unread-jobsfail
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-EOF
-printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
-printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
-printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
-touch "$T/jobs-fail"
-printf 'gh: jobs blew up\nsecond line stays out\n' >"$T/jobs-err"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-unread-jobsfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-jobsfail"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh: jobs blew up" "$ffile" || fail "shards-unread-jobsfail: the jobs cause is reported unread"
-grep -q "second line stays out" "$ffile" && fail "shards-unread-jobsfail: only the first stderr line is kept"
-grep -q "survived in CI" "$ffile" && fail "shards-unread-jobsfail: no survivor P2 without a jobs count"
-grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-jobsfail: the digest carries the unread note"
-
-# --- a failed artifacts request reports unread with its cause and reads no survivors ---
-setup_case shards-unread-artifactsfail
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-EOF
-printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
-printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
-printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
-touch "$T/artifacts-fail"
-printf 'gh: artifacts blew up\nsecond line stays out\n' >"$T/artifacts-err"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-unread-artifactsfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-artifactsfail"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh: artifacts blew up" "$ffile" || fail "shards-unread-artifactsfail: the artifacts cause is reported unread"
-grep -q "second line stays out" "$ffile" && fail "shards-unread-artifactsfail: only the first stderr line is kept"
-grep -q "survived in CI" "$ffile" && fail "shards-unread-artifactsfail: no survivor P2 without an artifacts count"
-grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-artifactsfail: the digest carries the unread note"
-
-# --- an unparsable shard-jobs count reports unread and reads no survivors ---
-setup_case shards-unread-jobscount
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-EOF
-printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
-printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
-: >"$T/jobs-json2"
-printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-unread-jobscount exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-jobscount"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: could not count shard jobs for run 101" "$ffile" || fail "shards-unread-jobscount: the jobs parse failure is reported unread"
-grep -q "survived in CI" "$ffile" && fail "shards-unread-jobscount: no survivor P2 without a jobs count"
-grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-jobscount: the digest carries the unread note"
-
-# --- an unparsable artifacts page reports unread and reads no survivors ---
-setup_case shards-unread-artifactscount
-printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/mutant-log" <<'EOF'
-src/a.rs:10:20: MISSED
-mutants in the diff: 1
-EOF
-cat >"$T/map-text" <<'EOF'
-src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-EOF
-printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
-printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
-printf 'not json\n' >"$T/artifacts-json"
-run_build
-[ "$RC" -eq 1 ] || fail "shards-unread-artifactscount exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-artifactscount"
-ffile="$(bash "$TKT_STATE" "$S" get findings)"
-grep -Fq "P3 mutant shards unread: run 101 head ${H:0:12}: " "$ffile" || fail "shards-unread-artifactscount: the artifacts parse failure is reported unread"
-grep -q "survived in CI" "$ffile" && fail "shards-unread-artifactscount: no survivor P2 without an artifacts count"
-grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-artifactscount: the digest carries the unread note"
 
 # --- the stored LINES verdict is non-locking after verify, even without post ---
 setup_case verdict-lines
@@ -2520,8 +1843,6 @@ grep -q "pr list" "$T/calls.log" && fail "measured: no gh pr list call"
 grep -q "^gate|" "$T/calls.log" || fail "measured: the gate still runs"
 grep -q "^review-start|" "$T/calls.log" && fail "measured: review never starts"
 grep -q "^review-collect|" "$T/calls.log" && fail "measured: reviews never collect"
-grep -q "prompt=.*-map-" "$T/calls.log" && fail "measured: no map job dispatches"
-grep -q "^ghci|" "$T/calls.log" && fail "measured: no CI wait runs"
 expect_state reviewed "$H" measured
 expect_state round 0 measured
 if grep -q '^grant[.]' "$S"; then fail "measured: no grant token survives the round reset"; fi
@@ -2921,25 +2242,5 @@ run_build
 [ "$RC" -eq 2 ] || fail "slot-ruling-overbuild-refusal exits 2 (rc=$RC)"
 grep -Fq -- '--model-ruling <comment URL>' <<<"$OUT" || fail "unruled Sonnet overbuild names the remedy"
 ! grep -Fq "$SLOT_REVIEW_URL" "${S%.state}.journal" || fail "wrong-slot review ruling is not journalled"
-
-# --- the map role forwards ruling.map and exposes refusal without it ---
-MAP_RULING_URL='https://github.com/example/repo/issues/1#issuecomment-3'
-setup_case map-slot-ruling
-printf 'mutant_job=%s\n' Selection >>"$S"
-bash "$TKT_STATE" "$S" set model.map claude-sonnet-5-5 || fail "map-slot-ruling: set map model"
-bash "$TKT_STATE" "$S" set ruling.map "$MAP_RULING_URL" || fail "map-slot-ruling: set ruling.map"
-run_build
-[ "$RC" -eq 1 ] || fail "map-slot-ruling exits 1 (rc=$RC)"
-grep -qx "runmodelruling=$MAP_RULING_URL" "$T/calls.log" || fail "map receives ruling.map"
-! grep -Fq "$MAP_RULING_URL" "${S%.state}.journal" || fail "map ruling is not journalled"
-
-setup_case map-slot-ruling-refusal
-printf 'mutant_job=%s\n' Selection >>"$S"
-bash "$TKT_STATE" "$S" set model.map claude-sonnet-5-5 || fail "map-slot-ruling-refusal: set map model"
-bash "$TKT_STATE" "$S" set ruling.review "$SLOT_REVIEW_URL" || fail "map-slot-ruling-refusal: set wrong-slot review ruling"
-run_build
-[ "$RC" -eq 1 ] || fail "map-slot-ruling-refusal exits 1"
-grep -Fq -- '--model-ruling <comment URL>' <<<"$OUT" || fail "map refusal reaches the build digest"
-! grep -Fq "$SLOT_REVIEW_URL" "${S%.state}.journal" || fail "wrong-slot map ruling is not journalled"
 
 echo "tkt-build: all cases passed"

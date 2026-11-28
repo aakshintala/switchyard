@@ -874,6 +874,15 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
 ]' >"$ST/review-comments"
 ship; expect 0 "full-review verdicts with one trailing period permit merge"
 
+# Overbuild CHANGES is advisory when standards and spec approve.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:105,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: APPROVE\n\n## overbuild (test)\n\nVERDICT overbuild: CHANGES\nP2 overbuild note: duplicate helper can be removed")}
+]' >"$ST/review-comments"
+ship; expect 0 "overbuild CHANGES does not block shipping"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "overbuild CHANGES still merges: [$OUT]"
+
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
@@ -1572,200 +1581,102 @@ ship --gate 'test ! -e newfile.txt && echo x >>"$ST/gates"'
 expect 0 "strict, main moves during CI"
 [ "$(wc -l <"$ST/gates")" -eq 1 ] || fail "strict: gate runs once"
 
-# ===== exit 5: stray closing keywords
+# ===== PR body text is generated output, never a ship gate
 setup; echo 'Resolves #97. also fixes #9' >"$ST/body"
-ship; expect 5 "stray closing keyword"; no_merge "pr-closes"
-grep -q '^#9 body: fixes #9$' <<<"$OUT" || fail "stray line printed: [$OUT]"
-[ -d "$WT" ] || fail "worktree kept on exit 5"
+ship; expect 0 "body-only closure text does not block"
+grep -q '^gh pr merge ' "$ST/gh.log" || fail "body-only closure text reaches the normal merge path"
+[ "$(grep -c -- '--json body ' "$ST/gh.log" || true)" -eq 0 ] || fail "body-only closure text is not read"
+[ ! -d "$WT" ] || fail "body-only text follows the normal merge cleanup path"
 
-# ===== --body-has: required PR body lines, checked before any merge, push or CI call
+# ===== legacy body flags are accepted no-ops (an omitted argument is still invalid)
 setup
-for args in "--body-has" "--body-has ''" ; do
-  # shellcheck disable=SC2086
-  eval "ship $args"; expect 2 "usage [$args]"; untouched "usage [$args]"
-  grep -q '^usage: ship-pr' <<<"$ERR" || fail "usage text for [$args]: [$ERR]"
-done
-ship --body-has "$(printf 'a\nb')"; expect 2 "newline prefix"; untouched "newline prefix"
-grep -q '^usage: ship-pr' <<<"$ERR" || fail "usage text for newline prefix: [$ERR]"
-[ ! -e "$ST/gh.log" ] || fail "bad --body-has makes no gh call"
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --body-has; expect 2 "missing --body-has value"; untouched "missing --body-has value"
+grep -q '^usage: ship-pr' <<<"$ERR" || fail "missing --body-has value shows usage: [$ERR]"
+setup; ship --body-has ''; expect 0 "empty --body-has is ignored"
+[ "$(grep -c 'ignoring legacy body' <<<"$ERR")" -eq 1 ] || fail "empty --body-has warns once: [$ERR]"
+[ ! -e "$ST/gh.log" ] && fail "empty --body-has should reach gh after parsing"
+setup; ship --body-has "$(printf 'a\nb')"; expect 0 "newline --body-has is ignored"
+[ "$(grep -c 'ignoring legacy body' <<<"$ERR")" -eq 1 ] || fail "newline --body-has warns once: [$ERR]"
+[ ! -e "$ST/gh.log" ] && fail "newline --body-has should reach gh after parsing"
 
-printf 'Resolves #97\nDoc friction: none\n' >"$ST/body"
-ship --body-has 'Resolves #' --body-has 'Doc friction:'; expect 0 "body has every line"
+setup; printf 'Resolves #97\nDoc friction: none\n' >"$ST/body"
+ship --body-has 'Resolves #' --body-has 'Doc friction:'; expect 0 "legacy body lines do not block"
+[ "$(grep -c -- '--json body ' "$ST/gh.log" || true)" -eq 0 ] || fail "legacy body lines cause no PR body read"
 
 # nothing_ran <name>: exit 5 left origin and worktree alone, made no CI call, kept the worktree.
 nothing_ran() {
   expect 5 "$1"; untouched "$1"; no_merge "$1"
-  ! grep -q 'check-runs' "$ST/gh.log" || fail "$1: no CI call"
+  ! grep -q 'check-runs' "$ST/gh.log" 2>/dev/null || fail "$1: no CI call"
   [ -d "$WT" ] || fail "$1: worktree kept"
 }
 setup; advance_main other.txt o; printf 'Resolves #97\n' >"$ST/body"
-ship --body-has 'Resolves #' --body-has 'Doc friction:'; nothing_ran "one line missing"
-expect_refused BODY
-[ "$OUT" = "missing body line: Doc friction:" ] || fail "one missing line printed: [$OUT]"
-grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "miss message: [$ERR]"
-
-setup; printf 'x\n' >"$ST/body"
-ship --body-has 'Resolves #' --body-has 'Doc friction:'; nothing_ran "two lines missing"
-[ "$OUT" = "missing body line: Resolves #
-missing body line: Doc friction:" ] || fail "both missing lines printed: [$OUT]"
-
-for b in '  Doc friction: x' 'doc friction: x' 'see Doc friction: x'; do
-  setup; printf '%s\n' "$b" >"$ST/body"
-  ship --body-has 'Doc friction:'; nothing_ran "no match for [$b]"
-done
-setup; printf 'Resolves #97\nab\n' >"$ST/body"
-ship --body-has 'Resolves #[0-9]*' --body-has 'a.b' --body-has '*'; nothing_ran "glob and regex are literal"
-[ "$(wc -l <<<"$OUT")" -eq 3 ] || fail "all three literal prefixes missing: [$OUT]"
-setup; printf 'Resolves #[0-9]*: x\na.b\n* item\n' >"$ST/body"
-ship --body-has 'Resolves #[0-9]*' --body-has 'a.b' --body-has '*'; expect 0 "literal glob and regex prefixes match"
-
-setup; printf 'Resolves #97\r\nDoc friction: none\r\n' >"$ST/body"
-ship --body-has 'Resolves #97' --body-has 'Doc friction: none'; expect 0 "CRLF body"
-setup; printf 'Resolves #97\nDoc friction: none' >"$ST/body"
-ship --body-has 'Doc friction: none'; expect 0 "no trailing newline"
-
+ship --body-has 'Resolves #' --body-has 'Doc friction:'; expect 0 "missing body lines do not block"
 setup; touch "$ST/body-fail"
-ship --body-has 'Resolves #'; expect 2 "body read failure"; untouched "body read failure"
-grep -q 'cannot read PR 7 body' <<<"$ERR" || fail "body read message: [$ERR]"
+ship --body-has 'Resolves #'; expect 0 "body read failure does not block"
 setup; touch "$ST/body-null"
-ship --body-has null; nothing_ran "null body"
+ship --body-has null; expect 0 "null body does not block"
 setup; : >"$ST/body"
-ship --body-has x; nothing_ran "empty body"
+ship --body-has x; expect 0 "empty body does not block"
 
-# ===== --body-ends: the body's last non-blank line must equal the text
-setup
-for args in "--body-ends" "--body-ends ''" ; do
-  # shellcheck disable=SC2086
-  eval "ship $args"; expect 2 "usage [$args]"; untouched "usage [$args]"
-  grep -q '^usage: ship-pr' <<<"$ERR" || fail "usage text for [$args]: [$ERR]"
-done
-ship --body-ends "$(printf 'a\nb')"; expect 2 "newline body-ends"; untouched "newline body-ends"
-grep -q '^usage: ship-pr' <<<"$ERR" || fail "usage text for newline body-ends: [$ERR]"
-[ ! -e "$ST/gh.log" ] || fail "bad --body-ends makes no gh call"
-
-setup; printf 'Resolves #97\nCo-authored with Claude Code.\n' >"$ST/body"
-ship --body-ends 'Co-authored with Claude Code.'; expect 0 "body ends with the line"
-
-setup; printf 'Resolves #97\nCo-authored with Claude Code.\n\n\n' >"$ST/body"
-ship --body-ends 'Co-authored with Claude Code.'; expect 0 "trailing blank lines ignored"
-setup; printf 'Resolves #97\nCo-authored with Claude Code.\n  \n\t\n' >"$ST/body"
-ship --body-ends 'Co-authored with Claude Code.'; expect 0 "trailing whitespace-only lines ignored"
-setup; printf 'Resolves #97\r\nCo-authored with Claude Code.\r\n' >"$ST/body"
-ship --body-ends 'Co-authored with Claude Code.'; expect 0 "CRLF body ending"
-setup; printf 'Resolves #97\nCo-authored with Claude Code.' >"$ST/body"
-ship --body-ends 'Co-authored with Claude Code.'; expect 0 "no trailing newline"
-
-setup; printf 'Co-authored with Claude Code.\nDoc friction: none\n' >"$ST/body"
-ship --body-ends 'Co-authored with Claude Code.'; nothing_ran "attribution mid-body"
-[ "$OUT" = "body does not end with (--body-ends): Co-authored with Claude Code." ] || fail "mid-body printed: [$OUT]"
-grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "ends message: [$ERR]"
-
-for b in 'Co-authored with Claude Code. ' 'Co-authored with Claude Code.x' 'x Co-authored with Claude Code.' 'co-authored with claude code.'; do
-  setup; printf 'Resolves #97\n%s\n' "$b" >"$ST/body"
-  ship --body-ends 'Co-authored with Claude Code.'; nothing_ran "no exact match for [$b]"
-done
-
-setup; touch "$ST/body-null"
-ship --body-ends 'Co-authored with Claude Code.'; nothing_ran "null body"
-setup; : >"$ST/body"
-ship --body-ends 'Co-authored with Claude Code.'; nothing_ran "empty body"
-
-setup; printf 'Doc friction: none\n' >"$ST/body"
-ship --body-has 'Resolves #' --body-ends 'Co-authored with Claude Code.'; nothing_ran "both checks fail"
-[ "$OUT" = "missing body line: Resolves #
-body does not end with (--body-ends): Co-authored with Claude Code." ] || fail "both lines printed: [$OUT]"
-
+# ===== legacy ending and outside-plan flags are accepted but ignored
+setup; printf 'Resolves #97\nnot the requested ending\n' >"$ST/body"
+ship --body-ends 'Co-authored with Claude Code.'; expect 0 "body ending mismatch does not block"
 setup; touch "$ST/body-fail"
-ship --body-ends 'Co-authored with Claude Code.'; expect 2 "body-ends read failure"; untouched "body-ends read failure"
-grep -q 'cannot read PR 7 body' <<<"$ERR" || fail "body-ends read message: [$ERR]"
+ship --body-ends 'Co-authored with Claude Code.'; expect 0 "body ending read failure does not block"
+setup; printf '## Outside-plan files\n- another.txt — generated output\n' >"$ST/body"
+ship --outside-plan 'src/a.go'; expect 0 "legacy outside-plan flag does not read body"
+setup; ship --body-has 'Resolves #' --body-ends 'Co-authored with Claude Code.' --outside-plan 'src/a.go'
+expect 0 "legacy body flags are accepted and ignored"
+[ "$(grep -c 'ignoring legacy body' <<<"$ERR")" -eq 1 ] || fail "legacy body flags warn once: [$ERR]"
+[ "$(grep -c -- '--json body ' "$ST/gh.log" || true)" -eq 0 ] || fail "legacy body flags cause no PR body read"
+setup; ship; expect 0 "no legacy body flags"
+[ "$(grep -c -- '--json body ' "$ST/gh.log" || true)" -eq 0 ] || fail "no legacy body flags means no body read"
 
-# ===== --outside-plan: every recorded path needs a one-line reason in its section
-setup; printf 'Resolves #97\n' >"$ST/body"
-ship --outside-plan 'src/a.go'; nothing_ran "outside-plan path missing"
-expect_refused BODY
-grep -qxF 'missing outside-plan path: src/a.go' <<<"$OUT" || fail "missing outside-plan path printed: [$OUT]"
+# Ticket state, not generated PR prose, supplies grant and fence evidence.
+setup; STATE="$ST/ticket.state"; PLAN="$ST/plan.md"
+printf '## Files\n\n- `feature.txt`\n' >"$PLAN"
+printf 'round=3\ngrant.3=717 https://example.invalid/ruling\nplan=%s\n' "$PLAN" >"$STATE"
+printf '%s tkt-gate PASS head=%s\n' '2026-11-04T00:00:00Z' "$HEAD0" >"${STATE%.state}.journal"
+: >"$ST/body"
+ship --ticket-state "$STATE"; expect 0 "empty body with state grant"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "state grant merges with empty body: [$OUT]"
 
-setup; printf '## Outside-plan files\n- src/a.go — inspected existing parser\n' >"$ST/body"
-ship --outside-plan 'src/a.go' --outside-plan 'src/b.go'; nothing_ran "outside-plan second path missing"
-grep -qxF 'missing outside-plan path: src/b.go' <<<"$OUT" || fail "second outside-plan path printed: [$OUT]"
+setup; STATE="$ST/ticket.state"
+printf 'round=3\n' >"$STATE"
+printf 'Recorded ruling: https://example.invalid/ruling\n' >"$ST/body"
+ship --ticket-state "$STATE"; nothing_ran "round past limit without state grant"
+expect_refused SHIP
+[[ "$ERR" == *'grant.3'* ]] || fail "missing grant refusal names grant.3: [$ERR]"
 
-setup; printf '## Outside-plan files\n- src/a.go\n' >"$ST/body"
-ship --outside-plan 'src/a.go'; nothing_ran "outside-plan reason missing"
-grep -qxF 'outside-plan path has no one-line reason: src/a.go' <<<"$OUT" || fail "missing reason printed: [$OUT]"
+setup; STATE="$ST/ticket.state"
+printf 'round=4\ngrant.3=717 https://example.invalid/first-ruling\n' >"$STATE"
+printf 'Recorded ruling: https://example.invalid/second-ruling\n' >"$ST/body"
+ship --ticket-state "$STATE"; nothing_ran "every round past limit needs its state grant"
+expect_refused SHIP
+[[ "$ERR" == *'grant.4'* ]] || fail "missing grant refusal names grant.4: [$ERR]"
 
-setup; printf '## Summary\nNo extra scope.\n\n## Outside-plan files\n- src/a.go — inspected existing parser\n- src/b.go — updated caller for new interface\n\n## Tests\nPassed.\n' >"$ST/body"
-ship --outside-plan 'src/a.go' --outside-plan 'src/b.go'; expect 0 "outside-plan paths and reasons listed"
+setup; STATE="$ST/ticket.state"; PLAN="$ST/plan.md"
+printf '## Files\n\n- `feature.txt`\n' >"$PLAN"
+printf 'plan=%s\nround=0\n' "$PLAN" >"$STATE"
+printf 'outside\n' >"$WT/outside.txt"
+git -C "$WT" add outside.txt && git -C "$WT" commit -qm outside-plan && git -C "$WT" push -q origin feature \
+  || fail "outside-plan state fixture: add and push outside.txt"
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+printf '## Outside-plan files\n- outside.txt — generated output\n' >"$ST/body"
+ship --ticket-state "$STATE"; nothing_ran "outside-plan path missing from state"
+expect_refused SHIP
+[[ "$ERR" == *'outside.txt'* ]] || fail "outside-plan refusal names outside.txt: [$ERR]"
 
-setup; printf '## Outside-plan files\n- src/a.go - checked scope\n' >"$ST/body"
-ship --outside-plan 'src/a.go'; expect 0 "outside-plan path accepts spaced hyphen separator"
-
-setup; printf '## Outside-plan files\n- `src/a.go`: checked scope\n' >"$ST/body"
-ship --outside-plan 'src/a.go'; expect 0 "outside-plan path accepts backticks and colon separator"
-
-setup; ship; expect 0 "no --body-has"
-[ "$(grep -c -- '--json body ' "$ST/gh.log")" -eq 1 ] || fail "no --body-has: one body read, for the authority check: [$(cat "$ST/gh.log")]"
-
-# ===== authority claims: a body or round-closed comment line that claims an
-# authority needs a citation on the same line, else exit 5 before any push
+# ===== authority claims in round-closed comments remain checked
 comments_json() { jq -nc --arg u "$1" --arg b "$2" '[{html_url: $u, body: $b}]' >"$ST/comments"; }
 U7="https://github.com/O/N/pull/7#issuecomment-5"
 
-setup; printf 'Resolves #97\nApproved by the lane.\n' >"$ST/body"
-ship; nothing_ran "uncited authority in the body"
-grep -qxF 'uncited authority: Approved by the lane.' <<<"$OUT" || fail "uncited body line printed: [$OUT]"
-grep -q 'PR text claims authority without a citation on the same line or in the same bullet' <<<"$ERR" || fail "authority message: [$ERR]"
-setup; printf 'Resolves #97\nAccepted gap per the owner-side ruling #4069.\n' >"$ST/body"
-ship; expect 0 "cited authority in the body"
-setup; printf 'Resolves #97\nAccepted gap per the owner-side ruling: behavior remains out of scope; see `test_negative_claim_in_same_pr`.\n' >"$ST/body"
-mkdir -p "$WT/test"
-printf 'test_negative_claim_in_same_pr() { [ ruled_out = ruled_out ]; }\ntest_negative_claim_in_same_pr\n' >"$WT/test/negative-claim.sh"
-git -C "$WT" add test/negative-claim.sh && git -C "$WT" commit -qm add-negative-claim-test && git -C "$WT" push -q origin feature || fail "add test to PR diff"
-HEAD0="$(git -C "$WT" rev-parse HEAD)"
-ship; expect 0 "negative claim cites a test added by this PR"
-setup; printf 'Resolves #97\nAccepted gap per the owner-side ruling: behavior remains out of scope; see `test_absent_from_pr`.\n' >"$ST/body"
-ship; nothing_ran "negative claim cites a test absent from the PR"
-grep -qxF 'uncited authority: Accepted gap per the owner-side ruling: behavior remains out of scope; see `test_absent_from_pr`.' <<<"$OUT" || fail "absent test citation leaves claim uncited: [$OUT]"
-setup; printf 'Resolves #97\nApproved by the owner: test `test_positive_claim_in_same_pr` confirms the ruling.\n' >"$ST/body"
-mkdir -p "$WT/test"
-printf 'test_positive_claim_in_same_pr() { [ approved = approved ]; }\ntest_positive_claim_in_same_pr\n' >"$WT/test/positive-claim.sh"
-git -C "$WT" add test/positive-claim.sh && git -C "$WT" commit -qm add-positive-claim-test && git -C "$WT" push -q origin feature || fail "add positive-claim test to PR diff"
-HEAD0="$(git -C "$WT" rev-parse HEAD)"
-ship; nothing_ran "positive claim cannot use a test as its citation"
-grep -qxF 'uncited authority: Approved by the owner: test `test_positive_claim_in_same_pr` confirms the ruling.' <<<"$OUT" || fail "positive claim still requires authority citation: [$OUT]"
-setup; printf 'Resolves #97\nApproved by the lane.\nSee #4069.\n' >"$ST/body"
-ship; nothing_ran "authority citation on the next line"
-grep -qxF 'uncited authority: Approved by the lane.' <<<"$OUT" || fail "next-line citation did not leave the claim uncited: [$OUT]"
-grep -qF 'PR text claims authority without a citation on the same line or in the same bullet; cite it there (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun' <<<"$ERR" || fail "same-line refusal message: [$ERR]"
-setup; printf 'Resolves #97\nWe cite `approved by` as a term.\n> per the ruling, quoted\n' >"$ST/body"
-ship; expect 0 "code span and quote in the body"
+setup; printf 'Approved by the lane.\nAccepted gap per the owner-side ruling without a citation.\n' >"$ST/body"
+ship; expect 0 "body authority prose does not block"
 
-# A review finding number is not an issue: P2 #2 does not cite, a real #N still does
-FINDING='P2 #2 (no nextest run at 2754 terms in CI): accepted gap per the owner-side ruling'
-setup; printf 'Resolves #97\n%s\n' "$FINDING" >"$ST/body"
-ship; nothing_ran "finding number in the body"
-grep -qxF "uncited authority: $FINDING" <<<"$OUT" || fail "finding number line printed: [$OUT]"
-setup; printf 'Resolves #97\nP2 #2: accepted gap per #4069 Not established\n' >"$ST/body"
-ship; expect 0 "finding number with a real citation"
-setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" "Review round closed on abc123.
-$FINDING"
-ship; nothing_ran "finding number in a round-closed comment"
-grep -qxF "uncited authority: $FINDING (comment $U7)" <<<"$OUT" || fail "finding number comment line: [$OUT]"
 
-# A bullet is one unit with its more indented continuation lines
-setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n  see #4069.\n' >"$ST/body"
-ship; expect 0 "bullet cited on a continuation line"
-setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n  no citation here.\n' >"$ST/body"
-ship; nothing_ran "bullet with no citation on either line"
-grep -qxF 'uncited authority: - Accepted gap per the owner-side ruling;' <<<"$OUT" || fail "bullet first line printed: [$OUT]"
-setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling #4069\n- Approved by the lane.\n' >"$ST/body"
-ship; nothing_ran "cited bullet then a separate uncited bullet"
-[ "$OUT" = "uncited authority: - Approved by the lane." ] || fail "only the second bullet printed: [$OUT]"
-# A blank line inside a loose bullet keeps its citation; an unindented line after it starts a new unit
-setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n\n  see #4069.\n' >"$ST/body"
-ship; expect 0 "loose bullet cited after a blank line"
-setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n\nsee #4069.\n' >"$ST/body"
-ship; nothing_ran "bullet, blank line, then an unindented citation"
-[ "$OUT" = "uncited authority: - Accepted gap per the owner-side ruling;" ] || fail "loose bullet first line printed: [$OUT]"
+setup; printf 'P2 #2: accepted gap per the owner-side ruling without a citation.\n' >"$ST/body"
+ship; expect 0 "finding-style body text does not block"
 
 setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" 'Review round closed on abc123 with a fix.
 Accepted gap per the owner-side ruling.'
@@ -1797,9 +1708,7 @@ publish_main_test_fixture
 git -C "$WT" rm -q -- test/deleted-citation.sh || fail 'remove deleted citation test'
 push_test_change test/deleted-citation.sh delete-test-citation
 printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope; see `test_deleted_test_citation`.\n' >"$ST/body"
-ship; nothing_ran 'deleted test cannot cite a negative claim'
-grep -qxF 'uncited authority: Accepted gap per the owner-side ruling: out of scope; see `test_deleted_test_citation`.' <<<"$OUT" \
-  || fail "deleted test citation remains uncited: [$OUT]"
+ship; expect 0 'deleted test citation text does not block shipping'
 
 setup
 mkdir -p "$C/test"
@@ -1831,7 +1740,7 @@ mkdir -p "$WT/test/split"$'\036'"test"
 printf 'marker\n' >"$WT/test/split"$'\036'"test/untouched-citation.sh"
 push_test_change "test/split"$'\036'"test/untouched-citation.sh" add-control-char-path
 printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope; see `test_split_path_citation`.\n' >"$ST/body"
-ship; nothing_ran 'a control character in a changed path does not widen the citation scope'
+ship; expect 0 'a control character in a path does not make body text a gate'
 
 setup
 mkdir -p "$C/test"
@@ -1845,9 +1754,7 @@ publish_main_test_fixture
 printf 'marker: after\n' >"$WT/test/changed-marker.sh"
 push_test_change test/changed-marker.sh change-marker
 printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope; see `test_in_untouched_file`.\n' >"$ST/body"
-ship; nothing_ran 'test in an untouched file cannot cite a negative claim'
-grep -qxF 'uncited authority: Accepted gap per the owner-side ruling: out of scope; see `test_in_untouched_file`.' <<<"$OUT" \
-  || fail "untouched test citation remains uncited: [$OUT]"
+ship; expect 0 'an untouched test citation in the body does not block shipping'
 
 setup
 mkdir -p "$WT/test"
@@ -1865,9 +1772,7 @@ git -C "$WT" add -- test/next-bullet-citation.sh && git -C "$WT" commit -qm add-
   && git -C "$WT" push -q origin feature || fail 'add next-bullet citation test'
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
 printf 'Resolves #97\n- Accepted gap per the owner-side ruling: out of scope.\n- See `test_citation_in_next_bullet`.\n' >"$ST/body"
-ship; nothing_ran 'test citation in the next bullet is separate'
-grep -qxF 'uncited authority: - Accepted gap per the owner-side ruling: out of scope.' <<<"$OUT" \
-  || fail "next-bullet citation leaves claim uncited: [$OUT]"
+ship; expect 0 'a body citation in a separate bullet does not affect shipping'
 
 setup
 mkdir -p "$WT/test"
@@ -1876,9 +1781,7 @@ git -C "$WT" add -- test/next-paragraph-citation.sh && git -C "$WT" commit -qm a
   && git -C "$WT" push -q origin feature || fail 'add next-paragraph citation test'
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
 printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope.\nSee `test_citation_in_next_paragraph`.\n' >"$ST/body"
-ship; nothing_ran 'test citation in the next paragraph is separate'
-grep -qxF 'uncited authority: Accepted gap per the owner-side ruling: out of scope.' <<<"$OUT" \
-  || fail "next-paragraph citation leaves claim uncited: [$OUT]"
+ship; expect 0 'a body citation in a separate paragraph does not affect shipping'
 
 # ===== merge and cleanup
 setup; echo true >"$ST/draft"
@@ -1985,21 +1888,18 @@ git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "inside:
 origin_head >/dev/null && fail "inside: origin branch deleted"
 grep -q 'worktree kept' <<<"$ERR" || fail "inside: worktree kept message: [$ERR]"
 
-# ===== diagnostic PRs keep the local worktree and branch even when ship-pr
-# ===== runs outside them
+# ===== diagnostic PR descriptions do not control local worktree cleanup
 setup; printf 'Diagnostic PR: the ticket stays open\nRefs #97\n' >"$ST/body"
 cd "$T" || fail "cd out for diagnostic ship"
-ship; expect 0 "diagnostic PR happy path"
-[ "$OUT" = "merged $MERGE_SHA" ] || fail "diagnostic PR merged line: [$OUT]"
-[ -d "$WT" ] || fail "diagnostic PR worktree kept outside"
-git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "diagnostic PR local branch kept outside"
-origin_head >/dev/null && fail "diagnostic PR remote branch is still deleted"
-grep -q 'worktree kept' <<<"$ERR" || fail "diagnostic PR keep message: [$ERR]"
+ship; expect 0 "diagnostic PR body does not block shipping"
+[ ! -e "$WT" ] || fail "diagnostic PR body does not keep the worktree"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "diagnostic PR body does not keep the local branch"
+origin_head >/dev/null && fail "diagnostic PR remote branch is deleted"
 
 setup; printf 'Refs #97\nResolves #97\n' >"$ST/body"
-ship; expect 0 "a closing line prevents diagnostic keep inference"
-[ ! -e "$WT" ] || fail "a closing line permits default worktree removal"
-git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "a closing line permits default local branch deletion"
+ship; expect 0 "closing prose does not affect worktree cleanup"
+[ ! -e "$WT" ] || fail "closing prose does not keep the worktree"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "closing prose does not keep the local branch"
 
 setup; printf 'Resolves #97\n' >"$ST/body"
 ship --keep-branch; expect 0 "explicit --keep-branch"
@@ -2310,70 +2210,11 @@ ship; expect 2 "unreadable label list"; untouched "unreadable label list"; no_me
 setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"; touch "$ST/pr-labels-fail"
 ship; expect 2 "unreadable PR labels"; untouched "unreadable PR labels"; no_merge "unreadable PR labels"
 
-# ===== Implemented by:: the value holds model ids, never unknown or empty.
-# A bad value prints `bad body line: <line>` and exits 5, like a missing line.
-bad_impl() {
-  nothing_ran "$2"
-  [ "$OUT" = "bad body line: $1" ] || fail "$2: bad line printed: [$OUT]"
-  grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "$2: miss message: [$ERR]"
-}
-good_impl() {
-  expect 0 "$1"
-  [ "$OUT" = "merged $MERGE_SHA" ] || fail "$1: merged line: [$OUT]"
-}
-setup; printf 'Implemented by: unknown\n' >"$ST/body"
-ship --body-has 'Implemented by:'; bad_impl 'Implemented by: unknown' "unknown refused"
-setup; printf 'Implemented by: UNKNOWN\n' >"$ST/body"
-ship --body-has 'Implemented by:'; bad_impl 'Implemented by: UNKNOWN' "UNKNOWN refused"
-setup; printf 'Implemented by: Unknown\n' >"$ST/body"
-ship --body-has 'Implemented by:'; bad_impl 'Implemented by: Unknown' "Unknown refused"
-setup; printf 'Implemented by:\n' >"$ST/body"
-ship --body-has 'Implemented by:'; bad_impl 'Implemented by:' "empty value refused"
-setup; printf 'Implemented by:   \n' >"$ST/body"
-ship --body-has 'Implemented by:'; bad_impl 'Implemented by:   ' "spaces value refused"
-setup; printf 'Implemented by:\tunknown\n' >"$ST/body"
-ship --body-has 'Implemented by:'; nothing_ran "tab before unknown"
-[ "$OUT" = "$(printf 'bad body line: Implemented by:\tunknown')" ] || fail "tab line printed: [$OUT]"
-grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "tab miss message: [$ERR]"
-setup; printf 'Implemented by: m/a, unknown\n' >"$ST/body"
-ship --body-has 'Implemented by:'; bad_impl 'Implemented by: m/a, unknown' "unknown beside a valid id refused"
-setup; printf 'Implemented by: m/a,, m/b\n' >"$ST/body"
-ship --body-has 'Implemented by:'; bad_impl 'Implemented by: m/a,, m/b' "empty item refused"
-setup; printf 'Implemented by: m/a,\n' >"$ST/body"
-ship --body-has 'Implemented by:'; bad_impl 'Implemented by: m/a,' "trailing comma refused"
-setup; printf 'Implemented by: m/a\nImplemented by: unknown\n' >"$ST/body"
-ship --body-has 'Implemented by:'; bad_impl 'Implemented by: unknown' "second line checked"
-setup; printf 'Implemented by: unknown\r\n' >"$ST/body"
-ship --body-has 'Implemented by:'; bad_impl 'Implemented by: unknown' "CRLF bad line printed without CR"
+# ===== Implemented by, co-author and attribution lines are not merge requirements.
+setup; printf 'Implemented by: unknown\nCo-authored by: nobody\n' >"$ST/body"
+ship --body-has 'Implemented by:' --body-ends 'Co-authored with Claude Code.'; expect 0 "invalid attribution prose does not block"
+[ "$(grep -c 'ignoring legacy body' <<<"$ERR")" -eq 1 ] || fail "legacy body options warn once: [$ERR]"
 
-setup; printf 'Implemented by: m/a\n' >"$ST/body"
-ship --body-has 'Implemented by:'; good_impl "one id passes"
-setup; printf 'Implemented by: m/a, claude-sonnet-5-5\n' >"$ST/body"
-ship --body-has 'Implemented by:'; good_impl "two ids pass"
-setup; printf 'Implemented by: m/unknown-2\n' >"$ST/body"
-ship --body-has 'Implemented by:'; good_impl "unknown inside an id passes"
-setup; printf 'Implemented by: unknownish\n' >"$ST/body"
-ship --body-has 'Implemented by:'; good_impl "unknownish passes"
-setup; printf 'Implemented by: m/a\r\n' >"$ST/body"
-ship --body-has 'Implemented by:'; good_impl "CRLF valid line passes"
-
-setup; printf 'Implemented by: unknown\n' >"$ST/body"
-ship; good_impl "no flag skips the value check"
-setup; printf 'Implemented by: unknown\n' >"$ST/body"
-ship --body-has 'Implemented by: unk'; good_impl "another prefix skips the value check"
-setup; printf 'Implemented by: unknown\nDoc friction: none\n' >"$ST/body"
-ship --body-has 'Doc friction:'; good_impl "another line only skips the value check"
-
-setup; printf 'Resolves #97\n' >"$ST/body"
-ship --body-has 'Implemented by:'; nothing_ran "no Implemented by line"
-[ "$OUT" = "missing body line: Implemented by:" ] || fail "missing line printed: [$OUT]"
-grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "missing message: [$ERR]"
-
-setup; printf 'Implemented by: unknown\n' >"$ST/body"
-ship --body-has 'Implemented by:' --body-has 'Doc friction:'; nothing_ran "missing and bad together"
-grep -Fqx 'missing body line: Doc friction:' <<<"$OUT" || fail "missing line printed: [$OUT]"
-grep -Fqx 'bad body line: Implemented by: unknown' <<<"$OUT" || fail "bad line printed: [$OUT]"
-grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "missing and bad message: [$ERR]"
 
 # ===== --unverified-fixes: a fix round with no real bug ships without a re-review
 F="$T/findings.txt"; printf 'P2: missing test for x\n' >"$F"
@@ -2628,8 +2469,9 @@ ship; expect 0 "matching squash commit recovers a failed merge"
 LANDED_SHA="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
 [ "$OUT" = "merged $LANDED_SHA (PR record not updated by GitHub)" ] || fail "landed merge line: [$OUT]"
 grep -qF 'PR #7 is still open' <<<"$ERR" || fail "stale PR record warning: [$ERR]"
-grep -qF 'Resolves issues still open: #97' <<<"$ERR" || fail "open Resolves issue warning: [$ERR]"
-grep -qF 'close them manually' <<<"$ERR" || fail "manual issue closure requested: [$ERR]"
+! grep -qF 'Resolves issues still open: #97' <<<"$ERR" || fail "PR-body-only closure text does not trigger the open issue warning: [$ERR]"
+! grep -qF 'close them manually' <<<"$ERR" || fail "PR-body-only closure text is not used as issue-closing intent: [$ERR]"
+[ "$(grep -c -- '--json body ' "$ST/gh.log" || true)" -eq 0 ] || fail "body-only closure text is not read"
 [ ! -e "$WT" ] || fail "worktree cleanup ran after detecting the landed commit"
 git -C "$C" show-ref --verify --quiet refs/heads/feature && fail "local feature branch cleanup ran after landed merge"
 git --git-dir="$ORIGIN" show-ref --verify --quiet refs/heads/feature && fail "remote feature branch cleanup ran after landed merge"
@@ -2668,19 +2510,18 @@ grep -q 'is not the PR head' <<<"$ERR" || fail "head wait timeout message: [$ERR
 [ "$(grep -c '^2$' "$ST/sleeps.txt")" -eq 30 ] || fail "head wait polls 30 times: [$(cat "$ST/sleeps.txt" 2>/dev/null)]"
 untouched "head wait timeout"; no_merge "head wait timeout"
 
-# ===== (D) pr-closes runs before the gate, never after CI
+# ===== (D) body closure prose does not gate shipping
 setup; echo 'Resolves #97. also fixes #9' >"$ST/body"
-ship --gate 'touch "$ST/gate-ran"; exit 1'; expect 5 "stray text fails before the gate"
-[ ! -e "$ST/gate-ran" ] || fail "pr-closes before the gate starts no gate"
-! grep -q 'running gate' <<<"$ERR" || fail "pr-closes before the gate: no gate message: [$ERR]"
-grep -q '^#9 body: fixes #9$' <<<"$OUT" || fail "stray line printed: [$OUT]"
-no_merge "pr-closes before gate"
-! grep -q 'check-runs' "$ST/gh.log" || fail "pr-closes before the gate: no CI call"
+ship --gate 'touch "$ST/gate-ran"; exit 1'; expect 1 "body-only stray closure text does not block before the gate"
+[ -e "$ST/gate-ran" ] || fail "body-only text reaches the gate"
+! grep -q '^#9 body:' <<<"$OUT" || fail "body-only closure text is not reported"
+no_merge "body-only closure text with failing gate"
 
+# A body change during CI does not affect closure checking.
 setup; printf 'Resolves #97\n' >"$ST/body"
 checks_hook 'printf "Resolves #97\nfixes #9\n" >"$ST/body"'
-ship; expect 0 "pr-closes never runs after CI"
-[ "$OUT" = "merged $MERGE_SHA" ] || fail "late stray body still merges: [$OUT]"
+ship; expect 0 "body changed during CI does not affect closure checking"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "late body change still merges: [$OUT]"
 
 # ===== (E) --allow-commit-closes
 setup; printf 'Resolves #97\n' >"$ST/body"
@@ -2700,10 +2541,9 @@ no_merge "commit-only without the flag"
 setup; printf 'Resolves #97. also fixes #9\n' >"$ST/body"
 printf '[{"oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","messageHeadline":"Fixes #8","messageBody":""}]' >"$ST/commits"
 run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --allow-commit-closes
-expect 5 "title or body matches still exit 5 with the flag"
-grep -q '^#9 body: fixes #9$' <<<"$OUT" || fail "body stray still printed: [$OUT]"
-grep -q 'allowing' <<<"$ERR" || fail "commit warning alongside body failure: [$ERR]"
-no_merge "body match with the flag"
+expect 0 "body stray text is ignored while commit-only matches are allowed"
+! grep -q '^#9 body:' <<<"$OUT" || fail "body stray text is not reported"
+grep -q 'allowing' <<<"$ERR" || fail "commit warning alongside ignored body text: [$ERR]"
 
 # Longest-wait notice is first on stderr and uses the effective CI timeout.
 setup; ship; expect 0 "default wait notice case"
