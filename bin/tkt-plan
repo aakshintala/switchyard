@@ -1353,10 +1353,10 @@ do_rule_questions() {
 }
 
 do_post() {
-  part=""; no_verifier=0
+  part=""
   while [ $# -gt 0 ]; do case "$1" in
     --part) [ $# -ge 2 ] || usage; part="$2"; shift 2;;
-    --no-verifier) no_verifier=1; shift;;
+    --no-verifier) shift;;
     *) usage;; esac; done
   load_plan
   # Default the label from the state. An unlabelled post reuses this script's
@@ -1375,7 +1375,12 @@ do_post() {
   fi
   files=()
   while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
-  if ! plan_verdict_check build "$tkt_state" "$state" "$no_verifier" "$plan" "$base" "$worktree" ${files[@]+"${files[@]}"}; then emit "POST-FAIL reason=verdict verdict=$verdict_refusal" 1 "$verdict_digest"; fi
+  if ! plan_verdict_check build "$tkt_state" "$state" 0 "$plan" "$base" "$worktree" ${files[@]+"${files[@]}"}; then
+    case "$verdict_refusal" in
+    none|lines|stale) plan_verdict_write "$tkt_state" "$state" skipped "$base" "$plan" "$worktree" ;;
+      *) emit "POST-FAIL reason=verdict verdict=$verdict_refusal" 1 "$verdict_digest" ;;
+    esac
+  fi
   "$plangate" ${gate_args[@]+"${gate_args[@]}"} "$plan" >"$tmp" 2>&1 || emit "POST-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
   post_run_id="$(t get post_run 2>/dev/null || true)"
   if [ -z "$post_run_id" ]; then
@@ -1390,8 +1395,8 @@ do_post() {
 
 do_set() {
   [ $# -ge 1 ] || usage
-  plan_arg="$1"; shift; no_verifier=0
-  if [ $# -gt 0 ]; then [ "$#" -eq 1 ] && [ "$1" = --no-verifier ] || usage; no_verifier=1; fi
+  plan_arg="$1"; shift
+  if [ $# -gt 0 ]; then [ "$#" -eq 1 ] && [ "$1" = --no-verifier ] || usage; fi
   case "$plan_arg" in /*) plan="$plan_arg" ;; *) plan="$PWD/$plan_arg" ;; esac
   [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
   base="$(base_of "$plan")"
@@ -1427,10 +1432,7 @@ do_set() {
   fi
   t set pack_plan_hash "$plan_hash"
   plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
-  if [ "$old_plan" = "$plan" ] && [ "$no_verifier" -eq 0 ] && [ "$plan_verdict" = skipped ]; then
-    clear_verdict
-  fi
-  if [ "$no_verifier" -eq 1 ] && { [ -z "$plan_verdict" ] || [ "$plan_verdict" = skipped ]; }; then
+  if { [ -z "$plan_verdict" ] || [ "$plan_verdict" = skipped ] || [ "$plan_verdict" = lines ]; }; then
     plan_verdict_write "$tkt_state" "$state" skipped "$base" "$plan" "$worktree"
   fi
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"

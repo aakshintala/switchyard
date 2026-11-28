@@ -29,12 +29,12 @@ GitHub shares one number space across issues and PRs, so a bare `#42` may be eit
 
 `tkt-start` searches merged PR bodies after the currency check, when it runs.
 A `Resolves #<n>` hit or a failed search stops before `plan-sweep` and `tkt-job`, unless the issue recurred after the merge (see below).
-With `--no-preflight`, it skips the currency check and exits `SKIPPED` after the search, calling neither command. With a non-empty stored plan and no `--part`, `--takeover` or `--no-preflight`, it exits `PLANNED plan=<path>` after the search, calling neither command.
+`--no-preflight` is a no-op. A ticket labeled `needs-plan` still runs preflight; an unlabeled ticket uses implement's short path. With a non-empty stored plan and no `--part` or `--takeover`, it exits `PLANNED plan=<path>` after the search, calling neither command.
 Each `Part of #<n>` hit prints a `NOTE` with that PR's file list, even when many
 hits match. The run then continues.
 A recurrence is an OPEN issue holding a comment strictly newer than the
 newest `Resolves` merge's `mergedAt`. The run appends
-`NOTE recurred after merged PR #<n>` and continues through the currency check and preflight when enabled; a stored plan yields `PLANNED`, while `--no-preflight` yields `SKIPPED`. A merge or comment time that is missing or unreadable
+`NOTE recurred after merged PR #<n>` and continues through the currency check. A `needs-plan` ticket runs preflight; an unlabeled ticket uses the short path. A stored plan yields `PLANNED`. A merge or comment time that is missing or unreadable
 can never be newer, so the run stops as before; so does a closed issue or
 a comment stamped exactly at the merge time.
 

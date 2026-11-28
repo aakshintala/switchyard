@@ -1,8 +1,8 @@
 README.md ("Working on it")
 
-## Small tool change
+## Short path
 
-`implement`'s Small tool change path may take a change to `bin/file-claim`, `bin/fence-grant`, `bin/ship-pr` or `bin/tkt-*` despite its lock, shared-state and ship exclusion, when the change loosens no guard and no merge check (#1331). `delegate/` stays excluded.
+Tickets without `needs-plan` use implement's short path: skip preflight, planner and Verifier, then write the plan from the ticket. `--no-preflight` is accepted but does not bypass `needs-plan`.
 
 ## Verifier ASK round accounting
 

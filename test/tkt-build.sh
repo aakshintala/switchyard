@@ -1614,15 +1614,14 @@ for ax in standards spec overbuild; do
 done
 [ "$(grep -c -- '--full-rereview tkt-build round-0 full review' "$T/calls.log")" -eq 3 ] || fail "full-rereview-flag: one override per axis"
 
-# --- the stored verdict blocks a build before any job dispatch ---
+# --- the stored LINES verdict is non-locking after verify, even without post ---
 setup_case verdict-lines
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed LINES verdict"
 run_build
-[ "$RC" -eq 1 ] || fail "LINES verdict refusal exits 1 (rc=$RC)"
-expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "LINES verdict refusal"
-grep -q '^job|' "$T/calls.log" && fail "LINES verdict refusal dispatches no tkt-job"
-expect_state plan_verdict lines "LINES verdict refusal"
-expect_state plan_verdict_base "$H" "LINES verdict refusal"
+[ "$RC" -eq 0 ] || fail "LINES verdict proceeds after verify without post (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "LINES verdict proceeds after verify without post"
+expect_state plan_verdict lines "LINES verdict remains recorded"
+expect_state plan_verdict_base "$H" "LINES verdict base remains recorded"
 
 # --- PLAN OK and the fast-path skipped verdict both permit the build ---
 setup_case verdict-ok
@@ -1719,11 +1718,9 @@ expect_state plan_verdict_base "$H" "--no-verifier stores the base"
 setup_case verdict-no-verifier-lines
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed no-verifier LINES verdict"
 run_build --no-verifier
-[ "$RC" -eq 1 ] || fail "--no-verifier cannot replace LINES"
-expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "--no-verifier preserves LINES"
-grep -q '^job|' "$T/calls.log" && fail "--no-verifier over LINES dispatches no tkt-job"
+[ "$RC" -eq 0 ] || fail "--no-verifier does not lock a LINES verdict (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "--no-verifier accepts LINES"
 expect_state plan_verdict lines "--no-verifier preserves stored verdict"
-expect_state plan_verdict_base "$H" "--no-verifier preserves rejection base"
 
 # --- changing the plan text invalidates LINES; --no-verifier can then build ---
 setup_case verdict-no-verifier-edited-lines
@@ -1805,21 +1802,19 @@ expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "old skipped 
 expect_state plan_verdict skipped "old skipped verdict without flag"
 expect_state plan_verdict_base "$old_base" "old skipped base without flag"
 
-# --- the verdict check runs before either --from lane split ---
+# --- the verdict check is non-locking for LINES on either build path ---
 setup_case verdict-from-gate
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed --from gate LINES"
 run_build --from gate
-[ "$RC" -eq 1 ] || fail "--from gate verdict refusal exits 1"
-expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "--from gate verdict refusal"
-grep -q '^job|' "$T/calls.log" && fail "--from gate refusal dispatches no tkt-job"
+[ "$RC" -eq 0 ] || fail "--from gate accepts LINES (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "--from gate accepts LINES"
 setup_case verdict-from-review
 bash "$TKT_STATE" "$S" set pr 7 || fail "seed review PR"
 bash "$TKT_STATE" "$S" set head "$H" || fail "seed review head"
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed --from review LINES"
 run_build --from review
-[ "$RC" -eq 1 ] || fail "--from review verdict refusal exits 1"
-expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "--from review verdict refusal"
-grep -q '^job|' "$T/calls.log" && fail "--from review refusal dispatches no tkt-job"
+[ "$RC" -eq 0 ] || fail "--from review accepts LINES (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "--from review accepts LINES"
 
 # --- --no-verifier refreshes a stored skipped verdict at the current base ---
 setup_case verdict-skipped-stale-flag

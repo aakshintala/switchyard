@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# tkt-start: write state, cut/reuse the worktree, run the C8 current check; on a
-# miss run plan-sweep plus the preflight job. Only a sweep rc 1 listing unresolved
-# tokens still preflights; any other sweep failure exits with its code. No --files
-# skips the sweep. A stored head differing from the worktree or PR head exits 3.
+# tkt-start: write state, cut/reuse the worktree, run the C8 current check; a miss
+# runs plan-sweep plus preflight only when the issue has `needs-plan`. Only a
+# sweep rc 1 listing unresolved tokens still preflights; any other sweep failure
+# exits with its code. No --files skips the sweep. A stored head differing from
+# the worktree or PR head exits 3.
 # Without --split, refuses another live state in the flywheel root or nearby run directories;
 # merged/closed-PR candidates and .state.retired files are ignored. A same-run state
 # whose split= label differs from --split (or is set when --split is absent) is refused.
@@ -26,9 +27,8 @@ usage() {
   exit 2
 }
 run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
-env=""; extra=""; merge_gate=""; merge_check=""; files=""; no_preflight=0; part=""; part_given=0; split=""; split_given=0
-mutant_job_given=0
-legacy_body_flags=0; models=()
+env=""; extra=""; merge_gate=""; merge_check=""; files=""; part=""; part_given=0; split=""; split_given=0
+mutant_job=""; mutant_job_given=0; legacy_body_flags=0; models=()
 model_roles=(lane fix map verifier verify review overbuild preflight planner)
 spec_issue=""; spec_issue_given=0
 takeover_ref=""; takeover_given=0; takeover_gate=""; takeover_gate_given=0
@@ -42,8 +42,8 @@ while [ $# -gt 0 ]; do
     --takeover) [ $# -ge 2 ] || usage; takeover_ref="$2"; takeover_given=1; shift 2 ;;
     --gate) [ $# -ge 2 ] || usage; takeover_gate="$2"; takeover_gate_given=1; shift 2 ;;
     --files) [ $# -ge 2 ] && [[ $2 != -* ]] || usage; shift; while [ $# -gt 0 ] && [[ $1 != -* ]]; do files="${files:+$files,}${1//[[:space:]]/,}"; shift; done ;;
-    --no-preflight) no_preflight=1; shift ;;
-    --mutant-job) [ $# -ge 2 ] || usage; mutant_job_given=1; shift 2 ;;
+    --no-preflight) shift ;;
+    --mutant-job) [ $# -ge 2 ] || usage; mutant_job="$2"; mutant_job_given=1; shift 2 ;;
     --run|--repo|--issue|--spec|--branch|--worktree|--closing|--env|--extra|--merge-gate|--merge-check|--workflow-doc)
       [ $# -ge 2 ] || usage; v="${1#--}"; printf -v "${v//-/_}" '%s' "$2"; shift 2 ;;
     --help|-h|-*|*) usage ;;
@@ -217,17 +217,24 @@ state_has_planner_model() {
   if read_state_model planner && [ -n "${STATE_MODEL//[[:space:]]/}" ]; then return 0; fi
   return 1
 }
+needs_plan=0
+if ! issue_labels="$(gh issue view "$issue" --repo "$repo" --json labels 2>&1)" ||
+  ! jq -e 'type == "object" and (.labels | type == "array") and all(.labels[]; type == "object" and (.name | type == "string"))' <<<"$issue_labels" >/dev/null 2>&1; then
+  needs_plan=1
+elif [ "$(jq -r 'any(.labels[]; .name == "needs-plan")' <<<"$issue_labels")" = true ]; then
+  needs_plan=1
+fi
 if [ -f "$state" ]; then
   stored_plan="$(sed -n 's/^plan=//p' "$state" | head -n 1)"
 else
   stored_plan=""
 fi
 stored_plan_skip=0
-if [ "$part_given" -eq 0 ] && [ "$takeover_given" -eq 0 ] && [ "$no_preflight" -eq 0 ] \
+if [ "$part_given" -eq 0 ] && [ "$takeover_given" -eq 0 ] \
   && [ -n "${stored_plan//[[:space:]]/}" ]; then
   stored_plan_skip=1
 fi
-if [ "$no_preflight" -eq 0 ] && [ "$takeover_given" -eq 0 ]; then
+if [ "$needs_plan" -eq 1 ] && [ "$takeover_given" -eq 0 ]; then
   planner_available="$planner_flag_available"
   if [ "$planner_flag_seen" -eq 0 ] && state_has_planner_model; then planner_available=1; fi
   # A stored plan of any kind never runs the planner again, so only a state with no plan needs one (#1818).
@@ -413,7 +420,7 @@ if [ "$part_given" -eq 1 ]; then
               ;;
           esac
         done <"$state"
-        if [ "$no_preflight" -eq 0 ] && [ "$takeover_given" -eq 0 ] \
+        if [ "$needs_plan" -eq 1 ] && [ "$takeover_given" -eq 0 ] \
           && [ "$planner_flag_available" -eq 0 ]; then
           carried_planner=0
           for model_line in ${carried_models[@]+"${carried_models[@]}"}; do
@@ -503,7 +510,7 @@ wt_note="reused"; if [ ! -e "$worktree" ]; then
   werr="$(git worktree add --no-track -b "$branch" "$worktree" origin/main 2>&1)" || fail_step worktree "$?" "$werr"
   wt_note="created"
 fi
-# Seed the repo gate once so a planner cannot omit the script check in its Gate line.
+# Seed the repo gate once so the planner cannot omit the script check in its Gate line.
 if [ -z "$(tkt get gate.script 2>/dev/null || true)" ] \
   && [ -f "$worktree/scripts/check" ] && [ -x "$worktree/scripts/check" ]; then
   tkt set gate.script scripts/check
@@ -512,8 +519,8 @@ tkt journal "tkt-start worktree $worktree $wt_note"; fpaths=()
 if [ -n "$files" ]; then IFS=',' read -ra parts <<<"$files"
   for p in ${parts[@]+"${parts[@]}"}; do p="$(printf '%s' "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"; [ -n "$p" ] && fpaths+=("$p"); done; fi
 stale=""; reason=""; filing=""; lognote="not run"; sincenote="no edit info"
-# --no-preflight and a stored plan skip the whole currency check: no issue-body read, no log.
-if [ "$no_preflight" -eq 0 ] && [ "$stored_plan_skip" -eq 0 ]; then
+# The default path skips the currency check; needs-plan tickets run it unless they already have a plan.
+if [ "$needs_plan" -eq 1 ] && [ "$stored_plan_skip" -eq 0 ]; then
 for p in ${fpaths[@]+"${fpaths[@]}"}; do git -C "$worktree" cat-file -e "origin/main:$p" 2>/dev/null || { stale=1; reason="missing-file:$p"; break; }; done
 if [ -z "$stale" ]; then
   body="$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>&1)" || fail_step github "$?" "$body"
@@ -593,7 +600,7 @@ if [ "$takeover_given" -eq 1 ] && [ -n "$files" ]; then
     || fail_step file-claim "$?" "$claim_out"
   tkt journal "tkt-start takeover claims files=${files}"
 fi
-if [ "$no_preflight" -eq 1 ]; then tkt journal "tkt-start check SKIPPED filing=${filing:-none}"; emit "SKIPPED filing=${filing:-none} files=${files:-none}" 0 "${dg[@]}"; fi
+if [ "$needs_plan" -eq 0 ]; then tkt journal "tkt-start check SKIPPED filing=${filing:-none}"; emit "SKIPPED filing=${filing:-none} files=${files:-none}" 0 "${dg[@]}"; fi
 if [ "$stored_plan_skip" -eq 1 ]; then
   tkt journal "tkt-start check PLANNED plan=$stored_plan filing=${filing:-none}"
   emit "PLANNED plan=$stored_plan" 0 "${dg[@]}"

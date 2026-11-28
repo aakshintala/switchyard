@@ -19,11 +19,11 @@ plan_verdict_read() {
 plan_verdict_write() {
   local state_tool="$1" state="$2" verdict="$3" base="$4" plan="$5" worktree="$6" hash verdict_at
   hash="$(git -C "$worktree" hash-object -w "$plan" 2>/dev/null)" || return 1
-  verdict_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  if [ "$verdict" != skipped ]; then verdict_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; fi
   "$state_tool" "$state" set plan_verdict "$verdict"
   "$state_tool" "$state" set plan_verdict_base "$base"
   "$state_tool" "$state" set plan_verdict_hash "$hash"
-  "$state_tool" "$state" set plan_verdict_at "$verdict_at"
+  [ "$verdict" = skipped ] || "$state_tool" "$state" set plan_verdict_at "$verdict_at"
   "$state_tool" "$state" set plan_verdict_by ""
   "$state_tool" "$state" set plan_verdict_ruling ""
   "$state_tool" "$state" set plan_verdict_comment ""
@@ -39,12 +39,6 @@ plan_verdict_check() {
   verdict_refusal="none"
   verdict_digest="plan_verdict=${plan_verdict:-none} plan_verdict_base=${plan_verdict_base:-none} plan_base=${base:-none}"
 
-  if [ "$policy" = ship ]; then
-    [ "$plan_verdict" = lines ] || return 0
-    verdict_refusal=lines
-    return 1
-  fi
-
   if [ "$no_verifier" -eq 1 ] && { [ -z "$plan_verdict" ] || [ "$plan_verdict" = skipped ]; }; then
     plan_verdict_write "$state_tool" "$state" skipped "$base" "$plan" "$worktree" || return 1
     plan_verdict_read "$state_tool" "$state" "$plan" "$worktree"
@@ -57,14 +51,14 @@ plan_verdict_check() {
       { [ "${#files[@]}" -eq 0 ] || git -C "$worktree" diff --quiet "$plan_verdict_base..$base" -- "${files[@]}" 2>/dev/null; }; then
       verdict_ok=1
     fi
-  elif [ "$plan_verdict" = skipped ] && [ "$plan_verdict_base" = "$base" ]; then
+  elif { [ "$plan_verdict" = skipped ] || [ "$plan_verdict" = lines ]; } && [ "$plan_verdict_base" = "$base" ]; then
     verdict_ok=1
   fi
   [ "$verdict_ok" -eq 1 ] && return 0
 
   case "$plan_verdict" in
     "") verdict_refusal=none ;;
-    ok|triaged|skipped) verdict_refusal=stale ;;
+    ok|triaged|skipped|lines) verdict_refusal=stale ;;
     *) verdict_refusal="$plan_verdict" ;;
   esac
   verdict_digest="plan_verdict=${plan_verdict:-none} plan_verdict_base=${plan_verdict_base:-none} plan_base=${base:-none}"
