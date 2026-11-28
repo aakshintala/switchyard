@@ -575,7 +575,7 @@ cmd_start() {
     if [ -n "$verify" ]; then usage; fi
     echo "review-pr: full re-review: $full_rereview" >&2
   fi
-  if [ -z "$axes" ]; then axes="standards,spec,overbuild"; fi
+  if [ -z "$axes" ]; then axes="standards,spec"; fi
   # One job starts per listed axis; an unknown name is a usage error.
   axes_rest="$axes,"
   while [ -n "$axes_rest" ]; do
@@ -1290,8 +1290,10 @@ reprint_collected() {
         continue
       fi
       if finding_rows input <(printf '%s\n' "$line") >/dev/null 2>&1; then
-        printf '%s\n' "$line"
-        printf '%s\n' "$line" >>"$src_f"
+        if [ "$rrole" != overbuild ]; then
+          printf '%s\n' "$line"
+          printf '%s\n' "$line" >>"$src_f"
+        fi
       fi
     done <<<"$text"
   done
@@ -1528,11 +1530,11 @@ cmd_collect() {
   missing_axes_f="$tmp/missing-axes.txt"
   : >"$missing_axes_f"
   roles_ok=""
-  expected_axes="standards,spec,overbuild"
+  expected_axes="standards,spec"
   if [ "${#group_dirs[@]}" -gt 0 ]; then
     roles_ok="1"
     expected_axes="$(state_get "${group_first_state[0]}" axes)"
-    [ -n "$expected_axes" ] || expected_axes="standards,spec,overbuild"
+    [ -n "$expected_axes" ] || expected_axes="standards,spec"
     for gi in ${!group_dirs[@]}; do
       g_standards=""; g_spec=""; g_overbuild=""; g_verify=""
       for jid in ${group_ids[$gi]}; do
@@ -1546,7 +1548,7 @@ cmd_collect() {
       done
       [ "${group_posted[$gi]}" = "1" ] && continue
       g_expected="$(state_get "${group_first_state[$gi]}" axes)"
-      [ -n "$g_expected" ] || g_expected="standards,spec,overbuild"
+      [ -n "$g_expected" ] || g_expected="standards,spec"
       if [ -n "$g_verify" ] && [ -z "$g_standards" ] && [ -z "$g_spec" ] && [ -z "$g_overbuild" ]; then
         continue
       elif [ -z "$g_verify" ] && { [ -n "$g_standards" ] || [ -n "$g_spec" ] || [ -n "$g_overbuild" ]; }; then
@@ -1572,7 +1574,6 @@ cmd_collect() {
   else
     printf 'UNFINISHED standards MISSING gate=none collect needs every role job id\n' >>"$missing_axes_f"
     printf 'UNFINISHED spec MISSING gate=none collect needs every role job id\n' >>"$missing_axes_f"
-    printf 'UNFINISHED overbuild MISSING gate=none collect needs every role job id\n' >>"$missing_axes_f"
   fi
   short="unknown"
   if [ -n "$sha" ]; then short="${sha:0:8}"; fi
@@ -1773,9 +1774,13 @@ cmd_collect() {
           continue
         fi
         if finding_rows input <(printf '%s\n' "$line") >/dev/null 2>&1; then
-          printf '%s\n' "$line" >>"$verdicts_f"
-          case "$line" in
-            P1\ *|P2\ *) blocking_finding="1";;
+          case "$role" in
+            overbuild) ;;
+            *)
+              printf '%s\n' "$line" >>"$verdicts_f"
+              case "$line" in
+                P1\ *|P2\ *) blocking_finding="1";;
+              esac;;
           esac
         fi
       done <<<"$text"

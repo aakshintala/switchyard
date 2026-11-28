@@ -712,13 +712,13 @@ run_ship
 got="$(grep -A1 -x -F 'arg|--merge-check' "$T/calls.log" | sed -n 2p)"
 [ "$got" = 'arg|FOO=1 BAR=2 cargo check --all-targets' ] || fail "mergecheck-env: value misses env prefix, got [$got]"
 
-# --- mutant_job opts the ticket into the mutants gate
+# --- a legacy mutant_job state key no longer opts tkt-ship into a mutants gate
 reset_stub; setup_case mutantjob
 printf '0' >"$T/exitcodes"
 printf 'mutant_job=%s\n' Selection >>"$S"
 run_ship
 [ "$RC" -eq 0 ] || fail "mutantjob: exit $RC"
-[ "$(grep -c -x -F 'arg|--mutants-gate' "$T/calls.log")" -eq 1 ] || fail "mutantjob: mutants gate flag missing: $(cat "$T/calls.log")"
+[ "$(grep -c -x -F 'arg|--mutants-gate' "$T/calls.log" || true)" -eq 0 ] || fail "mutantjob: legacy key must not enable the mutants gate: $(cat "$T/calls.log")"
 
 # --- gate.script set: a Gate line that hand-expands it stops ship before ship-pr ---
 reset_stub; setup_case gate-script-hand

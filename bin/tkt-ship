@@ -4,7 +4,6 @@
 # Longest wait: four ship-pr attempts x five CI waits x 7200 s, plus the gate.
 # Usage: tkt-ship <state>
 # State key no_mutants_label: reason passed to ship-pr as --no-mutants-label.
-# State key mutant_job opts ship-pr into its --mutants-gate check.
 # State key merge_check: command passed to ship-pr as --merge-check unless merge_gate is gate.
 # State keys body_has and body_ends are legacy no-ops; tkt-ship warns once when set.
 # State outside_plan and plan/fence are passed as --ticket-state for ship-pr's diff check.
@@ -18,7 +17,7 @@ set -euo pipefail
 usage() {
   echo "usage: tkt-ship <state>" >&2
   echo "       longest wait 144000 s (40 h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" >&2
-  echo "       state keys: no_mutants_label passes --no-mutants-label, mutant_job passes --mutants-gate, outside_plan and plan/fence are checked from --ticket-state, known_flake passes --known-flake, known_flake_by passes --by, unverified passes --unverified-fixes, merge_check passes --merge-check unless merge_gate is gate" >&2
+  echo "       state keys: no_mutants_label passes --no-mutants-label, outside_plan and plan/fence are checked from --ticket-state, known_flake passes --known-flake, known_flake_by passes --by, unverified passes --unverified-fixes, merge_check passes --merge-check unless merge_gate is gate" >&2
   echo "       body_has/body_ends are legacy no-ops; takeover note and Local gate line are best-effort body updates" >&2
   exit 2
 }
@@ -374,9 +373,6 @@ while IFS= read -r n; do
 done <<<"$(tkt list known_flake 2>/dev/null || true)"
 if known_by="$(tkt get known_flake_by 2>/dev/null)" && [ -n "$known_by" ]; then
   args+=(--by "$known_by")
-fi
-if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
-  args+=(--mutants-gate)
 fi
 if u="$(tkt get unverified 2>/dev/null)" && [ -n "$u" ]; then
   u="$(abspath "$u")" || {

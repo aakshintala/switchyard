@@ -874,6 +874,15 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
 ]' >"$ST/review-comments"
 ship; expect 0 "full-review verdicts with one trailing period permit merge"
 
+# Overbuild CHANGES is advisory when standards and spec approve.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:105,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: APPROVE\n\n## overbuild (test)\n\nVERDICT overbuild: CHANGES\nP2 overbuild note: duplicate helper can be removed")}
+]' >"$ST/review-comments"
+ship; expect 0 "overbuild CHANGES does not block shipping"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "overbuild CHANGES still merges: [$OUT]"
+
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[

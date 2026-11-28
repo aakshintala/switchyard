@@ -134,7 +134,7 @@ reload() {
   for a in --run "$RUN" --repo acme/widget --issue 42 --spec 42 --branch tkt-start \
     --worktree "$WT" --workflow-doc "$CDIR/wf.md" --closing "Resolves #42" --env "FOO=1" \
     --body-has "Resolves #42" --body-has "Co-authored with Claude Code." --extra "$CDIR/extra.md" \
-    --merge-gate ci --merge-check 'cargo check --all-targets' --mutant-job Selection --model lane=sol --model planner=plan --model preflight=luna --files f.txt; do
+    --merge-gate ci --merge-check 'cargo check --all-targets' --model lane=sol --model planner=plan --model preflight=luna --files f.txt; do
     if [ "$skip" -eq 1 ]; then skip=0; elif [ "$a" = "${1:-}" ]; then skip=1; else ARGS+=("$a"); fi
   done
 }
@@ -216,7 +216,7 @@ expect_state() {
   [ -f "$S" ] || fail "$1: no state file [$S]"
   for kv in "repo=acme/widget" "issue=42" "spec=42" "branch=tkt-start" "worktree=$WT" "run=$RUN" \
     "workflow_doc=$CDIR/wf.md" "closing=Resolves #42" "env=FOO=1" "extra=$CDIR/extra.md" \
-    "merge_gate=ci" "merge_check=cargo check --all-targets" "mutant_job=Selection"; do
+    "merge_gate=ci" "merge_check=cargo check --all-targets"; do
     grep -qF "$kv" "$S" || fail "$1: state misses [$kv]"
   done
   [ "$(grep -c '^body_has=' "$S" || true)" -eq 0 ] || fail "$1: legacy body_has values are not stored"
@@ -250,6 +250,17 @@ case "$OUT" in *"run from inside acme/widget's checkout"*) ;; *) fail "norepo: f
 setup gate-script-absent ONE AGAINST; run_start --no-preflight
 want "SKIPPED filing=" 0 gate-script-absent
 if grep -q '^gate\.script=' "$RUN/widget-42.state"; then fail "gate-script-absent: unexpected gate.script key"; fi
+
+# --- --mutant-job is accepted as one warning and stores no state
+setup mutant-job-noop ONE AGAINST
+run_start --no-preflight --mutant-job Selection
+want "SKIPPED filing=" 0 mutant-job-noop
+[ "$(grep -Fxc 'tkt-start: --mutant-job is a no-op; CI runs mutation testing on every ready PR' "$CDIR/stderr")" -eq 1 ] \
+  || fail "mutant-job-noop: prints exactly one no-op warning"
+! grep -q '^mutant_job=' "$RUN/widget-42.state" \
+  || fail "mutant-job-noop: does not store mutant_job"
+! grep -Fq 'gh|pr edit' "$T/calls.log" \
+  || fail "mutant-job-noop: does not change PR labels"
 
 setup gate-script-present ONE AGAINST
 git -C "$CLONE" worktree add --no-track -b tkt-start "$WT" origin/main >/dev/null
@@ -1751,49 +1762,5 @@ want "PRECONDITION part=3" 2 partmissingn
 case "$OUT" in *'part is missing'*) ;; *) fail "partmissingn: message misses [part is missing]" ;; esac
 cmp -s "$S" "$CDIR/state.before" || fail "partmissingn: state changed"
 [ ! -e "$S.lock" ] || fail "partmissingn: lock was not released"
-
-# --mutant-job adds the mutants label to the branch PR when the repo defines
-# the label; otherwise, or when the PR already carries it, nothing is edited.
-setup mutantlabel ONE AGAINST
-cp "$T/bin/gh" "$T/bin/gh.shared"
-cat >"$T/bin/gh" <<EOF
-#!/usr/bin/env bash
-case " \$* " in
-  *" pr list --head "*)
-    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
-    printf '7\\n'; exit 0 ;;
-  *"labels?per_page=100"*)
-    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
-    if [ -f "$T/labels-fail" ]; then echo "gh: labels boom" >&2; exit 5; fi
-    if [ -f "$T/labels-nomutants" ]; then printf 'bug\\n'; else printf 'bug\\nmutants\\n'; fi
-    exit 0 ;;
-  *" --json labels "*)
-    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
-    if [ -f "$T/pr-labeled" ]; then printf 'mutants\\n'; else printf 'bug\\n'; fi
-    exit 0 ;;
-  *" pr edit "*" --add-label mutants "*)
-    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
-    if [ -f "$T/edit-fail" ]; then echo "gh: edit boom" >&2; exit 5; fi
-    exit 0 ;;
-  *) exec "$T/bin/gh.shared" "\$@" ;;
-esac
-EOF
-chmod +x "$T/bin/gh"
-run_start
-want "CURRENT " 0 mutantlabel
-grep -qF -- 'gh|pr edit 7 --repo acme/widget --add-label mutants' "$T/calls.log" || fail "mutantlabel: no mutants label edit"
-: >"$T/calls.log"; printf '1' >"$T/labels-nomutants"; run_start
-want "CURRENT " 0 mutantlabelnolabel
-grep -qF -- 'pr edit' "$T/calls.log" && fail "mutantlabelnolabel: no edit without a repo mutants label"
-: >"$T/calls.log"; rm -f "$T/labels-nomutants"; printf '1' >"$T/pr-labeled"; run_start
-want "CURRENT " 0 mutantlabellabeled
-grep -qF -- 'pr edit' "$T/calls.log" && fail "mutantlabellabeled: no edit when the PR already carries mutants"
-: >"$T/calls.log"; rm -f "$T/pr-labeled"; printf '1' >"$T/edit-fail"; run_start
-want "STEP-FAIL step=github rc=5" 5 mutantlabeleditfail
-rm -f "$T/edit-fail"
-: >"$T/calls.log"; printf '1' >"$T/labels-fail"; run_start
-want "STEP-FAIL step=github rc=5" 5 mutantlabellistfail
-rm -f "$T/labels-fail"
-mv "$T/bin/gh.shared" "$T/bin/gh"
 
 echo "tkt-start: all cases passed"

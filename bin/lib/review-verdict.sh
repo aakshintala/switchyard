@@ -46,18 +46,15 @@ review_verdict() {
       if ($line | test("^## (standards|spec|overbuild|verify)([[:space:]]|$)")) then
         ($line | capture("^## (?<section>standards|spec|overbuild|verify)").section) as $section |
         .section = $section |
-        if ($section == "standards" or $section == "spec" or $section == "overbuild") then .axes += [$section] else . end
+        if ($section == "standards" or $section == "spec") then .axes += [$section] else . end
+      elif ($line | test("^VERDICT overbuild:")) or (.section == "overbuild" and ($line | test("^(VERDICT|FIX-)"))) then .
       elif ($line | test("^VERDICT standards: APPROVE\\.?$")) then .verdicts += ["standards:APPROVE"]
       elif ($line | test("^VERDICT standards: CHANGES\\.?$")) then .verdicts += ["standards:CHANGES"]
       elif ($line | test("^VERDICT spec: APPROVE\\.?$")) then .verdicts += ["spec:APPROVE"]
       elif ($line | test("^VERDICT spec: CHANGES\\.?$")) then .verdicts += ["spec:CHANGES"]
-      elif ($line | test("^VERDICT overbuild: APPROVE\\.?$")) then .verdicts += ["overbuild:APPROVE"]
-      elif ($line | test("^VERDICT overbuild: CHANGES\\.?$")) then .verdicts += ["overbuild:CHANGES"]
-      elif .section == "overbuild" and ($line | test("^VERDICT: APPROVE\\.?$")) then .verdicts += ["overbuild:APPROVE"]
-      elif .section == "overbuild" and ($line | test("^VERDICT: CHANGES\\.?$")) then .verdicts += ["overbuild:CHANGES"]
       elif .section == "verify" and ($line | test("^(VERDICT:\\s*)?FIX-OK([.:;,]($|\\s)|$|\\s)")) then .verdicts += ["verify:FIX-OK"]
       elif .section == "verify" and ($line | test("^(VERDICT:\\s*)?FIX-INCOMPLETE([.:;,]($|\\s)|$|\\s)")) then .verdicts += ["verify:FIX-INCOMPLETE"]
-      elif ($line | test("^(VERDICT|FIX-)")) then .verdicts += ["INVALID"]
+      elif ($line | test("^(VERDICT|FIX-)")) and .section != "overbuild" then .verdicts += ["INVALID"]
       else . end
     )) as $parsed |
     [
@@ -95,11 +92,11 @@ review_verdict() {
     case ",$verdicts," in *",$axis:APPROVE,"*|*",$axis:CHANGES,"*) ;; *) printf 'invalid'; return 0 ;; esac
   done
   case ",$verdicts," in
-    *":CHANGES,"*)
+    *",standards:CHANGES,"*|*",spec:CHANGES,"*)
       # The documented no-real-bug path ships a reviewed CHANGES round without
       # re-review, but only when the caller supplies --unverified-fixes.
       [ -n "${unverified:-}" ] && printf 'unverified' || printf 'changes';;
-    *":APPROVE,"*) printf 'approved';;
+    *",standards:APPROVE,"*|*",spec:APPROVE,"*) printf 'approved';;
     *) printf 'missing';;
   esac
 }

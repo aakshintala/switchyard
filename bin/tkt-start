@@ -26,7 +26,8 @@ usage() {
   exit 2
 }
 run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
-env=""; extra=""; merge_gate=""; merge_check=""; mutant_job=""; files=""; no_preflight=0; part=""; part_given=0; split=""; split_given=0
+env=""; extra=""; merge_gate=""; merge_check=""; files=""; no_preflight=0; part=""; part_given=0; split=""; split_given=0
+mutant_job_given=0
 legacy_body_flags=0; models=()
 model_roles=(lane fix map verifier verify review overbuild preflight planner)
 spec_issue=""; spec_issue_given=0
@@ -42,11 +43,13 @@ while [ $# -gt 0 ]; do
     --gate) [ $# -ge 2 ] || usage; takeover_gate="$2"; takeover_gate_given=1; shift 2 ;;
     --files) [ $# -ge 2 ] && [[ $2 != -* ]] || usage; shift; while [ $# -gt 0 ] && [[ $1 != -* ]]; do files="${files:+$files,}${1//[[:space:]]/,}"; shift; done ;;
     --no-preflight) no_preflight=1; shift ;;
-    --run|--repo|--issue|--spec|--branch|--worktree|--closing|--env|--extra|--merge-gate|--merge-check|--mutant-job|--workflow-doc)
+    --mutant-job) [ $# -ge 2 ] || usage; mutant_job_given=1; shift 2 ;;
+    --run|--repo|--issue|--spec|--branch|--worktree|--closing|--env|--extra|--merge-gate|--merge-check|--workflow-doc)
       [ $# -ge 2 ] || usage; v="${1#--}"; printf -v "${v//-/_}" '%s' "$2"; shift 2 ;;
     --help|-h|-*|*) usage ;;
   esac
 done
+[ "$mutant_job_given" -eq 0 ] || echo "tkt-start: --mutant-job is a no-op; CI runs mutation testing on every ready PR" >&2
 # --files: repeats and spaces both separate paths; squeeze the commas they leave.
 while [[ $files == *,,* ]]; do files="${files//,,/,}"; done
 files="${files#,}"; files="${files%,}"
@@ -468,7 +471,7 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
 fi
 for k in repo issue spec branch worktree run workflow_doc closing; do tkt set "$k" "${!k}"; done
 [ "$split_given" -eq 0 ] || tkt set split "$split"
-for k in env extra merge_gate merge_check mutant_job; do [ -n "${!k}" ] && tkt set "$k" "${!k}"; done
+for k in env extra merge_gate merge_check; do [ -n "${!k}" ] && tkt set "$k" "${!k}"; done
 if [ "$takeover_given" -eq 1 ]; then
   tkt set plan "takeover $takeover_ref"
   tkt set gate "$takeover_gate"
@@ -571,25 +574,6 @@ if [ -n "$stop_pr" ] && [ "$recur_ok" -eq 1 ]; then
 fi
 [ -n "$stop_pr" ] && deny "MERGED-STOP pr=$stop_pr" 1 "tkt-start: issue #$issue already resolved by merged PR #$stop_pr"
 part_notes+=(${notes[@]+"${notes[@]}"})
-# With --mutant-job, the branch PR must carry the mutants label, or ship-pr
-# later refuses the draft for lacking it. When the repo defines the label
-# (the same labels read ship-pr checks), add it to the branch's open PR when
-# missing. No PR yet still skips, but a failed lookup fails loud like a
-# refused edit instead of leaving the PR unlabelled.
-if [ -n "$mutant_job" ]; then
-  branch_pr="$(gh pr list --head "$branch" --repo "$repo" --json number --jq '.[0].number // empty' 2>&1)" || fail_step github "$?" "$branch_pr"
-  if [ -n "$branch_pr" ]; then
-    repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name' 2>&1)" || fail_step github "$?" "$repo_labels"
-    if grep -qx 'mutants' <<<"$repo_labels"; then
-      pr_labels="$(gh pr view "$branch_pr" --repo "$repo" --json labels --jq '.labels[].name' 2>&1)" || fail_step github "$?" "$pr_labels"
-      if ! grep -qx 'mutants' <<<"$pr_labels"; then
-        edit_err="$(gh pr edit "$branch_pr" --repo "$repo" --add-label mutants 2>&1)" \
-          || fail_step github "$?" "$edit_err"
-        tkt journal "tkt-start mutants label pr=$branch_pr"
-      fi
-    fi
-  fi
-fi
 # Every deny is behind us: only a start that gets this far drops the last
 # run's plan-comment id, so a refused start leaves it alone (#1517).
 tkt set post_run ""
