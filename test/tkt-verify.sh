@@ -17,10 +17,12 @@ T="$(cd "$T" && pwd)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" XDG_CACHE_HOME="$T/cache" TKT_BIN="$T/bin"
+export TKT_FLYWHEEL_INBOX="$T/flywheel-inbox"
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 export GIT_AUTHOR_NAME='Switchyard Test' GIT_AUTHOR_EMAIL='switchyard-test@example.invalid'
 export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 export T PR_HEAD
+ln -s "$REAL_BIN/inbox-send" "$T/bin/inbox-send" || fail "symlink inbox-send"
 
 cat >"$T/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -210,6 +212,12 @@ write_ruling_comment() {
     --arg created_at "$created_at" \
     '{body:$body, author_association:$author_association, issue_url:$issue_url, html_url:$html_url, created_at:$created_at}' \
     >"$T/comment-$id.json"
+}
+
+seed_closed_finding_history() {
+  local row="$1" history="$CASE_DIR/findings-history.md"
+  printf '# Findings history\n\n%s [tkt-history: raised=review round 0; status=closed in fix round 1; unverified=none]\n' "$row" >"$history"
+  set_state findings_history "$history"
 }
 
 install_delegate_probe() {
@@ -766,13 +774,38 @@ assert_no_slot SINCE-NOT-ANCESTOR
 setup_case round-limit
 set_state round 2
 run_verify
-[ "$RC" = 1 ] || fail "ROUND-LIMIT exited $RC, want 1: $OUT"
-assert_first_verdict ROUND-LIMIT 'ROUND-LIMIT'
-assert_no_review ROUND-LIMIT
-assert_no_slot ROUND-LIMIT
+[ "$RC" = 0 ] || fail "new finding beyond ROUND-LIMIT exited $RC: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-OK 'new finding beyond round limit'
+grep -q '^review-pr|' "$T/calls.log" || fail "new finding beyond round limit did not run review-pr"
+[ "$(read_state round)" = 3 ] || fail "new finding beyond round limit did not advance round"
+grep -Fq 'NOTICE ROUND-LIMIT round=2' "${S%.state}.journal" || fail "ROUND-LIMIT notice missing from journal"
+notice_file="$(find "$TKT_FLYWHEEL_INBOX" -type f -name '*.md' -print -quit 2>/dev/null || true)"
+[ -n "$notice_file" ] || fail "ROUND-LIMIT notice missing from flywheel inbox"
+grep -Fq 'NOTICE ROUND-LIMIT round=2' "$notice_file" || fail "flywheel notice omitted the round"
 assert_no_grant ROUND-LIMIT
 
-# Reverify cannot bypass the round cap when the recorded findings still have open P-lines.
+# A repeat finding at the limit stops before review and prints both source rows.
+setup_case repeat-finding
+set_state round 2
+seed_closed_finding_history 'P1 src/main.sh:1 — fixed earlier'
+run_verify
+[ "$RC" = 1 ] || fail "repeat finding exited $RC, want REPEAT-FINDING: $OUT"
+assert_first_verdict REPEAT-FINDING 'repeat finding'
+grep -Fq 'P1 src/main.sh:1 — fixed earlier' <<<"$OUT" || fail "repeat finding omitted fixed row: $OUT"
+grep -Fq 'P1 src/main.sh:1 — initial finding' <<<"$OUT" || fail "repeat finding omitted open row: $OUT"
+assert_no_review 'repeat finding'
+
+# A grant still passes a repeated finding through the existing ruling path.
+setup_case repeat-finding-grant
+set_state round 2
+seed_closed_finding_history 'P1 src/main.sh:1 — fixed earlier'
+write_ruling_comment 970 'grants: round 3'
+run_verify_ruling 970
+[ "$RC" = 0 ] || fail "repeat finding grant exited $RC: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-OK 'repeat finding grant'
+[ "$(read_state grant.3 | cut -d' ' -f1)" = 970 ] || fail "repeat finding grant was not recorded"
+
+# Reverify at the cap also runs; it does not consume another round.
 setup_case reverify-round-limit
 set_state reviewed "$HEAD"
 set_state round 2
@@ -783,12 +816,13 @@ set_state verify.body_hash prior-body-hash
 set_state verify.model state-verify-model
 set_state verify.slot 1
 run_reverify openai/gpt-6.1-sol
-[ "$RC" = 1 ] || fail "reverify-round-limit exited $RC, want 1: $OUT $(cat "$T/stderr")"
-assert_first_verdict ROUND-LIMIT 'reverify-round-limit'
-assert_no_review 'reverify-round-limit'
+[ "$RC" = 0 ] || fail "reverify-round-limit exited $RC, want FIX-OK: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-OK 'reverify-round-limit'
+grep -q '^review-pr|' "$T/calls.log" || fail "reverify-round-limit did not run review-pr"
 [ "$(read_state round)" = 2 ] || fail "reverify-round-limit changed the round"
+grep -Fq 'NOTICE ROUND-LIMIT round=2' "${S%.state}.journal" || fail "reverify-round-limit notice missing from journal"
 
-# A grant runs one P-line review past the cap and becomes a body requirement.
+# A repeat of the finding opened by the granted third round still stops.
 if [ -z "${CASE:-}" ] || [ "$CASE" = grant-one-round ]; then
 setup_case grant-one-round
 set_state round 2
@@ -810,11 +844,13 @@ grep -Fq 'RULING-REFUSED reason=reused comment=900' <<<"$OUT" || fail "reuse was
 grep -Fq 'grant comment 900 has already been consumed; post a new ruling comment' <<<"$OUT" || fail "reuse did not explain that a new ruling comment is needed: $OUT"
 assert_no_review reuse
 : >"$T/calls.log"
+F="$(read_state findings)"
 run_verify
-[ "$RC" = 1 ] || fail "next round without a grant exited $RC, want ROUND-LIMIT: $OUT"
-assert_first_verdict ROUND-LIMIT 'next round without grant'
-grep -Fq 'round=3' <<<"$OUT" || fail "next round hint omitted the current round: $OUT"
-assert_no_review 'next round without grant'
+[ "$RC" = 1 ] || fail "next repeated finding exited $RC, want REPEAT-FINDING: $OUT"
+assert_first_verdict REPEAT-FINDING 'next round repeat finding'
+grep -Fq 'P1 src/main.sh:1 — initial finding' <<<"$OUT" || fail "repeat verdict omitted the earlier fixed finding"
+grep -Fq 'P1 src/main.sh:1 — finding remains open' <<<"$OUT" || fail "repeat verdict omitted the current open finding"
+assert_no_review 'next repeated finding'
 fi
 
 # A separate refutes comment is staged with a valid round grant and marks only

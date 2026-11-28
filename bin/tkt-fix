@@ -105,6 +105,9 @@ if [ ! -r "$ruling_comment_lib" ]; then echo "tkt-fix: cannot read shared lib: $
 history_lib="$script_dir/lib/findings-history.sh"
 # shellcheck disable=SC1090
 . "$history_lib"
+round_notice_lib="$script_dir/lib/round-notice.sh"
+# shellcheck disable=SC1090
+. "$round_notice_lib"
 ruling_refutes_lib="$script_dir/lib/ruling-refutes.sh"
 if [ ! -r "$ruling_refutes_lib" ]; then echo "tkt-fix: cannot read shared lib: $ruling_refutes_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -413,6 +416,7 @@ if [ -n "$collect_fix_job" ]; then
   [ -n "$findings" ] || { echo "tkt-fix: missing recorded round findings: fix_round.$knum.findings" >&2; exit 2; }
   [ -r "$findings" ] || { echo "tkt-fix: cannot read recorded round findings: fix_round.$knum.findings=$findings" >&2; exit 2; }
 fi
+[ -n "$findings" ] || findings="$(t get findings 2>/dev/null || true)"
 fix_body_file="$run/$namebase$part_suffix-fix-round-$knum-pr-body.md"
 history_file="$(history_path "$knum")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
@@ -431,6 +435,7 @@ if [ "$round" -ge 2 ] && [ -z "$collect_verify_job" ] && [ -z "$collect_fix_job"
     [ "$resume_status" = NEEDS_CONTEXT ] && [ -n "$resume_owner" ] || limited=1
   fi
 fi
+round_cap_reached="$limited"
 
 ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_notes=()
 ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
@@ -665,14 +670,16 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
 fi
 
 round_limit() {
-  emit "ROUND-LIMIT round=$round" 1 "only a NEEDS_CONTEXT job may resume without a grant: tkt-fix $state --verify --resume <job id> --prompt <file>; otherwise post an owner ruling with grants: round $((round + 1)) and pass --ruling <comment id>, or send the open findings to triage"
+  local history_source repeat_rows
+  [ "$round_cap_reached" -eq 1 ] && [ "$grant_accepted" -ne 1 ] || return 0
+  history_source="$(t get findings_history 2>/dev/null || true)"
+  repeat_rows="$(findings_repeat_find "$findings" "$history_source" "$round" 2>/dev/null || true)"
+  if [ -n "$repeat_rows" ]; then
+    emit "REPEAT-FINDING round=$round" 1 "$repeat_rows"
+  fi
+  round_notice_send "$state" tkt-fix "$round"
 }
-# Only a round-2 closed-slot recovery without --resume may pass without a grant.
-if [ "$limited" -eq 1 ]; then
-  limit_pr="$(t get pr 2>/dev/null || true)"
-  limit_head="$(t get head 2>/dev/null || true)"
-  if [ "$round" -ne 2 ] || [ -z "$limit_pr" ] || [ -z "$limit_head" ] || [ -n "$resume" ]; then round_limit; fi
-fi
+if [ "$round_cap_reached" -eq 1 ]; then round_limit; fi
 # Fill missing PR identity before checking entry drift or dispatching a fix.
 # pre_pr_resume_hint names the pre-PR resume on the no-PR refusals below.
 pre_pr_resume_hint() {
@@ -744,7 +751,6 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
     recover_unpushed=0
     wt_status="$(git -C "$worktree" status --porcelain 2>/dev/null || printf '?')"
     clean=0; [ -z "$wt_status" ] && clean=1
-    if [ "$limited" -eq 1 ] && [ "$openk" -gt 0 ]; then round_limit; fi
     if [ "$openk" -gt 0 ]; then
       if fjob="$(t get "job.fix$openk" 2>/dev/null || true)" && [ -n "$fjob" ] \
         && git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null \
@@ -781,9 +787,8 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
       scan=$((scan - 1))
     done
     # Closed slots recover unpushed commits on a clean tree whose HEAD
-    # descends from the PR head, in either stored-head arm. Every round now
-    # requires the same complete fix-slot ownership chain back to the PR head;
-    # open slots use that proof above. ROUND-LIMIT still gates recovery pushes.
+    # descends from the PR head. The complete fix-slot ownership chain below
+    # remains required at every round.
     if [ "$keep" -eq 0 ] && [ "$openk" -eq 0 ] && [ "$clean" -eq 1 ] && [ "$prhead" != "$actual" ] \
       && { git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null || [ "$stored" = "$actual" ]; } \
       && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
@@ -801,7 +806,6 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
         keep=1
       fi
     fi
-    if [ "$keep" -eq 0 ] && [ "$limited" -eq 1 ]; then round_limit; fi
     if [ "$keep" -eq 0 ]; then
       # A pushed rebase or main merge leaves PR head == worktree HEAD on a
       # clean tree, descended from the state head. If an unpushed main merge
@@ -822,7 +826,6 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
     fi
   fi
 fi
-if [ "$limited" -eq 1 ] && [ "${recover_unpushed:-0}" -ne 1 ]; then round_limit; fi
 recover_unpushed="${recover_unpushed:-0}"
 if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && [ -z "$collect_fix_job" ] && job="$(t get "job.$slot" 2>/dev/null || true)" && [ -n "$job" ]; then
   recovery_cmd="tkt-fix $(printf '%q' "$state") [--verify|--no-verify] --collect-fix $(printf '%q' "$job")"

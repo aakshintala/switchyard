@@ -21,6 +21,7 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-plan.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
+export TKT_FLYWHEEL_INBOX="$T/flywheel-inbox"
 unset DELEGATE_JOBS_DIR
 
 # Files entries expose their read/write mark as a second parser field. A
@@ -46,6 +47,7 @@ prose_entries="$(awk -v mode=entries "$_plan_files_awk" "$prose_plan")"
 
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
+ln -s "$REAL_BIN/inbox-send" "$T/bin/inbox-send" || fail "symlink inbox-send"
 
 # Stub plan-check: mode file holds "ok" (exit 0), "lines" (exit 1, two lines), or "real" (runs bin/plan-check).
 printf 'ok' >"$T/pcmode"
@@ -343,6 +345,16 @@ expect_verdict() {
 }
 
 state_get() { bash "$TKT_STATE" "$S" get "$1" 2>/dev/null || true; }
+
+assert_round_notice() {
+  local round="$1" message="NOTICE ROUND-LIMIT round=$1" notice_file found=0
+  grep -Fq "$message" "${S%.state}.journal" || fail "missing journal notice $message"
+  while IFS= read -r notice_file; do
+    [ -n "$notice_file" ] || continue
+    grep -Fq "$message" "$notice_file" && found=1
+  done < <(find "$TKT_FLYWHEEL_INBOX" -type f -name '*.md' -print 2>/dev/null)
+  [ "$found" -eq 1 ] || fail "missing flywheel inbox notice $message"
+}
 
 set_ruling_comment() {
   local body="$1" created_at="${2:-2099-01-01T00:00:00Z}" comment_issue="${3:-518}" author_association="${4:-OWNER}" comment_file="${5:-$T/comment.json}"
@@ -717,10 +729,7 @@ run_plan confirm --edits "$CDIR/edits.md"
 [ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "granted confirm after PLAN-CHECK uses the grant"
 : >"$T/stub.log"
 
-# --- a refused verify keeps the verdict a granted confirm wrote (#1491) ---
-# fiber #4234: ROUND-LIMIT, granted confirm PLAN-OK, a later grant, verify
-# ROUND-LIMIT again, then post failed verdict=none: the refused verify had
-# blanked the verdict on entry before it refused.
+# --- a verify after confirm continues through the round boundary ---
 setup_case post-after-granted-confirm
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "post-after-granted-confirm seed round"
@@ -729,7 +738,9 @@ bash "$TKT_STATE" "$S" set granted_by flywheel || fail "post-after-granted-confi
 bash "$TKT_STATE" "$S" set granted_comment 111 || fail "post-after-granted-confirm seed comment"
 printf 'ok' >"$T/mode"
 run_plan verify
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "post-after-granted-confirm first verify"
+[ "$RC" -eq 0 ] || fail "post-after-granted-confirm first verify continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "post-after-granted-confirm first verify"
+assert_round_notice 2
 printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
 run_plan confirm --edits "$CDIR/edits.md"
 expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "post-after-granted-confirm confirm"
@@ -738,16 +749,16 @@ run_plan grant-round --by flywheel --comment 222 --ruling 222
 expect_verdict "TKT tkt-plan SET grant=flywheel:222 log=*" "post-after-granted-confirm grant"
 jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
 run_plan verify
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "post-after-granted-confirm second verify"
-[ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "post-after-granted-confirm ROUND-LIMIT starts no job"
-expect_plan_verdict ok "$(cat "$CDIR/base")" "post-after-granted-confirm ROUND-LIMIT keeps the verdict"
-expect_current_plan_verdict_hash "post-after-granted-confirm ROUND-LIMIT keeps the hash"
+[ "$RC" -eq 0 ] || fail "post-after-granted-confirm second verify continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "post-after-granted-confirm second verify"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" -gt "$jobs_before" ] || fail "post-after-granted-confirm second verify starts a job"
+expect_plan_verdict ok "$(cat "$CDIR/base")" "post-after-granted-confirm second verify result"
 run_plan post
 [ "$RC" -eq 0 ] || fail "post-after-granted-confirm post exits 0 (rc=$RC): $(first_line)"
 expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post-after-granted-confirm post"
 : >"$T/stub.log"
 
-# --- LINES, then PLAN-OK, then the round limit ---
+# --- LINES, then PLAN-OK, then another Verifier round past the notice boundary ---
 setup_case rounds
 rebase_plan
 printf 'lines' >"$T/mode"
@@ -766,28 +777,31 @@ expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "PLAN-OK"
 grep -q "slot=verifier-r2" "$T/stub.log" || fail "round 2 dispatches a new job on slot verifier-r2"
 grep -q "verifier.md" "$T/stub.log" || fail "verify fills the verifier brief"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "ROUND-LIMIT exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "ROUND-LIMIT"
-[ "$(grep -c '^job|' "$T/stub.log")" -eq 2 ] || fail "ROUND-LIMIT starts no third job"
+[ "$RC" -eq 0 ] || fail "past-limit Verifier run exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "past-limit Verifier run"
+[ "$(grep -c '^job|' "$T/stub.log")" -eq 3 ] || fail "past-limit Verifier starts a third job"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "3" ] || fail "past-limit Verifier counts round 3"
+assert_round_notice 2
 
-# --- confirm is the final pass: it records the round, then verify stops ---
+# --- confirm can run beyond its one-round notice boundary ---
 printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "confirm PLAN-OK exits 0"
 expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "confirm"
 grep -qx 'staleness-check: none (no confirm-edits file)' <<<"$OUT" || fail "confirm reports no edits file for the staleness check"
-[ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "confirm records the round it covers"
+[ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "3" ] || fail "confirm records the current round"
 grep -q "slot=confirm" "$T/stub.log" || fail "confirm runs the confirm slot"
 grep -q "confirm.md" "$T/stub.log" || fail "confirm fills the confirm brief"
 jobs_before="$(grep -c '^job|' "$T/stub.log")"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "verify after confirm exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify after confirm"
-[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "verify after confirm starts no job"
+[ "$RC" -eq 0 ] || fail "verify after confirm continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "verify after confirm"
+[ "$(grep -c '^job|' "$T/stub.log")" -gt "$jobs_before" ] || fail "verify after confirm starts a job"
+assert_round_notice 3
 run_plan confirm --edits "$CDIR/edits.md"
-[ "$RC" -eq 1 ] || fail "a second confirm exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "second confirm"
-[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "a second confirm starts no job"
+[ "$RC" -eq 0 ] || fail "a second confirm continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out* log=*" "second confirm"
+[ "$(grep -c '^job|' "$T/stub.log")" -gt "$jobs_before" ] || fail "a second confirm starts a job"
 
 # --- confirm compares the plan with the verify snapshot, not edit mtimes ---
 setup_case confirm-applied-plan-newer-edits
@@ -843,7 +857,7 @@ grep -qx 'staleness-check: skipped (no verified_plan_hash)' <<<"$OUT" || fail "c
 [ "$(grep -c '^job|' "$T/stub.log" || true)" -eq "$((jobs_before + 1))" ] || fail "confirm with no recorded hash runs a job"
 [ "$(state_get confirmed_for)" = "2" ] || fail "confirm with no recorded hash records the round"
 
-# --- every ROUND-LIMIT prints open lines from the latest report ---
+# --- a round notice carries open lines into a new Verifier run ---
 setup_case round-open-lines
 rebase_plan
 printf 'lines' >"$T/mode"
@@ -853,27 +867,33 @@ run_plan verify
 [ "$RC" -eq 1 ] || fail "round-open-lines second verify exits 1"
 jobs_before="$(grep -c '^job|' "$T/stub.log")"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "round-open-lines limit exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "round-open-lines"
-grep -qx '1. Rulings miss a contradiction in bin/x' <<<"$OUT" || fail "ROUND-LIMIT keeps the first open line"
-grep -qx '3. Gate skips package y' <<<"$OUT" || fail "ROUND-LIMIT keeps the final open line"
-[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "round-open-lines limit starts no job"
+[ "$RC" -eq 1 ] || fail "round-open-lines third verify exits 1"
+expect_verdict "TKT tkt-plan LINES report_lines=3 out=* log=*" "round-open-lines continues past the limit"
+grep -qx '1. Rulings miss a contradiction in bin/x' <<<"$OUT" || fail "continued Verifier reports the first open line"
+grep -qx '3. Gate skips package y' <<<"$OUT" || fail "continued Verifier reports the final open line"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "round-open-lines starts a third job"
+[ "$(state_get verifier_round)" = 3 ] || fail "round-open-lines counts round 3"
+assert_round_notice 2
 
 setup_case round-no-report
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-no-report seed round"
+printf 'silent' >"$T/mode"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "round-no-report limit exits 1"
-grep -qx 'none (no report: round 2 ended without one)' <<<"$OUT" || fail "missing report names the unfinished round"
+[ "$RC" -eq 3 ] || fail "round-no-report continues to the job and exits 3 for missing report"
+grep -Fq 'tkt-plan: tkt-job wrote no report:' "$CDIR/stderr.txt" || fail "round-no-report keeps the missing report guard"
+grep -q '^job|slot=verifier-r3' "$T/stub.log" || fail "round-no-report dispatches the next Verifier job"
+assert_round_notice 2
 
 setup_case round-empty-report
 rebase_plan
+printf 'ok' >"$T/mode"
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-empty-report seed round"
 : >"$CDIR/empty.md"
 bash "$TKT_STATE" "$S" set last_report "$CDIR/empty.md" || fail "round-empty-report seed report"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "round-empty-report limit exits 1"
-grep -qx 'none' <<<"$OUT" || fail "an empty report prints none"
+[ "$RC" -eq 0 ] || fail "round-empty-report continues and runs a Verifier (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "round-empty-report"
 
 setup_case round-plan-ok-prefix
 rebase_plan
@@ -881,9 +901,8 @@ bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-plan-ok-prefix seed r
 printf 'PLAN OK with trailing text\nopen finding\n' >"$CDIR/report.md"
 bash "$TKT_STATE" "$S" set last_report "$CDIR/report.md" || fail "round-plan-ok-prefix seed report"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "round-plan-ok-prefix limit exits 1"
-grep -qx 'PLAN OK with trailing text' <<<"$OUT" || fail "PLAN OK with trailing text is not treated as success"
-grep -qx 'open finding' <<<"$OUT" || fail "trailing-text report keeps its open lines"
+[ "$RC" -eq 0 ] || fail "round-plan-ok-prefix continues and runs a Verifier"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "round-plan-ok-prefix"
 
 # A verdict on the last line passes; line 1 stays the fast path.
 setup_case verdict-last
@@ -910,8 +929,9 @@ bash "$TKT_STATE" "$S" set verifier_round 2 || fail "verdict-last-round-limit se
 { for n in $(seq 1 18); do printf 'finding %s\n' "$n"; done; printf 'PLAN OK\n'; } >"$CDIR/report.md"
 bash "$TKT_STATE" "$S" set last_report "$CDIR/report.md" || fail "verdict-last-round-limit seed report"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "verdict-last-round-limit exits 1"
-grep -qx 'none' <<<"$OUT" || fail "ROUND-LIMIT shows no open lines for a verdict-last pass"
+[ "$RC" -eq 0 ] || fail "verdict-last-round-limit continues (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "verdict-last-round-limit"
+assert_round_notice 2
 
 # Two verdict lines that disagree (one carries text beside PLAN OK) are not a pass.
 setup_case verdict-conflict
@@ -930,9 +950,9 @@ printf '2. Current Verifier finding\n' >"$CDIR/verifier.md"
 printf 'stale confirm finding\n' >"$CDIR/run/switchyard-518-confirm-out.md"
 bash "$TKT_STATE" "$S" set last_report "$CDIR/verifier.md" || fail "round-stale-confirm-report seed latest report"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "round-stale-confirm-report limit exits 1"
-grep -qx '2. Current Verifier finding' <<<"$OUT" || fail "ROUND-LIMIT uses last_report"
-grep -q 'stale confirm finding' <<<"$OUT" && fail "ROUND-LIMIT ignores a stale confirm report"
+[ "$RC" -eq 0 ] || fail "round-stale-confirm-report continues (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "round-stale-confirm-report"
+assert_round_notice 2
 
 setup_case round-report-cap
 rebase_plan
@@ -941,10 +961,9 @@ bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-report-cap seed round
 for n in $(seq 1 40); do printf 'line-%s\n' "$n" >>"$CDIR/report.md"; done
 bash "$TKT_STATE" "$S" set last_report "$CDIR/report.md" || fail "round-report-cap seed report"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "round-report-cap limit exits 1"
-[ "$(grep -c '^line-' <<<"$OUT")" -eq 38 ] || fail "ROUND-LIMIT caps report lines at 38"
-grep -qx 'line-38' <<<"$OUT" || fail "ROUND-LIMIT includes the 38th report line"
-grep -qx 'line-39' <<<"$OUT" && fail "ROUND-LIMIT omits report lines after 38"
+[ "$RC" -eq 0 ] || fail "round-report-cap continues (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "round-report-cap"
+assert_round_notice 2
 
 setup_case round-ok-reports
 rebase_plan
@@ -954,8 +973,9 @@ run_plan verify
 run_plan verify
 [ "$RC" -eq 0 ] || fail "round-ok-reports second verify exits 0"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "round-ok-reports limit exits 1"
-grep -qx 'none' <<<"$OUT" || fail "a PLAN OK report has no open lines"
+[ "$RC" -eq 0 ] || fail "round-ok-reports continues past the limit"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "round-ok-reports past the limit"
+assert_round_notice 2
 
 setup_case round-confirm-report
 rebase_plan
@@ -969,11 +989,13 @@ printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "round-confirm-report confirm exits 1"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "round-confirm-report verify limit exits 1"
-grep -qx '3. Gate skips package y' <<<"$OUT" || fail "verify ROUND-LIMIT uses the confirm report"
+[ "$RC" -eq 1 ] || fail "round-confirm-report verify after confirm reports LINES"
+expect_verdict "TKT tkt-plan LINES report_lines=3 out=* log=*" "round-confirm-report verify after confirm"
+assert_round_notice 2
 run_plan confirm --edits "$CDIR/edits.md"
-[ "$RC" -eq 1 ] || fail "round-confirm-report second confirm exits 1"
-grep -qx '3. Gate skips package y' <<<"$OUT" || fail "confirm ROUND-LIMIT uses the confirm report"
+[ "$RC" -eq 1 ] || fail "round-confirm-report second confirm reports LINES"
+expect_verdict "TKT tkt-plan LINES report_lines=3 out=* log=*" "round-confirm-report second confirm"
+assert_round_notice 2
 
 setup_case round-confirm-ok
 rebase_plan
@@ -987,8 +1009,9 @@ printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "round-confirm-ok confirm exits 0"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "round-confirm-ok verify limit exits 1"
-grep -qx 'none' <<<"$OUT" || fail "latest PLAN OK confirm report replaces prior lines"
+[ "$RC" -eq 0 ] || fail "round-confirm-ok verify after confirm continues"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "round-confirm-ok verify after confirm"
+assert_round_notice 2
 
 # --- a grant records one extra confirm round and validates its inputs ---
 setup_case grant-valid
@@ -1302,6 +1325,7 @@ setup_case confirm-blocked-rerun
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-blocked-rerun seed round"
 printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+: >"$T/stub.log"
 printf 'blocked' >"$T/mode"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "confirm-blocked-rerun first confirm exits 1"
@@ -1345,36 +1369,37 @@ run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "grant-extra initial confirm exits 0"
 jobs_before="$(grep -c '^job|' "$T/stub.log")"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "grant-extra verify before grant exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify before grant"
-grep -Fq "if another fully specified confirm is authorized, run tkt-plan $S grant-round --by <who> --comment <id>, then tkt-plan $S confirm --edits <file>; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, run tkt-plan $S rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>; after triage answers every open line, run tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "verify ROUND-LIMIT names the grant, steward ruling and triaged paths"
+[ "$RC" -eq 0 ] || fail "grant-extra verify before grant continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "verify before grant"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "verify before grant dispatches"
+assert_round_notice 2
 run_plan confirm --edits "$CDIR/edits.md"
-[ "$RC" -eq 1 ] || fail "grant-extra confirm before grant exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm before grant"
-grep -Fq "if another fully specified confirm is authorized, run tkt-plan $S grant-round --by <who> --comment <id>, then tkt-plan $S confirm --edits <file>; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, run tkt-plan $S rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>; after triage answers every open line, run tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "confirm ROUND-LIMIT names the grant, steward ruling and triaged paths"
-[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "limits before grant start no job"
+[ "$RC" -eq 0 ] || fail "grant-extra confirm before grant continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out* log=*" "confirm before grant"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 2))" ] || fail "confirm before grant dispatches"
+assert_round_notice 2
 run_plan grant-round --by switchyard --comment 1234
 [ "$RC" -eq 0 ] || fail "grant-extra grant exits 0"
 grep -Fq "next: tkt-plan $S confirm --edits <file>" <<<"$OUT" || fail "grant success names confirm as the next command"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "pending grant does not unlock verify"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify with pending grant"
-grep -Fq "a grant is pending (switchyard:1234); verify does not consume it: run tkt-plan $S confirm --edits <file>" <<<"$OUT" || fail "verify with pending grant points at confirm without consuming the grant"
-! grep -Fq "if no grant is recorded" <<<"$OUT" || fail "verify with pending grant does not suggest recording another grant"
+[ "$RC" -eq 0 ] || fail "verify with pending grant continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "verify with pending grant"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "verify does not consume the pending grant"
-[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "verify with pending grant starts no job"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 3))" ] || fail "verify with pending grant runs without consuming it"
+assert_round_notice 3
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "granted confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 [ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "granted confirm consumes the grant"
-[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "granted confirm dispatches exactly one job"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 4))" ] || fail "granted confirm is one job beyond the continued rounds"
 grep -q '^job|slot=confirm|' "$T/stub.log" || fail "granted confirm uses the confirm slot"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "verify after granted confirm exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify after granted confirm"
+[ "$RC" -eq 0 ] || fail "verify after granted confirm continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "verify after granted confirm"
+assert_round_notice 4
 run_plan confirm --edits "$CDIR/edits.md"
-[ "$RC" -eq 1 ] || fail "confirm after granted confirm exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm after granted confirm"
-[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "limits after granted confirm start no job"
+[ "$RC" -eq 0 ] || fail "confirm after granted confirm continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out* log=*" "confirm after granted confirm"
+[ "$(grep -c '^job|' "$T/stub.log")" -gt "$jobs_before" ] || fail "continued limits after granted confirm start jobs"
 
 # --- triaged records a plan verdict only after confirm or exhausted rounds ---
 setup_case triaged-before-round-limit
@@ -1542,11 +1567,12 @@ run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "confirm LINES exits 1"
 expect_verdict "TKT tkt-plan LINES report_lines=* out=*confirm-out.md log=*" "confirm LINES"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "verify after a LINES confirm exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify after LINES confirm"
+[ "$RC" -eq 1 ] || fail "verify after a LINES confirm reports the Verifier findings"
+expect_verdict "TKT tkt-plan LINES report_lines=3 out=* log=*" "verify after LINES confirm"
+assert_round_notice 2
 printf 'ok' >"$T/mode"
 
-# --- two Verifier ASKs count the rounds, then the limit stops the third ---
+# --- two Verifier ASKs count the rounds, then the next run notifies and proceeds ---
 setup_case ask
 rebase_plan
 jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
@@ -1567,11 +1593,11 @@ grep -q "which design rules the retry?" <<<"$OUT" || fail "second ASK digest car
 [ "$(bash "$TKT_STATE" "$S" get verifier_round 2>/dev/null || printf '0')" = "2" ] || fail "second ASK counts round 2"
 grep -q "slot=verifier-r2" "$T/stub.log" || fail "second ASK uses slot verifier-r2"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "ROUND-LIMIT after two ASKs exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "ROUND-LIMIT after two ASKs"
-grep -Fq "run tkt-plan $S confirm --edits <file>, or after triage answers every open line run tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "round limit names confirm and triaged paths"
-# Contract: docs/agents/workflow.md:7: ROUND-LIMIT dispatches no additional job.
-[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 2))" ] || fail "ROUND-LIMIT after two ASKs starts no third job"
+[ "$RC" -eq 1 ] || fail "third ASK exits 1"
+expect_verdict "TKT tkt-plan ASK id=j1 report=* log=*" "third ASK passthrough"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round 2>/dev/null || printf '0')" = 3 ] || fail "third ASK counts the continued round"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 3))" ] || fail "round notice starts a third job"
+assert_round_notice 2
 printf 'ok' >"$T/mode"
 
 # --- post runs post-plan behind a real plan-gate check ---
@@ -2601,11 +2627,11 @@ rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
 gh_before="$(gh_count)"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "order round-limit exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "order round-limit"
-grep -q "tkt-plan .* confirm --edits <file>" <<<"$OUT" || fail "order round-limit names the confirm command"
-grep -q "triaged --comment <id>" <<<"$OUT" || fail "order round-limit names the triage escape"
-[ "$(gh_count)" = "$gh_before" ] || fail "ROUND-LIMIT reads no ticket"
+[ "$RC" -eq 0 ] || fail "order round-limit verify continues (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "order round-limit"
+grep -q 'slot=verifier-r3' "$T/stub.log" || fail "order round-limit starts the next Verifier job"
+[ "$(gh_count)" -gt "$gh_before" ] || fail "continued round-limit reads the ticket before dispatch"
+assert_round_notice 2
 
 setup_case order-confirmed
 rebase_plan
@@ -2613,13 +2639,11 @@ bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
 gh_before="$(gh_count)"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "order confirmed exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "order confirmed"
-grep -q "grant-round --by <who> --comment <id>" <<<"$OUT" || fail "confirm=done names the grant command"
-grep -q "confirm --edits <file>" <<<"$OUT" || fail "confirm=done names the confirm command"
-grep -q "rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>" <<<"$OUT" || fail "confirm=done names the steward ruling path"
-grep -q "triaged --comment <id>" <<<"$OUT" || fail "confirm=done names the triage escape"
-[ "$(gh_count)" = "$gh_before" ] || fail "confirm=done reads no ticket"
+[ "$RC" -eq 0 ] || fail "order confirmed verify continues (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "order confirmed"
+grep -q 'slot=verifier-r3' "$T/stub.log" || fail "confirmed round-limit starts another Verifier job"
+[ "$(gh_count)" -gt "$gh_before" ] || fail "continued confirmed round-limit reads the ticket"
+assert_round_notice 2
 
 setup_case order-stale
 gh_before="$(gh_count)"
@@ -2699,15 +2723,16 @@ confirm_fail_case confirm-fail fail
 
 setup_case confirm-order
 rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed confirm-order verifier round"
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
 printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
 gh_before="$(gh_count)"
 run_plan confirm --edits "$CDIR/edits.md"
-[ "$RC" -eq 1 ] || fail "confirm-order exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm-order"
-grep -q "grant-round --by <who> --comment <id>" <<<"$OUT" || fail "confirm-order names the grant command"
-grep -q "confirm --edits <file>" <<<"$OUT" || fail "confirm-order names the confirm command"
-[ "$(gh_count)" = "$gh_before" ] || fail "a used confirm reads no ticket"
+[ "$RC" -eq 0 ] || fail "confirm-order continues through confirm limit (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "confirm-order"
+[ "$(gh_count)" -gt "$gh_before" ] || fail "continued confirm reads ticket before starting job"
+grep -q '^job|slot=confirm|' "$T/stub.log" || fail "confirm-order runs the confirm job"
+assert_round_notice 0
 
 # --- real templates: the filled verify and confirm briefs carry the ticket text ---
 cp "$SCRIPT_DIR/../skills/planning/briefs/verifier.md" "$T/home/.agents/skills/planning/briefs/verifier.md" || fail "copy the real verifier brief"
@@ -2862,7 +2887,7 @@ run_plan post
 [ "$RC" -eq 1 ] || fail "sibling-base: non-descendant base exits 1"
 expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "sibling-base"
 
-# --- every verify refusal after argument parsing, except ROUND-LIMIT, clears the previous verdict ---
+# --- Verifier notices do not preserve a stale verdict in place of the run ---
 seed_ok_verdict() {
   current_base="$(cat "$CDIR/base")"
   bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed verify verdict"
@@ -2897,10 +2922,10 @@ rebase_plan
 seed_ok_verdict
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round limit"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "ROUND-LIMIT verify exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "ROUND-LIMIT keeps verdict"
-# ROUND-LIMIT is a budget refusal, not a judgment of the plan: it keeps the verdict (#1491).
-expect_plan_verdict ok "$current_base" "ROUND-LIMIT keeps pair"
+[ "$RC" -eq 0 ] || fail "past-limit Verifier exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "past-limit Verifier"
+expect_plan_verdict ok "$current_base" "past-limit Verifier records a fresh verdict"
+assert_round_notice 2
 setup_case verdict-clear-model
 rebase_plan
 seed_ok_verdict
@@ -2965,9 +2990,10 @@ bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed confirm L
 bash "$TKT_STATE" "$S" set confirmed_for 1 || fail "seed confirm limit"
 printf 'round 1, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
 run_plan confirm --edits "$CDIR/edits.md"
-[ "$RC" -eq 1 ] || fail "limited confirm exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "limited confirm keeps previous verdict"
-expect_plan_verdict lines "$base_now" "limited confirm keeps pair"
+[ "$RC" -eq 0 ] || fail "limited confirm continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "limited confirm"
+expect_plan_verdict ok "$base_now" "limited confirm records fresh verdict"
+assert_round_notice 1
 
 # --- same-path --no-verifier does not overwrite an existing word ---
 setup_case verdict-set-preserves
@@ -3154,8 +3180,9 @@ run_plan confirm --edits "$CDIR/edits.md"
 printf 'line 2 was edited\n' >"$CDIR/run/switchyard-518-confirm-edits-2.md"
 touch -t 203001010000 "$CDIR/run/switchyard-518-confirm-edits-2.md"
 run_plan confirm --edits "$CDIR/edits.md"
-[ "$RC" -eq 1 ] || fail "second re-confirm exits 1 (rc=$RC)"
-expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "second re-confirm"
+[ "$RC" -eq 0 ] || fail "second re-confirm continues (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out* log=*" "second re-confirm"
+assert_round_notice 1
 
 # --- LINES and PLAN-CHECK name the line count, not a finding count (#1109) ---
 # `n=` reads as a finding count; `report_lines=` says what the number is.
@@ -3197,10 +3224,11 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = unresolved-inse
   awk '{ if ($0 == "1. Preserve `src/cited.rs::absent`.") { print "1. Preserve `src/cited.rs::available`."; print "2. Add an independent task."; } else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
   : >"$T/stub.log"
   run_plan verify
-  [ "$RC" -eq 1 ] || fail "inserted task beside an unresolved fix reaches ROUND-LIMIT (rc=$RC): $(first_line)"
-  expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "confirm-unresolved-insertion is not unresolved-only"
-  [ "$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)" = 0 ] || fail "confirm-unresolved-insertion starts no free Verifier job"
-  [ "$(state_get verifier_round)" = 2 ] || fail "confirm-unresolved-insertion preserves the exhausted count"
+  [ "$RC" -eq 0 ] || fail "inserted task beside unresolved fix continues past the limit (rc=$RC): $(first_line)"
+  expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "confirm-unresolved-insertion continues"
+  [ "$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)" -eq 1 ] || fail "confirm-unresolved-insertion starts the Verifier job"
+  [ "$(state_get verifier_round)" = 3 ] || fail "confirm-unresolved-insertion counts the additional round"
+  assert_round_notice 2
   : >"$T/stub.log"
 fi
 

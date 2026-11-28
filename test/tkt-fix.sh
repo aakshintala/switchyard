@@ -27,6 +27,7 @@ T="$(cd "$T" && pwd)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" XDG_CACHE_HOME="$T/cache" TKT_BIN="$T/bin"
+export TKT_FLYWHEEL_INBOX="$T/flywheel-inbox"
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 unset TKT_FIX_DISPATCH
 
@@ -68,6 +69,7 @@ chmod +x "$T/bin/tkt-gate"
 ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/tkt-state" "$T/bin/tkt-state" || fail "symlink tkt-state"
 ln -s "$REAL_BIN/tkt-fix" "$T/bin/tkt-fix" || fail "symlink tkt-fix"
+ln -s "$REAL_BIN/inbox-send" "$T/bin/inbox-send" || fail "symlink inbox-send"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
 # Lane and fix slots need a fence grant (test/tkt-job.sh covers that); these cases test the fix flow.
@@ -4812,4 +4814,102 @@ grep -Fq -- '--model-ruling <comment URL>' "$T/stderr" || fail "unruled Sonnet v
 ! grep -Fq "$VERIFY_OTHER_SLOT_RULING" "${S%.state}.journal" || fail "wrong-slot verify ruling is not journalled"
 fi
 
-echo "tkt-fix assertions passed"
+# A fixed historical row supplies the baseline for round-limit repeat detection.
+seed_closed_finding() {
+  local row="$1" history="$CDIR/run/switchyard-529-findings-history-r2.md"
+  printf '# Findings history for scoped verification\n\n%s [tkt-history: raised=review round 0; status=closed in fix round 1; unverified=none]\n' "$row" >"$history"
+  bash "$TKT_STATE" "$S" set findings_history "$history" >/dev/null || fail "seed closed finding history"
+}
+
+run_round_notice_case() {
+  local name="$1" current="$2" previous="$3" out rc=0 inbox_message
+  setup_case "$name"
+  printf '%s\n' "$current" >"$CDIR/findings.md"
+  bash "$TKT_STATE" "$S" set round 2 >/dev/null
+  bash "$TKT_STATE" "$S" set fixslot 2 >/dev/null
+  seed_closed_finding "$previous"
+  out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || rc=$?
+  [ "$rc" -eq 0 ] || fail "$name exited $rc instead of continuing: $out $(cat "$T/stderr")"
+  grep -q '^TKT tkt-fix FIX-OK ' <<<"$out" || fail "$name did not finish the new round: $out"
+  grep -Fq 'NOTICE ROUND-LIMIT round=2' "${S%.state}.journal" || fail "$name omitted the journal notice"
+  inbox_message="$(find "$TKT_FLYWHEEL_INBOX" -type f -name '*.md' -print -quit 2>/dev/null || true)"
+  [ -n "$inbox_message" ] || fail "$name did not send a flywheel inbox notice"
+  grep -Fq 'NOTICE ROUND-LIMIT round=2' "$inbox_message" || fail "$name inbox notice omitted the round"
+  grep -q '^job|' "$T/calls.log" || fail "$name did not dispatch its fix job"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "$name did not count the continued round"
+}
+
+run_repeat_finding_case() {
+  local name="$1" current="$2" previous="$3" should_repeat="$4" out rc=0
+  setup_case "$name"
+  printf '%s\n' "$current" >"$CDIR/findings.md"
+  bash "$TKT_STATE" "$S" set round 2 >/dev/null
+  bash "$TKT_STATE" "$S" set fixslot 2 >/dev/null
+  seed_closed_finding "$previous"
+  out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || rc=$?
+  if [ "$should_repeat" = yes ]; then
+    [ "$rc" -eq 1 ] || fail "$name exited $rc, want repeat stop: $out $(cat "$T/stderr")"
+    grep -q '^TKT tkt-fix REPEAT-FINDING ' <<<"$out" || fail "$name did not print REPEAT-FINDING: $out"
+    grep -Fq "$previous" <<<"$out" || fail "$name omitted the earlier fixed row: $out"
+    grep -Fq "$current" <<<"$out" || fail "$name omitted the current open row: $out"
+    ! grep -q '^job|' "$T/calls.log" || fail "$name dispatched despite the repeat"
+    [ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "$name changed the round after the repeat stop"
+  else
+    [ "$rc" -eq 0 ] || fail "$name exited $rc instead of continuing: $out $(cat "$T/stderr")"
+    grep -q '^TKT tkt-fix FIX-OK ' <<<"$out" || fail "$name did not continue: $out"
+    ! grep -q '^TKT tkt-fix REPEAT-FINDING ' <<<"$out" || fail "$name falsely treated a distinct finding as a repeat"
+  fi
+}
+
+# Past the normal round limit, a new finding continues and is reported to both
+# the journal and the overridable flywheel inbox.
+if want round-limit-notice-new-finding; then
+  run_round_notice_case round-limit-notice-new-finding \
+    'P1 src/new.sh:20 — new issue' 'P1 src/old.sh:10 — fixed earlier issue'
+fi
+
+# Same file and priority with a line shift of five is a repeat; six is not.
+if want repeat-finding-nearby; then
+  run_repeat_finding_case repeat-finding-nearby \
+    'P1 src/file.sh:15 — recurring issue' 'P1 src/file.sh:10 — fixed issue' yes
+fi
+if want repeat-finding-shift-six; then
+  run_repeat_finding_case repeat-finding-shift-six \
+    'P1 src/file.sh:16 — new issue' 'P1 src/file.sh:10 — fixed issue' no
+fi
+if want repeat-finding-different-class; then
+  run_repeat_finding_case repeat-finding-different-class \
+    'P2 src/file.sh:11 — different category' 'P1 src/file.sh:10 — fixed issue' no
+fi
+if want repeat-finding-different-file; then
+  run_repeat_finding_case repeat-finding-different-file \
+    'P1 src/other.sh:11 — other file' 'P1 src/file.sh:10 — fixed issue' no
+fi
+
+# An owner grant continues a repeated finding through the existing ruling path.
+if want repeat-finding-grant; then
+  setup_case repeat-finding-grant
+  printf '%s\n' 'P1 src/file.sh:15 — recurring issue' >"$CDIR/findings.md"
+  bash "$TKT_STATE" "$S" set round 2 >/dev/null
+  bash "$TKT_STATE" "$S" set fixslot 2 >/dev/null
+  seed_closed_finding 'P1 src/file.sh:10 — fixed issue'
+  write_ruling_comment 950 'grants: round 3'
+  out="$(bash "$TKT" "$S" --verify --ruling 950 2>"$T/stderr")" || fail "repeat grant exited $?: $out $(cat "$T/stderr")"
+  grep -q '^TKT tkt-fix FIX-OK ' <<<"$out" || fail "repeat grant did not continue: $out"
+  ! grep -q '^TKT tkt-fix REPEAT-FINDING ' <<<"$out" || fail "repeat grant did not pass the repeat stop"
+  grep -q '^job|' "$T/calls.log" || fail "repeat grant did not dispatch"
+  [ "$(bash "$TKT_STATE" "$S" get grant.3 | cut -d' ' -f1)" = 950 ] || fail "repeat grant did not use the existing grant record"
+fi
+
+# The two-round STOP-AT-TWO result remains a separate fix hard cap.
+if want fix-incomplete-hard-cap; then
+  setup_case fix-incomplete-hard-cap
+  prepare_round_two_resume DONE
+  printf 'incomplete' >"$T/vermode"
+  printf 'incomplete' >"$T/collectmode"
+  printf 'resume brief\n' >"$CDIR/prompt.md"
+  out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || rc=$?
+  rc=${rc:-0}
+  grep -q 'FIX-INCOMPLETE round=3 STOP-AT-TWO' <<<"$out" || fail "fix hard cap no longer stops after the second completed review round: $out"
+fi
+

@@ -24,6 +24,54 @@ findings_row_status() {
   sed -n 's/.*status=\([^;]*\).*/\1/p' <<<"$meta"
 }
 
+# Parse the location and priority/category from a finding row. The existing
+# finding format has no separate structured class field, so P<n> is its class.
+findings_repeat_parse_location() {
+  local row="$1"
+  row="$(findings_row_base "$row")"
+  [[ "$row" =~ ^P([123])[[:space:]]+([^[:space:]]+):([0-9]+)(-([0-9]+))?([[:space:]]|$) ]] || return 1
+  FINDING_REPEAT_CLASS="P${BASH_REMATCH[1]}"
+  FINDING_REPEAT_FILE="${BASH_REMATCH[2]}"
+  FINDING_REPEAT_START="${BASH_REMATCH[3]}"
+  FINDING_REPEAT_END="${BASH_REMATCH[5]:-${BASH_REMATCH[3]}}"
+  [ "$FINDING_REPEAT_END" -ge "$FINDING_REPEAT_START" ]
+}
+
+# findings_repeat_find CURRENT HISTORY ROUND prints the earlier fixed row and
+# current open row when priority, file and nearby line ranges identify a repeat.
+findings_repeat_find() {
+  local current_file="$1" history_file="$2" current_round="$3"
+  local history_row history_base history_status closed_round current_row gap
+  [ -r "$current_file" ] && [ -r "$history_file" ] || return 1
+  case "$current_round" in ''|*[!0-9]*) return 1 ;; esac
+  while IFS= read -r history_row || [ -n "$history_row" ]; do
+    history_status="$(findings_row_status "$history_row")"
+    [[ "$history_status" =~ ^closed\ in\ fix\ round\ ([0-9]+)$ ]] || continue
+    closed_round="${BASH_REMATCH[1]}"
+    [ "$closed_round" -le "$current_round" ] || continue
+    history_base="$(findings_row_base "$history_row")"
+    findings_repeat_parse_location "$history_base" || continue
+    local old_class="$FINDING_REPEAT_CLASS" old_file="$FINDING_REPEAT_FILE"
+    local old_start="$FINDING_REPEAT_START" old_end="$FINDING_REPEAT_END"
+    while IFS= read -r current_row || [ -n "$current_row" ]; do
+      case "$current_row" in P1\ *|P2\ *|P3\ *) ;; *) continue ;; esac
+      findings_repeat_parse_location "$current_row" || continue
+      [ "$FINDING_REPEAT_CLASS" = "$old_class" ] && [ "$FINDING_REPEAT_FILE" = "$old_file" ] || continue
+      if [ "$FINDING_REPEAT_START" -gt "$old_end" ]; then
+        gap=$((FINDING_REPEAT_START - old_end))
+      elif [ "$old_start" -gt "$FINDING_REPEAT_END" ]; then
+        gap=$((old_start - FINDING_REPEAT_END))
+      else
+        gap=0
+      fi
+      [ "$gap" -le 5 ] || continue
+      printf 'Earlier fixed row: %s\nCurrent open row: %s\n' "$history_base" "$current_row"
+      return 0
+    done < <(finding_rows input "$current_file" 2>/dev/null || true)
+  done <"$history_file"
+  return 1
+}
+
 # Store every finding supplied to a scoped verify, with its origin and later
 # closure, separately from the open-only file the next fix job consumes.
 write_findings_history() {

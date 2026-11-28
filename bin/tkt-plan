@@ -27,6 +27,10 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 . "$script_dir/lib/job-refusal.sh"
 tkt_refuse_inside_delegate tkt-plan
 tkt_state="$script_dir/tkt-state"; bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
+round_notice_lib="$script_dir/lib/round-notice.sh"
+if [ ! -r "$round_notice_lib" ]; then echo "tkt-plan: cannot read shared lib: $round_notice_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$round_notice_lib"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-plan: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -310,8 +314,7 @@ runjob() {
 }
 
 # A verify refusal that judges the plan (STALE, PLAN-CHECK) or reaches a job
-# clears the verdict. ROUND-LIMIT is a budget refusal and keeps it: a verify
-# after a granted confirm must not blank that confirm's PLAN-OK (#1491).
+# clears the verdict.
 clear_verdict() {
   t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
   t set plan_verdict_by ""; t set plan_verdict_ruling ""; t set plan_verdict_comment ""
@@ -827,16 +830,16 @@ do_verify() {
         granted_comment="$(t get granted_comment 2>/dev/null || true)"
         record_plan_stop_verdict round-limit
         printf -v confirm_route 'a grant is pending (%s:%s); verify does not consume it: run tkt-plan %q confirm --edits %s' "$granted_by" "$granted_comment" "$state" '<file>'
-        emit "ROUND-LIMIT round=$round confirm=done" 1 "$confirm_route" "$(open_lines)"
       fi
       record_plan_stop_verdict round-limit
-      emit "ROUND-LIMIT round=$round confirm=done" 1 "$(round_limit_recovery_route)" "$(open_lines)"
+      round_notice_send "$state" tkt-plan "$round"
     fi
-    [ "$round" -lt 2 ] || {
+    if [ "$round" -ge 2 ]; then
       record_plan_stop_verdict round-limit
-      printf -v round_limit_route 'two Verifier rounds ran with no confirm; run tkt-plan %q confirm --edits %s, or after triage answers every open line run tkt-plan %q triaged --comment %s' "$state" '<file>' "$state" '<id>'
-      emit "ROUND-LIMIT round=$round" 1 "$round_limit_route" "$(open_lines)"
-    }
+      if [ -z "$(t get confirmed_for 2>/dev/null || true)" ]; then
+        round_notice_send "$state" tkt-plan "$round"
+      fi
+    fi
   fi
   clear_verdict
   model="$(vmodel "$model")" || exit 2
@@ -906,6 +909,7 @@ do_confirm() {
     --edits) [ $# -ge 2 ] || usage; edits="$2"; shift 2;; *) usage;; esac; done
   [ -n "$edits" ] || usage; [ -r "$edits" ] || { echo "tkt-plan: cannot read edits file: $edits" >&2; exit 2; }
   load_plan
+  round="$(ronum)"
   latest_edits=""
   for candidate in "$run/$namebase"-confirm-edits*.md; do
     [ -f "$candidate" ] || continue
@@ -965,7 +969,8 @@ do_confirm() {
     [ -z "$unresolved_snapshot" ] || clear_unresolved_snapshot
   fi
   if [ "$confirm_limited" -eq 1 ]; then
-    emit "ROUND-LIMIT confirm=done" 1 "staleness-check: $staleness_check" "$(round_limit_recovery_route)" "$(open_lines)"
+    record_plan_stop_verdict round-limit
+    round_notice_send "$state" tkt-plan "$round"
   fi
   [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "staleness-check: $staleness_check" "$(head -n "$REPORT_LINES" <<<"$pc_out")"
   cmodel="$(vmodel)" || exit 2

@@ -51,6 +51,9 @@ history_lib="$script_dir/lib/findings-history.sh"
 if [ ! -r "$history_lib" ]; then echo "tkt-verify: cannot read shared lib: $history_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$history_lib"
+round_notice_lib="$script_dir/lib/round-notice.sh"
+# shellcheck disable=SC1090
+. "$round_notice_lib"
 ruling_comment_lib="$script_dir/lib/ruling-comment.sh"
 if [ ! -r "$ruling_comment_lib" ]; then echo "tkt-verify: cannot read shared lib: $ruling_comment_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -279,7 +282,12 @@ if [ "$grant_accepted" -eq 1 ]; then
   record_round_grant "$grant_id" "$grant_url" "$grant_round" t
 fi
 if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ] && [ "$grant_accepted" -ne 1 ]; then
-  emit "ROUND-LIMIT" 1 "round=$round; otherwise post an owner ruling with a column-0 grants: round $((round + 1)) line and retry with --ruling <comment id>; send the open findings to triage"
+  history_source="$(t get findings_history 2>/dev/null || true)"
+  repeat_rows="$(findings_repeat_find "$findings" "$history_source" "$round" 2>/dev/null || true)"
+  if [ -n "$repeat_rows" ]; then
+    emit "REPEAT-FINDING round=$round" 1 "$repeat_rows"
+  fi
+  round_notice_send "$state" tkt-verify "$round"
 fi
 verify_findings="$findings"
 if [ "${#ruling_refute_ids[@]}" -gt 0 ]; then
