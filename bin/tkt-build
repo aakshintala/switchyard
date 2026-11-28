@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# tkt-build: implement steps 4-6, first round (lane, gate, mutants, review+map, findings).
+# tkt-build: implement steps 4-6, first round (lane, gate, mutants, review+map, findings), or start a ruled full re-review.
 # Lane dispatch checks the selected model's QuotaBar provider before tkt-job starts.
 # spec_issue, when set, is passed to every round-0 review-pr start as --spec.
-# Usage: tkt-build <state> [--from lane|gate|review] [--no-verifier] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]
+# Usage: tkt-build <state> [--from lane|gate|review] [--ruling <comment id>] [--no-verifier] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]
 set -euo pipefail
-USAGE="usage: tkt-build <state> [--from lane|gate|review] [--no-verifier] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]"
+USAGE="usage: tkt-build <state> [--from lane|gate|review] [--ruling <comment id>] [--no-verifier] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]"
 usage() { echo "$USAGE" >&2; exit 2; }
 [ $# -ge 1 ] || usage
 case "$1" in -h|--help) echo "$USAGE"; exit 0 ;; esac
 state="$1"; shift
-from=lane; from_given=0; no_verifier=0; lane_model=""; review_model=""; overbuild_model=""; haiku_exempt_pending=0
+from=lane; from_given=0; no_verifier=0; lane_model=""; review_model=""; overbuild_model=""; haiku_exempt_pending=0; ruling_given=0; ruling_id=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --from) [ $# -ge 2 ] || usage; from="$2"; from_given=1; shift 2 ;;
+    --ruling) [ $# -ge 2 ] || usage; ruling_id="$2"; ruling_given=1; shift 2 ;;
     --no-verifier) no_verifier=1; shift ;;
     --lane-model) [ $# -ge 2 ] || usage; lane_model="$2"; shift 2 ;;
     --review-model) [ $# -ge 2 ] || usage; review_model="$2"; shift 2 ;;
@@ -21,6 +22,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$from" in lane|gate|review) ;; *) usage ;; esac
+if [ "$ruling_given" -eq 1 ] && [ "$from" != review ]; then usage; fi
 script_path="$0"
 case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
 while [ -L "$script_path" ]; do
@@ -57,6 +59,10 @@ stop_report_lib="$script_dir/lib/stop-report.sh"
 if [ ! -r "$stop_report_lib" ]; then echo "tkt-build: cannot read shared lib: $stop_report_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$stop_report_lib"
+ruling_comment_lib="$script_dir/lib/ruling-comment.sh"
+if [ ! -r "$ruling_comment_lib" ]; then echo "tkt-build: cannot read shared lib: $ruling_comment_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$ruling_comment_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"
 quota_bin="$bin_dir/quota"; models_file="$script_dir/../delegate/config/models.json"
@@ -132,6 +138,10 @@ repair_hint() {
 }
 journal_build() {
   tkt journal "$1" 2>/dev/null || true
+}
+ruling_refuse() {
+  local reason="$1" comment="$2"
+  emit "RULING-REFUSED reason=$reason comment=$comment" 2
 }
 stale_recovery() {
   local newbase="$1" step=4 recover
@@ -343,9 +353,22 @@ if [ "$from" = review ] && [ "$outcome" != measurement ]; then
   fi
 fi
 rnd="$(tkt get round 2>/dev/null || true)"
+reviewed="$(tkt get reviewed 2>/dev/null || true)"
+if [ "$ruling_given" -eq 1 ]; then
+  case "$ruling_id" in
+    ''|*[!0-9]*) ruling_refuse bad-id "$ruling_id" ;;
+  esac
+  ruling_json="$tmpd/ruling-$ruling_id.json"
+  ruling_error="$tmpd/ruling-$ruling_id.err"
+  ruling_comment_failure=""
+  if ! fetch_issue_comment "$ruling_id" "$ruling_json" "$ruling_error"; then
+    ruling_refuse "$ruling_comment_failure" "$ruling_id"
+  fi
+fi
 # A build can resume until a reviewed head records the first completed review.
-if [ -n "$(tkt get reviewed 2>/dev/null || true)" ]; then
-  emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the wrong phase after the first round; continue with tkt-fix $state --verify [--resume <job id> --prompt <file>] or tkt-ship $state; this is not the round limit"
+# A ruled --from review is the sole route through this boundary.
+if [ -n "$reviewed" ] && [ "$ruling_given" -eq 0 ]; then
+  emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the wrong phase after the first round; continue with tkt-fix $state --verify [--resume <job id> --prompt <file>] or tkt-ship $state; this is not the round limit. For a ruled full re-review, run tkt-build $state --from review --ruling <comment id>"
 fi
 head_was_stored=0
 if stored_head="$(tkt get head 2>/dev/null)"; then
@@ -637,6 +660,9 @@ om="${overbuild_model:-$(tkt get model.overbuild 2>/dev/null || true)}"
 # The refused slot's hint is `<id>`; only the other pick is prefilled.
 check_model_quota "$rm" "Repair command: tkt-build $state --from review --review-model <id> --overbuild-model $om" review
 check_model_quota "$om" "Repair command: tkt-build $state --from review --review-model $rm --overbuild-model <id>" review
+if [ "$ruling_given" -eq 1 ]; then
+  journal_build "tkt-build REREVIEW ruling=$ruling_id from_round=${rnd:-0} head=$head"
+fi
 if [ "$haiku_exempt_pending" = 1 ]; then
   tkt set quota.haiku_floor_exempt 1 || emit "PRECONDITION quota=refused" 2 "tkt-build: quota refusal: could not record the Haiku review exemption (card 1112-fly-c8ba)"
 fi
@@ -662,7 +688,7 @@ if [ "$mutant_count" -gt 0 ]; then
     fi
   fi
 fi
-r0="$(tkt get review_ids 2>/dev/null || true)"; rh="$(tkt get review_head 2>/dev/null || true)"; rids=""; [ "$rh" = "$head" ] && rids="$r0"
+r0="$(tkt get review_ids 2>/dev/null || true)"; rh="$(tkt get review_head 2>/dev/null || true)"; rids=""; [ "$ruling_given" -eq 1 ] || { [ "$rh" = "$head" ] && rids="$r0"; }
 spec_issue="$(tkt get spec_issue 2>/dev/null || true)"
 # A RESTART slot holds no reusable job: a collect that reported
 # BAD-VERDICT or unrestorable UNFINISHED for that axis replaced its id,
@@ -670,7 +696,9 @@ spec_issue="$(tkt get spec_issue 2>/dev/null || true)"
 n=0; for ax in standards spec overbuild; do n=$((n+1))
   slot="$(printf '%s' "$rids" | awk -v n="$n" '{print $n}')"
   case "$slot" in ''|RESTART) ;; *) continue;; esac
-  start_args=(start "$pr" --repo "$repo" --cwd "$worktree" --state "$state" --head "$head" --issue "$issue" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "tkt-build round-0 full review")
+  rereview_reason="tkt-build round-0 full review"
+  [ "$ruling_given" -eq 0 ] || rereview_reason="tkt-build ruled full re-review ruling=$ruling_id"
+  start_args=(start "$pr" --repo "$repo" --cwd "$worktree" --state "$state" --head "$head" --issue "$issue" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "$rereview_reason")
   case "$ax" in
     standards|spec) role_ruling="$(tkt get ruling.review 2>/dev/null || true)" ;;
     overbuild) role_ruling="$(tkt get ruling.overbuild 2>/dev/null || true)" ;;
@@ -834,7 +862,7 @@ fi
 # every axis this round routes nowhere, whatever the counts say.
 missing=""
 for ax in standards spec overbuild; do
-  grep -qE "^VERDICT $ax: (APPROVE|CHANGES)$" <<<"$collect_out" || missing="${missing:+$missing }$ax"
+  grep -qE "^VERDICT $ax: (APPROVE|CHANGES)\.?$" <<<"$collect_out" || missing="${missing:+$missing }$ax"
 done
 if [ -n "$missing" ]; then
   n=0; for ax in standards spec overbuild; do

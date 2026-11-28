@@ -2028,4 +2028,41 @@ run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --model claude
 [ "$RC" -eq 0 ] || fail "ruled Sonnet resume exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -qx "resumemodelruling=$RULING_URL" "$T/stub.log" || fail "ruling.lane reaches delegate resume"
 
+# --- EXTRA quoting the plan Gate warns without refusing the dispatch ---
+setup_case extra-quotes-plan-gate
+reset_stub
+make_record stub-1 DONE none 0 1 0
+cat >"$T/plan-extra-gate.md" <<'PLAN'
+# Plan
+
+## Files
+
+- `bin/tkt-job`
+
+## Gate
+
+`bash test/run --since synthetic`
+PLAN
+quote_gate='bash test/run --since synthetic'
+printf 'Intentional quote: %s\n' "$quote_gate" >"$T/extra-quotes-gate.md"
+printf 'Extra: __EXTRA__\n' >"$T/tmpl-extra-gate.md"
+bash "$TKT_STATE" "$S" set plan "$T/plan-extra-gate.md" || fail "set EXTRA warning plan"
+bash "$TKT_STATE" "$S" set extra "$T/extra-quotes-gate.md" || fail "set EXTRA quote file"
+run_job --slot lane --template "$T/tmpl-extra-gate.md" --gate-from-plan
+[ "$RC" -eq 0 ] || fail "EXTRA gate quote leaves dispatch status unchanged (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -Fq "tkt-job: warning: EXTRA contains plan Gate command: $quote_gate" "$CDIR/stderr.txt" || fail "EXTRA gate quote warning names the command"
+grep -Fq "Intentional quote: $quote_gate" "$CDIR/run/switchyard-502-lane-1.md" || fail "EXTRA gate quote remains in the filled brief"
+
+setup_case extra-does-not-quote-plan-gate
+reset_stub
+make_record stub-1 DONE none 0 1 0
+bash "$TKT_STATE" "$S" set plan "$T/plan-extra-gate.md" || fail "set no-warning plan"
+printf 'No quoted command here.\n' >"$T/extra-no-gate.md"
+bash "$TKT_STATE" "$S" set extra "$T/extra-no-gate.md" || fail "set non-matching EXTRA file"
+run_job --slot lane --template "$T/tmpl-extra-gate.md" --gate-from-plan
+[ "$RC" -eq 0 ] || fail "EXTRA without gate quote exits 0"
+if grep -Fq 'tkt-job: warning: EXTRA contains plan Gate command:' "$CDIR/stderr.txt"; then
+  fail "EXTRA without the plan Gate command does not warn"
+fi
+
 echo "tkt-job: all cases passed"

@@ -729,6 +729,36 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --paths --workt
 [ "$out" = "$(printf 'GRANT y-paths.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "--paths claim output: $out"
 grep -q "^y-paths.txt${TAB}fiber-4223${TAB}plan${TAB}" <<<"$(claims_blob "$R")" || fail "--paths records the path claim"
 
+# A trailing slash survives both path readers and covers only paths below it.
+R="$(fresh)"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4233 --paths --worktree t:dA --repo test/repo dir/ 2>"$T/e-dir-paths")" \
+  || fail "--paths directory claim exits 0: $(cat "$T/e-dir-paths")"
+[ "$out" = "$(printf 'GRANT dir/ new\nfile-claim: 1 granted, 0 refused')" ] || fail "--paths directory claim output: $out"
+grep -q "^dir/${TAB}fiber-4233${TAB}plan${TAB}" <<<"$(claims_blob "$R")" || fail "--paths stores the trailing slash"
+PLAN_DIR="$(make_plan directory.md planned/)"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4234 --plan-file "$PLAN_DIR" --worktree t:dB --repo test/repo 2>"$T/e-dir-plan")" \
+  || fail "plan-file directory claim exits 0: $(cat "$T/e-dir-plan")"
+[ "$out" = "$(printf 'GRANT planned/ new\nfile-claim: 1 granted, 0 refused')" ] || fail "plan-file directory claim output: $out"
+grep -q "^planned/${TAB}fiber-4234${TAB}plan${TAB}" <<<"$(claims_blob "$R")" || fail "plan-file stores the trailing slash"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4239 --paths --worktree t:dG --repo test/repo range-dir/:1-2 2>/dev/null)" || fail "ranged directory claim exits 0"
+[ "$out" = "$(printf 'GRANT range-dir/:1-2 new\nfile-claim: 1 granted, 0 refused')" ] || fail "ranged directory claim output: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4240 --grant --worktree t:dH --repo test/repo range-dir/a:20-30 2>/dev/null)" || fail "nested file with a disjoint range exits 0"
+[ "$out" = "$(printf 'OVERLAP range-dir/a:20-30 lane:fiber-4239\nGRANT range-dir/a:20-30 new\nfile-claim: 1 granted, 0 refused')" ] || fail "directory coverage ignores line ranges: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4233 --grant --worktree t:dA --repo test/repo dir/a 2>/dev/null)" \
+  || fail "file under a claimed directory is covered"
+[ "$out" = "$(printf 'GRANT dir/a new\nfile-claim: 1 granted, 0 refused')" ] || fail "directory covers nested file: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4235 --grant --worktree t:dC --repo test/repo dir2/x 2>/dev/null)" \
+  || fail "shared-prefix sibling claim exits 0"
+[ "$out" = "$(printf 'GRANT dir2/x new\nfile-claim: 1 granted, 0 refused')" ] || fail "directory does not cover shared-prefix sibling: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4237 --grant --worktree t:dE --repo test/repo dir 2>/dev/null)" || fail "file named like a directory claim exits 0"
+[ "$out" = "$(printf 'GRANT dir new\nfile-claim: 1 granted, 0 refused')" ] || fail "directory claim does not widen to the file named dir: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4238 --grant --worktree t:dF --repo test/repo dir/sub/ 2>/dev/null)" || fail "nested directory claim exits 0"
+[ "$out" = "$(printf 'OVERLAP dir/sub/ lane:fiber-4233\nGRANT dir/sub/ new\nfile-claim: 1 granted, 0 refused')" ] || fail "nested directory claim conflicts with its parent directory: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4236 --grant --worktree t:dD --repo test/repo dir/sub/b 2>/dev/null)" \
+  || fail "another lane can claim below a directory claim"
+[ "$out" = "$(printf 'OVERLAP dir/sub/b lane:fiber-4233\nOVERLAP dir/sub/b lane:fiber-4238\nGRANT dir/sub/b new\nfile-claim: 1 granted, 0 refused')" ] \
+  || fail "another lane's nested claim conflicts with directory claims: $out"
+
 # A plan-kind claim using the legacy --plan alias is still accepted.
 # Re-claiming with the other kind keeps the recorded line: a no-op, not an upgrade.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --plan --worktree t:dA --repo test/repo y.txt 2>/dev/null)" || fail "legacy --plan alias claim exits 0"
@@ -943,7 +973,7 @@ FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4222 --repo test/repo a.txt
 
 # --- input rules ------------------------------------------------------------------
 R="$(fresh)"
-for bad in ../x /abs.txt a/../b a//b a/ . .. a/./b; do
+for bad in ../x /abs.txt a/../b a//b . .. a/./b; do
   FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM "$bad" >/dev/null 2>&1 && fail "path '$bad' exits non-zero"
   [ "$?" = "2" ] || fail "path '$bad' exits 2"
 done
@@ -1052,6 +1082,10 @@ blob="$(claims_blob "$R")"
 [ "$(printf '%s\n' "$blob" | grep -c '^')" = "2" ] || fail "one line released"
 grep -q "^y.txt	fiber-4223	grant	" <<<"$blob" || fail "y's claim kept"
 grep -q "^z.txt	fiber-4224	grant	" <<<"$blob" || fail "B's claim kept"
+# A directory claim is released by its own name.
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:dA --repo test/repo rel-dir/ >/dev/null 2>&1 || fail "release setup dir"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane fiber-4223 rel-dir/ 2>"$T/e-rel-dir")" || fail "release of directory claim exits 0: $(cat "$T/e-rel-dir")"
+[ "$out" = "RELEASE rel-dir/" ] || fail "release directory line: $out"
 # releasing a path another lane holds drops nothing.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane fiber-4223 z.txt 2>/dev/null)" || fail "foreign release exits 0"
 [ -z "$out" ] || fail "foreign release prints nothing"
