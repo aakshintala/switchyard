@@ -2654,6 +2654,7 @@ grep -Fq 'base.txt |' <<<"$OUT" || fail "gate-ruled-stale prints stale Files sta
 grep -Fq 'ruled drift commit' <<<"$OUT" || fail "gate-ruled-stale prints the drifting commit: $OUT"
 grep -Fq '+main drift line' <<<"$OUT" || fail "gate-ruled-stale prints the Files hunk: $OUT"
 grep -Fq 'The plan verdict came from ruling RULING-1890 by surveyor; tkt-build did not re-verify.' <<<"$OUT" || fail "gate-ruled-stale explains the ruling provenance: $OUT"
+grep -Fq "3. tkt-state $S set head \$(git -C $WT rev-parse HEAD)" <<<"$OUT" || fail "gate-ruled-stale records the pushed head before tkt-plan set: $OUT"
 grep -Fq "tkt-plan $S set $CDIR/plan.md" <<<"$OUT" || fail "gate-ruled-stale routes through tkt-plan set: $OUT"
 grep -Fq "tkt-plan $S rule-ok --by <ruling role> --ruling <RULING-id> --comment <id>" <<<"$OUT" || fail "gate-ruled-stale routes through rule-ok: $OUT"
 grep -Fq "tkt-plan $S verify to re-verify instead" <<<"$OUT" || fail "gate-ruled-stale offers re-verification: $OUT"
