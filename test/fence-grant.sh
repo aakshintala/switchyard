@@ -156,6 +156,7 @@ print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATE
       *) echo "stub gh: unexpected: $*" >&2; exit 99;;
     esac
     ;;
+  issue) printf '%s\n' '{"labels":[]}' ;;
   *) echo "stub gh: unexpected: $*" >&2; exit 99;;
 esac
 GH_STUB
