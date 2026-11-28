@@ -369,10 +369,33 @@ retry_failed_fix_gate() {
   return 0
 }
 
+# warn_extra_gate EXTRA: warn when the resolved extra text quotes the plan's Gate command.
+warn_extra_gate() {
+  local extra_value="$1" plan_file gate_command extra_file
+  [ -n "$extra_value" ] || return 0
+  plan_file="$(tkt get plan 2>/dev/null || true)"
+  [ -r "$plan_file" ] || return 0
+  gate_command="$("$plangate" "$plan_file" 2>/dev/null)" || return 0
+  [ -n "$gate_command" ] || return 0
+  case "$extra_value" in
+    @*)
+      extra_file="${extra_value#@}"
+      if [ -r "$extra_file" ] && grep -Fq -- "$gate_command" "$extra_file"; then
+        printf 'tkt-job: warning: EXTRA contains plan Gate command: %s\n' "$gate_command" >&2
+      fi
+      ;;
+    *"$gate_command"*)
+      printf 'tkt-job: warning: EXTRA contains plan Gate command: %s\n' "$gate_command" >&2
+      ;;
+  esac
+  return 0
+}
+
 # Prepare the current prompt only when a dispatch needs it (or when comparing a
 # supplied prompt with a stored job). Stored ids without prompt metadata retain
 # the legacy watch-only path without needing a brief.
 prepare_brief() {
+  local extra_value=""
   { [ -n "$template" ] || [ -n "$brief" ]; } || usage
   { [ -z "$template" ] || [ -z "$brief" ]; } || usage
   if [ -n "$template" ]; then
@@ -433,11 +456,13 @@ prepare_brief() {
         continue
       fi
       args+=("$k=$v")
+      if [ "$k" = "EXTRA" ]; then extra_value="$v"; fi
     done
     if [ -n "$missing" ]; then
       echo "tkt-job: template needs $missing: no flag and no state value" >&2
       exit 2
     fi
+    warn_extra_gate "$extra_value"
     # Only keys the template names reach fill-brief; stray flags stay out.
     k=1
     while [ -e "$run/$namebase-$slot-$k.md" ]; do

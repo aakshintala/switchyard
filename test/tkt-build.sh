@@ -223,6 +223,10 @@ case " \$* " in
     touch "$T/jobs-first-done"
     ;;
   *" api "*"/issues/comments/"*)
+    if [ -f "$T/comment-fetch-fail" ]; then
+      printf 'gh: comment not found\n' >&2
+      exit 1
+    fi
     if [ -f "$T/comment.json" ]; then cat "$T/comment.json"; else printf '{}\n'; fi
     ;;
   *)
@@ -446,7 +450,7 @@ EOF
   printf '0' >"$T/verdicts-rc"
   printf 'src/c.rs:5:6: MISSED\tcaught\n' >"$T/verdicts"
   printf '{"artifacts":[]}\n' >"$T/artifacts-json"
-  rm -f "$T/empty-pr" "$T/pr-list-fail" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err" "$T/collect-nowrite"
+  rm -f "$T/empty-pr" "$T/pr-list-fail" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err" "$T/collect-nowrite" "$T/comment.json" "$T/comment-fetch-fail"
   printf '0' >"$T/dcounter"
   printf '0' >"$T/rcounter"
   : >"$T/calls.log"
@@ -519,6 +523,93 @@ expect_state() {
   [ "$v" = "$2" ] || fail "$3: state $1 is [$v], wants [$2]"
 }
 
+# --- ruled re-review ignores stored jobs, starts all axes, and resets review state ---
+setup_case ruled-rereview
+bash "$TKT_STATE" "$S" set pr 7 >/dev/null || fail "ruled-rereview: seed PR"
+bash "$TKT_STATE" "$S" set head "$H" >/dev/null || fail "ruled-rereview: seed head"
+bash "$TKT_STATE" "$S" set reviewed "$H" >/dev/null || fail "ruled-rereview: seed reviewed head"
+bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "ruled-rereview: seed round"
+bash "$TKT_STATE" "$S" set review_ids 'old-standards old-spec old-overbuild' >/dev/null || fail "ruled-rereview: seed old review ids"
+bash "$TKT_STATE" "$S" set review_head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null || fail "ruled-rereview: seed earlier review head"
+bash "$TKT_STATE" "$S" set grant.1 '900 https://example.invalid/old-grant' >/dev/null || fail "ruled-rereview: seed grant"
+jq -n '{body:"full re-review",issue_url:"https://api.github.com/repos/switchyard/issues/528",author_association:"OWNER"}' >"$T/comment.json"
+run_build --from review --ruling 721500
+[ "$RC" -eq 0 ] || fail "ruled-rereview exits 0 (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "ruled-rereview"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "ruled-rereview starts all three axes"
+for ax in standards spec overbuild; do
+  grep -Fq -- "--axes $ax --full-rereview tkt-build ruled full re-review ruling=721500" "$T/calls.log" || fail "ruled-rereview starts a fresh $ax review with the ruling reason"
+done
+if grep -Eq 'old-standards|old-spec|old-overbuild' "$T/calls.log"; then fail "ruled-rereview does not reuse earlier review ids"; fi
+grep -Fq 'review-collect|r1 r2 r3 --findings-out' "$T/calls.log" || fail "ruled-rereview collects only the fresh review jobs"
+grep -Fq "tkt-build REREVIEW ruling=721500 from_round=1 head=$H" "$CDIR/tkt.journal" || fail "ruled-rereview journals the ruling and prior round"
+expect_state reviewed "$H" "ruled-rereview records the current reviewed head"
+expect_state round 0 "ruled-rereview resets the fix-round count"
+[ -z "$(grep '^grant[.]' "$S" || true)" ] || fail "ruled-rereview clears grants"
+
+# --- a ruled re-review starts fresh even when stored review_head is current ---
+setup_case ruled-rereview-same-head
+bash "$TKT_STATE" "$S" set pr 7 >/dev/null || fail "ruled-rereview-same-head: seed PR"
+bash "$TKT_STATE" "$S" set head "$H" >/dev/null || fail "ruled-rereview-same-head: seed head"
+bash "$TKT_STATE" "$S" set reviewed "$H" >/dev/null || fail "ruled-rereview-same-head: seed reviewed head"
+bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "ruled-rereview-same-head: seed round"
+bash "$TKT_STATE" "$S" set review_ids 'same-standards same-spec same-overbuild' >/dev/null || fail "ruled-rereview-same-head: seed review ids"
+bash "$TKT_STATE" "$S" set review_head "$H" >/dev/null || fail "ruled-rereview-same-head: seed current review head"
+jq -n '{body:"full re-review",issue_url:"https://api.github.com/repos/switchyard/issues/528",author_association:"OWNER"}' >"$T/comment.json"
+run_build --from review --ruling 721504
+[ "$RC" -eq 0 ] || fail "ruled-rereview-same-head exits 0 (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "ruled-rereview-same-head starts every axis"
+grep -Fq -- "--axes standards --full-rereview tkt-build ruled full re-review ruling=721504" "$T/calls.log" || fail "ruled-rereview-same-head starts a fresh review despite a matching review_head"
+grep -Fq 'review-collect|r1 r2 r3 --findings-out' "$T/calls.log" || fail "ruled-rereview-same-head collects new job ids"
+
+# --- a missing ruled re-review comment refuses before dispatch ---
+setup_case ruled-rereview-missing
+bash "$TKT_STATE" "$S" set pr 7 >/dev/null || fail "ruled-rereview-missing: seed PR"
+bash "$TKT_STATE" "$S" set head "$H" >/dev/null || fail "ruled-rereview-missing: seed head"
+bash "$TKT_STATE" "$S" set reviewed "$H" >/dev/null || fail "ruled-rereview-missing: seed reviewed head"
+bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "ruled-rereview-missing: seed round"
+touch "$T/comment-fetch-fail"
+run_build --from review --ruling 721501
+[ "$RC" -eq 2 ] || fail "ruled-rereview-missing exits 2 (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-build RULING-REFUSED reason=fetch comment=721501 log=*" "ruled-rereview-missing"
+! grep -q '^review-start|' "$T/calls.log" || fail "ruled-rereview-missing dispatches no review"
+
+# --- a wrong-ticket ruled re-review comment refuses before dispatch ---
+setup_case ruled-rereview-wrong-ticket
+bash "$TKT_STATE" "$S" set pr 7 >/dev/null || fail "ruled-rereview-wrong-ticket: seed PR"
+bash "$TKT_STATE" "$S" set head "$H" >/dev/null || fail "ruled-rereview-wrong-ticket: seed head"
+bash "$TKT_STATE" "$S" set reviewed "$H" >/dev/null || fail "ruled-rereview-wrong-ticket: seed reviewed head"
+bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "ruled-rereview-wrong-ticket: seed round"
+jq -n '{body:"full re-review",issue_url:"https://api.github.com/repos/switchyard/issues/529",author_association:"OWNER"}' >"$T/comment.json"
+run_build --from review --ruling 721502
+[ "$RC" -eq 2 ] || fail "ruled-rereview-wrong-ticket exits 2 (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-build RULING-REFUSED reason=issue comment=721502 log=*" "ruled-rereview-wrong-ticket"
+! grep -q '^review-start|' "$T/calls.log" || fail "ruled-rereview-wrong-ticket dispatches no review"
+
+# --- bad ruling ids refuse, and --ruling requires --from review ---
+setup_case ruled-rereview-bad-id
+bash "$TKT_STATE" "$S" set pr 7 >/dev/null || fail "ruled-rereview-bad-id: seed PR"
+bash "$TKT_STATE" "$S" set head "$H" >/dev/null || fail "ruled-rereview-bad-id: seed head"
+bash "$TKT_STATE" "$S" set reviewed "$H" >/dev/null || fail "ruled-rereview-bad-id: seed reviewed head"
+bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "ruled-rereview-bad-id: seed round"
+run_build --from review --ruling not-a-comment
+[ "$RC" -eq 2 ] || fail "ruled-rereview-bad-id exits 2 (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-build RULING-REFUSED reason=bad-id comment=not-a-comment log=*" "ruled-rereview-bad-id"
+! grep -q '^gh|api repos/switchyard/issues/comments/' "$T/calls.log" || fail "ruled-rereview-bad-id fetches no comment"
+run_build --from gate --ruling 721503
+[ "$RC" -eq 2 ] || fail "ruling-outside-review exits 2 (rc=$RC): $(first_line)"
+grep -q '^usage: tkt-build .*--ruling <comment id>' "$CDIR/stderr.txt" || fail "ruling-outside-review emits usage"
+
+# --- without a ruling, a reviewed state still stops and names the route ---
+setup_case round-set-no-ruling-hint
+bash "$TKT_STATE" "$S" set reviewed "$H" >/dev/null || fail "round-set-no-ruling-hint: seed reviewed head"
+bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "round-set-no-ruling-hint: seed round"
+run_build --from review
+[ "$RC" -eq 1 ] || fail "round-set-no-ruling-hint exits 1 (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-build ROUND-LIMIT round=1 log=*" "round-set-no-ruling-hint"
+grep -Fq "tkt-build $S --from review --ruling <comment id>" <<<"$OUT" || fail "round-set-no-ruling-hint names the ruled full re-review command"
+! grep -q '^review-start|' "$T/calls.log" || fail "round-set-no-ruling-hint dispatches no review"
+
 # --- happy path: no mutants, every axis APPROVE ---
 setup_case happy
 run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
@@ -559,6 +650,31 @@ expect_state round 0 happy
 grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is journaled"
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
+
+# --- collect keeps one trailing period on a verdict (review-pr's contract) ---
+setup_case verdict-period
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE.
+VERDICT spec: APPROVE
+VERDICT overbuild: APPROVE.
+CI deadbeef pass
+EOF
+run_build
+[ "$RC" -eq 0 ] || fail "verdict-period exits 0 (rc=$RC): $OUT"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "verdict-period"
+setup_case verdict-period-changes
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+VERDICT spec: APPROVE
+VERDICT overbuild: CHANGES.
+P2 fixed already
+CI deadbeef pass
+EOF
+run_build
+grep -q "REVIEW-INCOMPLETE" <<<"$OUT" && fail "verdict-period-changes: a CHANGES. verdict is not missing: $OUT"
+expect_verdict "TKT tkt-build CHANGES p1=* p2=* p3=* mutants=* findings=* log=*" "verdict-period-changes"
 
 # --- a lane's untracked root run/ is moved before delegate records its change set ---
 setup_case stray-run-moved
@@ -2551,6 +2667,7 @@ grep -Fq 'base.txt |' <<<"$OUT" || fail "gate-ruled-stale prints stale Files sta
 grep -Fq 'ruled drift commit' <<<"$OUT" || fail "gate-ruled-stale prints the drifting commit: $OUT"
 grep -Fq '+main drift line' <<<"$OUT" || fail "gate-ruled-stale prints the Files hunk: $OUT"
 grep -Fq 'The plan verdict came from ruling RULING-1890 by surveyor; tkt-build did not re-verify.' <<<"$OUT" || fail "gate-ruled-stale explains the ruling provenance: $OUT"
+grep -Fq "3. tkt-state $S set head \$(git -C $WT rev-parse HEAD)" <<<"$OUT" || fail "gate-ruled-stale records the pushed head before tkt-plan set: $OUT"
 grep -Fq "tkt-plan $S set $CDIR/plan.md" <<<"$OUT" || fail "gate-ruled-stale routes through tkt-plan set: $OUT"
 grep -Fq "tkt-plan $S rule-ok --by <ruling role> --ruling <RULING-id> --comment <id>" <<<"$OUT" || fail "gate-ruled-stale routes through rule-ok: $OUT"
 grep -Fq "tkt-plan $S verify to re-verify instead" <<<"$OUT" || fail "gate-ruled-stale offers re-verification: $OUT"
