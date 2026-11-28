@@ -1596,6 +1596,17 @@ S="$CDIR/nomodel.state"
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 2 ] || fail "a missing model exits 2"
 grep -q "model.lane" "$CDIR/stderr.txt" || fail "a missing model names model.lane"
+setup_case ambiguous-model
+reset_stub
+bash "$TKT_STATE" "$S" add model.lane second-model || fail "add duplicate lane model"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 2 ] || fail "an ambiguous model exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-job MODEL-AMBIGUOUS key=model.lane log=*" "ambiguous model"
+case "$OUT" in *'values=test-model,second-model'*) ;; *) fail "ambiguous model prints all values: $OUT" ;; esac
+case "$OUT" in *"tkt-state $S set model.lane <id>"*) ;; *) fail "ambiguous model prints repair command: $OUT" ;; esac
+model_log="$(first_line)"; model_log="${model_log##* log=}"
+[ -f "$model_log" ] || fail "ambiguous model writes its verdict log"
+[ ! -s "$T/stub.log" ] || fail "ambiguous model does not call delegate"
 # A re-plan of a state that already stores a plan but no planner refuses before dispatch, with no default planner (#1818).
 setup_case replan-no-planner
 reset_stub

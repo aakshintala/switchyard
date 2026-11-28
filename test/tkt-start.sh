@@ -1726,6 +1726,19 @@ case "$OUT" in *"TKT tkt-start MODEL-AMBIGUOUS key=model.lane"*) ;; *) fail "mod
 case "$OUT" in *'values=sol,second-model'*) ;; *) fail "modelambiguous: values missing: $OUT" ;; esac
 case "$OUT" in *"tkt-state $S set model.lane <id>"*) ;; *) fail "modelambiguous: repair command missing: $OUT" ;; esac
 
+# Starting again refuses duplicate known roles even when that role was not supplied.
+setup modelambiguousunscoped ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 modelambiguousunscoped-first
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" add model.lane second-model
+reload; remove_model_role lane
+run_start --no-preflight
+[ "$RC" -eq 2 ] || fail "modelambiguousunscoped: exit $RC, want 2"
+case "$OUT" in *"TKT tkt-start MODEL-AMBIGUOUS key=model.lane"*) ;; *) fail "modelambiguousunscoped: verdict missing: $OUT" ;; esac
+case "$OUT" in *'values=sol,second-model'*) ;; *) fail "modelambiguousunscoped: values missing: $OUT" ;; esac
+case "$OUT" in *"tkt-state $S set model.lane <id>"*) ;; *) fail "modelambiguousunscoped: repair command missing: $OUT" ;; esac
+
 # The requested model wins over the archived value for the same role.
 setup partmodel ONE AGAINST; part_seed_pr partmodel
 S="$RUN/widget-42.state"

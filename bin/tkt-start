@@ -192,15 +192,18 @@ $note"; done
   printf '%s\n' "$out" | tee "$log"; exit "$code"
 }
 read_state_model() {
-  local role="$1" status=0 output
+  local role="$1"
   STATE_MODEL=""; STATE_MODEL_FOUND=0
   [ -f "$state" ] || return 1
-  output="$("$tkt_state" "$state" get "model.$role" 2>&1)" || status=$?
-  if [ "$status" -eq 3 ]; then emit "MODEL-AMBIGUOUS key=model.$role" 2 "$output"; fi
-  [ "$status" -eq 0 ] || return 1
-  STATE_MODEL="$output"; STATE_MODEL_FOUND=1
-  return 0
+  if tkt_get_model emit "model.$role" "$tkt_state" "$state" get "model.$role"; then
+    STATE_MODEL="$MODEL_VALUE"; STATE_MODEL_FOUND=1
+    return 0
+  fi
+  return 1
 }
+if [ -f "$state" ]; then
+  for known_role in "${model_roles[@]}"; do read_state_model "$known_role" || true; done
+fi
 model_for_start() {
   local role="$1" model="" arg
   if read_state_model "$role"; then model="$STATE_MODEL"; fi

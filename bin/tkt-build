@@ -99,13 +99,6 @@ $quota_line"; fi
   fi
   exit "$ec"
 }
-get_model() {
-  local key="$1" output status=0
-  output="$(tkt get "$key" 2>&1)" || status=$?
-  if [ "$status" -eq 3 ]; then emit "MODEL-AMBIGUOUS key=$key" 2 "$output"; fi
-  [ "$status" -eq 0 ] || return "$status"
-  MODEL_VALUE="$output"
-}
 repair_hint() {
   case "$1" in
     repo|issue|branch|worktree|run|closing|workflow_doc)
@@ -551,7 +544,7 @@ if [ "$from" = lane ]; then
     attr="$(tkt list body_has 2>/dev/null | grep -i 'co-author' | head -n 1 || true)"
   fi
   if [ -z "$lane_model" ]; then
-    if get_model model.lane; then lane_model="$MODEL_VALUE"; fi
+    if tkt_get_model emit model.lane tkt get model.lane; then lane_model="$MODEL_VALUE"; fi
   fi
   # A lane with no model names the missing key on stderr and stops before dispatch.
   if [ -z "$lane_model" ]; then
@@ -644,8 +637,8 @@ if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
   # echoes into the log (`echo "mutants in the diff: $count"`), are not mutants.
   mutant_count="$(grep -cE '^[^[:space:]]+\.rs:[0-9]+:[0-9]+: ' "$mutants_file" || true)"
 fi
-rm="$review_model"; [ -n "$rm" ] || { get_model model.review && rm="$MODEL_VALUE" || rm=""; }
-om="$overbuild_model"; [ -n "$om" ] || { get_model model.overbuild && om="$MODEL_VALUE" || om=""; }
+rm="$review_model"; [ -n "$rm" ] || { tkt_get_model emit model.review tkt get model.review && rm="$MODEL_VALUE" || rm=""; }
+om="$overbuild_model"; [ -n "$om" ] || { tkt_get_model emit model.overbuild tkt get model.overbuild && om="$MODEL_VALUE" || om=""; }
 [ -n "$rm" ] || emit "PRECONDITION missing=model.review" 2 "tkt-state: missing key: model.review" "$(repair_hint model.review)"
 [ -n "$om" ] || emit "PRECONDITION missing=model.overbuild" 2 "tkt-state: missing key: model.overbuild" "$(repair_hint model.overbuild)"
 # The refused slot's hint is `<id>`; only the other pick is prefilled.
@@ -658,7 +651,7 @@ map_note=""; map_id=""; map_out="$run/$slug-$issue-map-r0.md"
 if [ "$mutant_count" -gt 0 ]; then
   if sm="$(tkt get job.map 2>/dev/null)" && [ -n "$sm" ]; then map_id="$sm"
   else
-    if get_model model.map; then mm="$MODEL_VALUE"; else mm=""; fi
+    if tkt_get_model emit model.map tkt get model.map; then mm="$MODEL_VALUE"; else mm=""; fi
     if [ -z "$mm" ]; then map_note="map failed: missing model.map"
     else
       map_ruling="$(tkt get ruling.map 2>/dev/null || true)"

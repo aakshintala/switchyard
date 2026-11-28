@@ -81,13 +81,6 @@ emit() {
   fi
   exit "$status"
 }
-get_model() {
-  local key="$1" output status=0
-  output="$(t get "$key" 2>&1)" || status=$?
-  if [ "$status" -eq 3 ]; then emit "MODEL-AMBIGUOUS key=$key" 2 "$output"; fi
-  [ "$status" -eq 0 ] || return "$status"
-  MODEL_VALUE="$output"
-}
 
 lockdir="$state.lock"
 require_state_file tkt-verify "$state"
@@ -98,14 +91,14 @@ t require repo pr branch worktree run reviewed
 repo="$(t get repo)"; pr="$(t get pr)"; branch="$(t get branch)"
 worktree="$(t get worktree)"; run="$(t get run)"; reviewed="$(t get reviewed)"
 if [ -z "$verifymodel" ]; then
-  if get_model model.verify; then verifymodel="$MODEL_VALUE"; else
+  if tkt_get_model emit model.verify t get model.verify; then verifymodel="$MODEL_VALUE"; else
     echo 'tkt-verify: missing key: model.verify (no --verify-model and no state model.verify)' >&2
     exit 2
   fi
 fi
 implement_models=()
 for implement_role in fix lane; do
-  if get_model "model.$implement_role"; then implement_model="$MODEL_VALUE"; else implement_model=""; fi
+  if tkt_get_model emit "model.$implement_role" t get "model.$implement_role"; then implement_model="$MODEL_VALUE"; else implement_model=""; fi
   [ -n "$implement_model" ] || continue
   implement_models+=("model.$implement_role=$implement_model")
 done
