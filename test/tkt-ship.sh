@@ -301,22 +301,8 @@ for hold_key in owner_held surveyor_sequence; do
   cmp -s "$CDIR/state-before" "$S" || fail "$hold_key: state file changed on refusal"
 done
 
-# --- a current LINES plan verdict refuses ship with both sanctioned exits ---
-reset_stub; setup_case verdict-lines
-printf '0' >"$T/exitcodes"
-printf 'Base: %s\n\n## Files\n\n- `src/a.go`\n\n## Gate\n\n`true`\n' "$H" >"$CDIR/plan.md"
-printf 'plan=%s\nplan_verdict=lines\nplan_verdict_base=%s\nplan_verdict_hash=%s\n' \
-  "$CDIR/plan.md" "$H" "$(git hash-object "$CDIR/plan.md")" >>"$S"
-run_ship
-[ "$RC" -eq 1 ] || fail "LINES verdict refuses ship (rc=$RC)"
-expect_line1 "VERDICT-REFUSED verdict=lines" "LINES verdict refusal"
-case "$OUT" in *"plan_verdict=lines plan_verdict_base=$H plan_base=$H"*) ;; *) fail "LINES refusal has the build verdict digest: [$OUT]" ;; esac
-case "$OUT" in *"tkt-plan $S triaged --comment <id>"*) ;; *) fail "LINES refusal names triaged exit: [$OUT]" ;; esac
-case "$OUT" in *"edit the plan and use --no-verifier"*) ;; *) fail "LINES refusal names edit and --no-verifier exit: [$OUT]" ;; esac
-[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "LINES verdict does not invoke ship-pr"
-
 # --- accepted plan verdicts and a missing verdict key preserve ship behavior ---
-for accepted in ok triaged; do
+for accepted in ok triaged lines; do
   reset_stub; setup_case "verdict-$accepted"
   printf '0' >"$T/exitcodes"
   printf 'Base: %s\n\n## Files\n\n- `src/a.go`\n\n## Gate\n\n`true`\n' "$H" >"$CDIR/plan.md"

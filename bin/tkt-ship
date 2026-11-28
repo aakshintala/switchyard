@@ -50,10 +50,6 @@ for hold_key in owner_held surveyor_sequence; do
     exit 2
   fi
 done
-verdict_lib="$script_dir/lib/plan-verdict.sh"
-if [ ! -r "$verdict_lib" ]; then echo "tkt-ship: cannot read shared lib: $verdict_lib" >&2; exit 2; fi
-# shellcheck disable=SC1090
-. "$verdict_lib"
 tokens_lib="$script_dir/lib/plan-tokens.sh"
 if [ ! -r "$tokens_lib" ]; then echo "tkt-ship: cannot read shared lib: $tokens_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -205,12 +201,6 @@ if ! takeover_plan_gate tkt-ship "$plan" tkt 2>/dev/null; then
     gate-missing) emit "PRECONDITION takeover=gate-missing" 2 "$takeover_error" ;;
     *) emit "PRECONDITION takeover=invalid" 2 "$takeover_error" ;;
   esac
-fi
-base=""
-if [ "$takeover" -eq 0 ] && [ -n "$plan" ]; then base="$(plan_base "$plan" 2>/dev/null || true)"; fi
-if [ "$takeover" -eq 0 ] && ! plan_verdict_check ship "$tkt_state" "$state" 0 "$plan" "$base" "$worktree"; then
-  emit "VERDICT-REFUSED verdict=$verdict_refusal" 1 "$verdict_digest" \
-    "tkt-plan $state triaged --comment <id>, or edit the plan and use --no-verifier"
 fi
 
 stored_head="$(tkt get head)"

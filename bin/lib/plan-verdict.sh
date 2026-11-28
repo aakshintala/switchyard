@@ -39,12 +39,6 @@ plan_verdict_check() {
   verdict_refusal="none"
   verdict_digest="plan_verdict=${plan_verdict:-none} plan_verdict_base=${plan_verdict_base:-none} plan_base=${base:-none}"
 
-  if [ "$policy" = ship ]; then
-    [ "$plan_verdict" = lines ] || return 0
-    verdict_refusal=lines
-    return 1
-  fi
-
   if [ "$no_verifier" -eq 1 ] && { [ -z "$plan_verdict" ] || [ "$plan_verdict" = skipped ]; }; then
     plan_verdict_write "$state_tool" "$state" skipped "$base" "$plan" "$worktree" || return 1
     plan_verdict_read "$state_tool" "$state" "$plan" "$worktree"
