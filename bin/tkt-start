@@ -228,16 +228,19 @@ state_has_planner_model() {
   done <"$state"
   return 1
 }
+# A takeover never preflights, so only a fresh ticket reads its labels.
 needs_plan=0
-issue_labels="$(gh issue view "$issue" --repo "$repo" --json labels 2>&1)" || {
-  echo "tkt-start: cannot read labels for $repo#$issue: $(printf '%s' "$issue_labels" | tail -n 5)" >&2
-  exit 2
-}
-if ! jq -e 'type == "object" and (.labels | type == "array")' <<<"$issue_labels" >/dev/null 2>&1; then
-  echo "tkt-start: cannot read labels for $repo#$issue" >&2
-  exit 2
+if [ "$takeover_given" -eq 0 ]; then
+  issue_labels="$(gh issue view "$issue" --repo "$repo" --json labels 2>&1)" || {
+    echo "tkt-start: cannot read labels for $repo#$issue: $(printf '%s' "$issue_labels" | tail -n 5)" >&2
+    exit 2
+  }
+  if ! jq -e 'type == "object" and (.labels | type == "array")' <<<"$issue_labels" >/dev/null 2>&1; then
+    echo "tkt-start: cannot read labels for $repo#$issue" >&2
+    exit 2
+  fi
+  [ "$(jq -r 'any(.labels[]; .name == "needs-plan")' <<<"$issue_labels")" = true ] && needs_plan=1
 fi
-[ "$(jq -r 'any(.labels[]; .name == "needs-plan")' <<<"$issue_labels")" = true ] && needs_plan=1
 if [ -f "$state" ]; then
   stored_plan="$(sed -n 's/^plan=//p' "$state" | head -n 1)"
 else

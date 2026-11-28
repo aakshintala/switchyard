@@ -68,6 +68,7 @@ Briefs you send:
 - Mutant fixes: kill each MISSED or TIMEOUT with a test, or per docs/testing.md "Proving a test bites" remove the condition (`removed: <why>`) or exempt the function (`exempted: <reason>`); new code adds no untested mutant.
 
 Preflight and plan:
+- `Flaky test:` and `Flaky tests:` tickets (owner ruling 2026-10-15, #1460 comment 6205839732): the ticket's repro is the plan. Take the determined path: no planner, no Verifier, report "plan: skipped (determined)". "Cause: open" is deliberate: the repro test picks among the candidates. At most one review; CI checks the rest. Flakes in one crate share a lane.
 - Planning path: a ticket with `needs-plan` runs preflight and planner, then one advisory Verifier round. Without the label, skip preflight, planner and Verifier; write the plan from the ticket. `--no-preflight` remains accepted but does not override the label.
 - Always, skip path included: the output-text grep covers `*.snap`, `copy_package(` and `package("<name>"` for provider packages, and `crates/main/src/completion_tests.rs` for CLI or completion.
 - A plan carries a `Base: <full sha>` line (planning skill). Its Files sweep adds binary tests pinning event-kind lists for a new per-session event; a new dependency gets `cargo deny check` on a scratch branch in preflight.

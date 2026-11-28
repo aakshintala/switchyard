@@ -72,6 +72,7 @@ Phases: plan, build.
 - Outside-plan paths need no plan or fence-grant update. List each in the PR body's "Outside-plan files" section with a one-line reason; the stop-list above is a design question, not a stop.
 
 Preflight and plan:
+- `Flaky test:` and `Flaky tests:` tickets (owner ruling 2026-10-15, #1460 comment 6205839732): the ticket's repro is the plan. Take the determined path: no planner, no Verifier, report "plan: skipped (determined)". "Cause: open" is deliberate: the repro test picks among the candidates. At most one review; CI checks the rest. Flakes in one crate share a lane.
 - Always, skip path included: the output-text grep covers `*.snap`, `copy_package(` and `package("<name>"` for provider packages, and `crates/main/src/completion_tests.rs` for CLI or completion.
 - A plan carries a `Base: <full sha>` line (planning skill). Its Files sweep adds binary tests pinning event-kind lists for a new per-session event; a new dependency gets `cargo deny check` on a scratch branch in preflight.
 - Caps avoid comparisons (`len.saturating_sub(cap)`, `min`) and get tests at cap-1, cap, cap+1.
