@@ -11,7 +11,7 @@
 # comment fetch failure exits 1; rerun once the API is reachable.
 # Usage:
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] [--state PATH] --model M [--overbuild-model M2] [--axes LIST] [--context PATH]... [--workflow-doc PATH] [--head SHA] [--full-rereview REASON]
-#     LIST is standards[,spec][,overbuild], default all three: one job per
+#     LIST is standards[,spec][,overbuild], default standards,spec: one job per
 #     axis. Review mode fetches the diff and tickets into each review worktree;
 #     review and verify never fetch or stage the PR body.
 #     --state supplies the ticket state whose fence is shown to reviewers.
