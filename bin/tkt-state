@@ -119,9 +119,30 @@ split_line() {
   return 1
 }
 
-# Print the first value for the key; return 1 when the key is missing.
+# Print the value for a key; return 1 when the key is missing. Model keys are
+# single-valued: duplicate lines are refused so every reader shares the same
+# ambiguity check instead of silently picking one.
 state_get() {
+  local line key_value key_count key_values
   [ -f "$state" ] || return 1
+  if [[ "$1" == model.* ]]; then
+    key_count=0; key_values=""
+    while IFS= read -r line || [ -n "$line" ]; do
+      if split_line "$line" && [ "$prefix" = "$1" ]; then
+        key_count=$((key_count + 1))
+        if [ "$key_count" -eq 1 ]; then key_values="$rest"
+        else key_values="$key_values,$rest"; fi
+      fi
+    done <"$state"
+    if [ "$key_count" -gt 1 ]; then
+      printf 'MODEL-AMBIGUOUS key=%s values=%s\n' "$1" "$key_values" >&2
+      printf 'Repair with: tkt-state %q set %s <id>\n' "$state" "$1" >&2
+      return 3
+    fi
+    [ "$key_count" -eq 1 ] || return 1
+    printf '%s\n' "$key_values"
+    return 0
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
     if split_line "$line" && [ "$prefix" = "$1" ]; then
       printf '%s\n' "$rest"
@@ -268,9 +289,12 @@ case "$cmd" in
   get)
     [ $# -eq 1 ] || usage
     check_key "$1"
-    if state_get "$1"; then
+    if get_value="$(state_get "$1")"; then
+      printf '%s\n' "$get_value"
       exit 0
     else
+      get_status=$?
+      [ "$get_status" -eq 3 ] && exit 3
       echo "tkt-state: missing key: $1" >&2
       exit 2
     fi
@@ -396,7 +420,11 @@ case "$cmd" in
     [ $# -ge 1 ] || usage
     for key in "$@"; do
       check_key "$key"
-      if ! state_get "$key" >/dev/null; then
+      if state_get "$key" >/dev/null; then
+        :
+      else
+        require_status=$?
+        [ "$require_status" -eq 3 ] && exit 3
         echo "tkt-state: missing key: $key" >&2
         exit 2
       fi

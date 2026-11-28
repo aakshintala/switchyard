@@ -561,7 +561,9 @@ if [ "$from" = lane ]; then
   closing="$(tkt get closing)"
   plan_gate_args tkt
   gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan" 2>"$tmpd/pg-err")" || emit "PRECONDITION missing=gate" 2 "$(cat "$tmpd/pg-err")" "$(repair_hint gate)"
-  lane_model="${lane_model:-$(tkt get model.lane 2>/dev/null || true)}"
+  if [ -z "$lane_model" ]; then
+    if tkt_get_model emit model.lane tkt get model.lane; then lane_model="$MODEL_VALUE"; fi
+  fi
   # A lane with no model names the missing key on stderr and stops before dispatch.
   if [ -z "$lane_model" ]; then
     printf '%s\n' "tkt-build: missing key: model.lane (no --lane-model and no state model.lane)" >&2
@@ -653,8 +655,8 @@ if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
   # echoes into the log (`echo "mutants in the diff: $count"`), are not mutants.
   mutant_count="$(grep -cE '^[^[:space:]]+\.rs:[0-9]+:[0-9]+: ' "$mutants_file" || true)"
 fi
-rm="${review_model:-$(tkt get model.review 2>/dev/null || true)}"
-om="${overbuild_model:-$(tkt get model.overbuild 2>/dev/null || true)}"
+rm="$review_model"; [ -n "$rm" ] || { tkt_get_model emit model.review tkt get model.review && rm="$MODEL_VALUE" || rm=""; }
+om="$overbuild_model"; [ -n "$om" ] || { tkt_get_model emit model.overbuild tkt get model.overbuild && om="$MODEL_VALUE" || om=""; }
 [ -n "$rm" ] || emit "PRECONDITION missing=model.review" 2 "tkt-state: missing key: model.review" "$(repair_hint model.review)"
 [ -n "$om" ] || emit "PRECONDITION missing=model.overbuild" 2 "tkt-state: missing key: model.overbuild" "$(repair_hint model.overbuild)"
 # The refused slot's hint is `<id>`; only the other pick is prefilled.
@@ -670,7 +672,7 @@ map_note=""; map_id=""; map_out="$run/$slug-$issue-map-r0.md"
 if [ "$mutant_count" -gt 0 ]; then
   if sm="$(tkt get job.map 2>/dev/null)" && [ -n "$sm" ]; then map_id="$sm"
   else
-    mm="$(tkt get model.map 2>/dev/null || true)"
+    if tkt_get_model emit model.map tkt get model.map; then mm="$MODEL_VALUE"; else mm=""; fi
     if [ -z "$mm" ]; then map_note="map failed: missing model.map"
     else
       map_ruling="$(tkt get ruling.map 2>/dev/null || true)"

@@ -256,8 +256,10 @@ grant_pending() {
 }
 
 vmodel() {
-  [ -n "${1:-}" ] && { printf '%s\n' "$1"; return; }
-  t get model.verifier 2>/dev/null || { echo "tkt-plan: missing key: model.verifier" >&2; exit 2; }
+  if [ -n "${1:-}" ]; then V_MODEL="$1"; return 0; fi
+  if tkt_get_model emit model.verifier t get model.verifier; then V_MODEL="$MODEL_VALUE"; return 0; fi
+  echo "tkt-plan: missing key: model.verifier" >&2
+  return 2
 }
 
 ticket_fail() {
@@ -691,7 +693,7 @@ do_verify() {
     record_unresolved_snapshot "$pc_out"
     planner_job="$(t get job.planner 2>/dev/null || true)"
     if [ -n "$planner_job" ]; then
-      planner_model="$(t get model.planner 2>/dev/null || true)"
+      if tkt_get_model emit model.planner t get model.planner; then planner_model="$MODEL_VALUE"; else planner_model=""; fi
       if [ -z "${planner_model//[[:space:]]/}" ]; then
         printf -v planner_route 'tkt-state %q set model.planner %s' "$state" '<id>'
         echo "tkt-plan: missing required role: model.planner; set it with: $planner_route" >&2
@@ -839,7 +841,7 @@ do_verify() {
     }
   fi
   clear_verdict
-  model="$(vmodel "$model")" || exit 2
+  if vmodel "$model"; then model="$V_MODEL"; else exit 2; fi
   args=(PLAN="$plan" BASE="$base" --model "$model")
   if [ "$drift" -eq 1 ]; then
     slot="verifier-r$((round + 1))-drift"
@@ -968,7 +970,7 @@ do_confirm() {
     emit "ROUND-LIMIT confirm=done" 1 "staleness-check: $staleness_check" "$(round_limit_recovery_route)" "$(open_lines)"
   fi
   [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "staleness-check: $staleness_check" "$(head -n "$REPORT_LINES" <<<"$pc_out")"
-  cmodel="$(vmodel)" || exit 2
+  if vmodel; then cmodel="$V_MODEL"; else exit 2; fi
   rep="$(free_path "$run/$namebase-confirm-out.md")" || exit 3
   xfile="$run/$namebase-confirm-extra.md"
   # Confirm has no --extra flag: the state extra, if any, follows the ticket text.
