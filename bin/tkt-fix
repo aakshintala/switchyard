@@ -443,11 +443,13 @@ emit() {
 # implementer roles. Unknown provider families remain unclassified by design.
 if [ "$verify" -eq 1 ] && [ -z "$collect_verify_job" ]; then
   selected_verify_model="$verifymodel"
-  [ -n "$selected_verify_model" ] || selected_verify_model="$(t get model.verify 2>/dev/null || true)"
-  selected_fix_model="$(t get model.fix 2>/dev/null || true)"
+  if [ -z "$selected_verify_model" ]; then
+    if tkt_get_model emit model.verify t get model.verify; then selected_verify_model="$MODEL_VALUE"; else selected_verify_model=""; fi
+  fi
+  if tkt_get_model emit model.fix t get model.fix; then selected_fix_model="$MODEL_VALUE"; else selected_fix_model=""; fi
   if [ -n "$fixmodel" ]; then selected_fix_model="$fixmodel"; fi
   implement_models=()
-  implement_model="$(t get model.lane 2>/dev/null || true)"
+  if tkt_get_model emit model.lane t get model.lane; then implement_model="$MODEL_VALUE"; else implement_model=""; fi
   [ -z "$implement_model" ] || implement_models+=("model.lane=$implement_model")
   [ -z "$selected_fix_model" ] || implement_models+=("model.fix=$selected_fix_model")
   if [ -n "$selected_verify_model" ] \
@@ -1289,7 +1291,12 @@ else
       args+=(--gate-from-plan)
     fi
   else
-    [ -n "$fixmodel" ] || fixmodel="$(t get model.fix 2>/dev/null)" || { echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2; exit 2; }
+    if [ -z "$fixmodel" ]; then
+      if tkt_get_model emit model.fix t get model.fix; then fixmodel="$MODEL_VALUE"; else
+        echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2
+        exit 2
+      fi
+    fi
     dispatch_findings="$findings"
     if [ -n "$prompt" ] || [ "${#ruling_ids[@]}" -gt 0 ]; then
       if [ -n "$prompt" ]; then
@@ -1495,7 +1502,12 @@ if [ "$noverify" -eq 1 ]; then
   t set unverified "$findings"
   emit "PUSHED unverified" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"}
 fi
-[ -n "$verifymodel" ] || verifymodel="$(t get model.verify 2>/dev/null)" || { echo "tkt-fix: missing key: model.verify (no --verify-model and no state model.verify)" >&2; exit 2; }
+if [ -z "$verifymodel" ]; then
+  if tkt_get_model emit model.verify t get model.verify; then verifymodel="$MODEL_VALUE"; else
+    echo "tkt-fix: missing key: model.verify (no --verify-model and no state model.verify)" >&2
+    exit 2
+  fi
+fi
 verify_round_coverage "$tmp/verify-rounds" "$tmp/unaccounted"
 write_findings_history prepare "" "$tmp/verify-rounds"
 verify_history="$history_file"

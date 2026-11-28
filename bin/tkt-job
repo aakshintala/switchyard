@@ -173,6 +173,19 @@ tkt() {
   "$tkt_state" "$state" "$@"
 }
 
+emit_model_ambiguity() {
+  local verdict="$1" ec="$2"; shift 2
+  local twelve logpath output
+  twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
+  logpath="$run/$namebase-tkt-job-$twelve-$(date +%H%M%S).log"
+  output="TKT tkt-job $verdict log=$logpath"
+  [ "$#" -eq 0 ] || output="$output
+$(printf '%s\n' "$@")"
+  printf '%s\n' "$output" >"$logpath"
+  printf '%s\n' "$output"
+  exit "$ec"
+}
+
 validate_gate_journal_command() {
   case "$inner_gate_cmd" in
     *$'\n'*)
@@ -603,10 +616,12 @@ else
   fi
   prompt_hash="$(shasum -a 256 <"$brief" | awk '{print $1}')"
   if [ -z "$model" ]; then
-    model="$(tkt get "model.$slot" 2>/dev/null)" || {
+    if tkt_get_model emit_model_ambiguity "model.$slot" tkt get "model.$slot"; then
+      model="$MODEL_VALUE"
+    else
       echo "tkt-job: missing key: model.$slot (no --model and no state model.$slot)" >&2
       exit 2
-    }
+    fi
   fi
   # The tool-idle window bounds one silent tool call and the job-end gate, on every model: a full
   # gate on a loaded box can run past 30 min, so every job gets 2 h. For muse it is also the

@@ -4,6 +4,19 @@
 #   namebase_lib="$script_dir/lib/namebase.sh"
 # Every function returns 0 unless stated, and is safe under `set -euo pipefail`.
 
+# tkt_get_model EMIT KEY GETTER...: read one model key through GETTER, store
+# its value in MODEL_VALUE, and route duplicate-key status 3 through EMIT.
+# GETTER receives its remaining arguments and must print the value on stdout;
+# a nonzero getter status is returned after the ambiguity callback, if any.
+tkt_get_model() {
+  local emit_fn="$1" key="$2" output status=0
+  shift 2
+  output="$("$@" 2>&1)" || status=$?
+  if [ "$status" -eq 3 ]; then "$emit_fn" "MODEL-AMBIGUOUS key=$key" 2 "$output"; fi
+  [ "$status" -eq 0 ] || return "$status"
+  MODEL_VALUE="$output"
+}
+
 # require_state_file SCRIPT STATE: exit 2 with a caller-specific diagnostic when
 # STATE is missing. Check before probing its lock so a missing parent directory
 # cannot be misreported as a held state lock.

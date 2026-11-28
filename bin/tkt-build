@@ -559,7 +559,9 @@ if [ "$from" = lane ]; then
   closing="$(tkt get closing)"
   plan_gate_args tkt
   gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan" 2>"$tmpd/pg-err")" || emit "PRECONDITION missing=gate" 2 "$(cat "$tmpd/pg-err")" "$(repair_hint gate)"
-  lane_model="${lane_model:-$(tkt get model.lane 2>/dev/null || true)}"
+  if [ -z "$lane_model" ]; then
+    if tkt_get_model emit model.lane tkt get model.lane; then lane_model="$MODEL_VALUE"; fi
+  fi
   # A lane with no model names the missing key on stderr and stops before dispatch.
   if [ -z "$lane_model" ]; then
     printf '%s\n' "tkt-build: missing key: model.lane (no --lane-model and no state model.lane)" >&2
@@ -618,8 +620,8 @@ if [ "$outcome" = measurement ]; then
   emit "MEASURED head=$head" 0
 fi
 tkt set review_status ready
-rm="${review_model:-$(tkt get model.review 2>/dev/null || true)}"
-om="${overbuild_model:-$(tkt get model.overbuild 2>/dev/null || true)}"
+rm="$review_model"; [ -n "$rm" ] || { tkt_get_model emit model.review tkt get model.review && rm="$MODEL_VALUE" || rm=""; }
+om="$overbuild_model"; [ -n "$om" ] || { tkt_get_model emit model.overbuild tkt get model.overbuild && om="$MODEL_VALUE" || om=""; }
 [ -n "$rm" ] || emit "PRECONDITION missing=model.review" 2 "tkt-state: missing key: model.review" "$(repair_hint model.review)"
 [ -n "$om" ] || emit "PRECONDITION missing=model.overbuild" 2 "tkt-state: missing key: model.overbuild" "$(repair_hint model.overbuild)"
 # The refused slot's hint is `<id>`; only the other pick is prefilled.

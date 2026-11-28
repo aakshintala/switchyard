@@ -42,6 +42,18 @@ bash "$TKT" "$S" add fruit banana || fail "add banana exits 0"
 [ "$(bash "$TKT" "$S" get fruit)" = "apple" ] || fail "get prints the first value"
 [ "$(bash "$TKT" "$S" list fruit)" = "$(printf 'apple\nbanana')" ] || fail "list prints every value"
 
+# model reads refuse duplicate keys rather than silently returning the first value.
+MS="$T/model-ambiguous.state"
+printf 'model.lane=first\nmodel.lane=second\n' >"$MS"
+model_out="$(bash "$TKT" "$MS" get model.lane 2>"$T/err-model-ambiguous.txt")"
+model_rc=$?
+[ "$model_rc" -eq 3 ] || fail "get of duplicate model.lane exits 3, got $model_rc"
+[ -z "$model_out" ] || fail "get of duplicate model.lane prints no chosen value"
+grep -qFx 'MODEL-AMBIGUOUS key=model.lane values=first,second' "$T/err-model-ambiguous.txt" \
+  || fail "duplicate model.lane names all values"
+grep -qF "tkt-state $MS set model.lane <id>" "$T/err-model-ambiguous.txt" \
+  || fail "duplicate model.lane names the repair command"
+
 # unset head removes every head line, preserves other lines, and journals each old value
 US="$T/unset.state"
 UHEAD=0123456789abcdef0123456789abcdef01234567
