@@ -57,14 +57,14 @@ plan_verdict_check() {
       { [ "${#files[@]}" -eq 0 ] || git -C "$worktree" diff --quiet "$plan_verdict_base..$base" -- "${files[@]}" 2>/dev/null; }; then
       verdict_ok=1
     fi
-  elif [ "$plan_verdict" = skipped ] && [ "$plan_verdict_base" = "$base" ]; then
+  elif { [ "$plan_verdict" = skipped ] || [ "$plan_verdict" = lines ]; } && [ "$plan_verdict_base" = "$base" ]; then
     verdict_ok=1
   fi
   [ "$verdict_ok" -eq 1 ] && return 0
 
   case "$plan_verdict" in
     "") verdict_refusal=none ;;
-    ok|triaged|skipped) verdict_refusal=stale ;;
+    ok|triaged|skipped|lines) verdict_refusal=stale ;;
     *) verdict_refusal="$plan_verdict" ;;
   esac
   verdict_digest="plan_verdict=${plan_verdict:-none} plan_verdict_base=${plan_verdict_base:-none} plan_base=${base:-none}"

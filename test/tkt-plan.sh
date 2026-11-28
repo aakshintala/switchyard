@@ -3810,7 +3810,7 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = advisory-lines 
   run_plan post
   [ "$RC" -eq 0 ] || fail "advisory LINES does not lock post (rc=$RC): $(cat "$CDIR/stderr.txt")"
   expect_verdict "TKT tkt-plan POSTED urls=* log=*" "advisory LINES does not lock post"
-  expect_plan_verdict skipped "$base_now" "advisory LINES does not lock lane dispatch"
+  expect_plan_verdict lines "$base_now" "advisory LINES does not lock lane dispatch"
 fi
 
 echo "tkt-plan: all cases passed"

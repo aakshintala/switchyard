@@ -42,6 +42,7 @@ case " \$* " in
     [ ! -f "$T/prhead-fail" ] || { echo "gh: PR head boom" >&2; exit 4; }
     cat "$T/prhead"; exit 0 ;;
   *" issue view "*"--json labels"*)
+    [ ! -f "$T/labels-read-fail" ] || { echo "gh: labels boom" >&2; exit 5; }
     cat "$T/issue-labels"; exit 0 ;;
   *" issue view "*"state,comments"*)
     if [ -f "$T/issue-fail" ]; then echo "gh: issue view boom" >&2; exit 5; fi
@@ -1840,6 +1841,17 @@ want "SKIPPED filing=" 0 short-path-unlabelled
 ! grep -q '^model\.planner=' "$RUN/widget-42.state" || fail "short-path-unlabelled: stored a planner model"
 grep -q 'issue view 42 --repo acme/widget --json labels' "$T/calls.log" \
   || fail "short-path-unlabelled: did not read issue labels"
+fi
+
+# A failed label lookup follows the needs-plan path and dispatches preflight.
+if [ -z "${TKT_START_TEST_ONLY:-}" ] || [ "$TKT_START_TEST_ONLY" = label-read-fail ]; then
+setup label-read-fail TWO FILING
+set_issue_labels '{"labels":[]}'
+touch "$T/labels-read-fail"
+run_start
+want "PREFLIGHT core=2" 1 label-read-fail
+grep -q '^tkt-job|.*--slot preflight ' "$T/calls.log" \
+  || fail "label-read-fail: did not dispatch preflight"
 fi
 
 # --no-preflight is a no-op: needs-plan still runs preflight.
