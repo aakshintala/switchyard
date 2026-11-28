@@ -33,11 +33,11 @@ When the ticket's spec is another issue, pass its number with `tkt-start --spec-
 
 - `lane`: step 4 lane job.
 - `fix`: each `tkt-fix` round's fix job.
-- `map`: step 4 mutant mapping job.
+- `map`: accepted and unused; no job reads it.
 - `verifier`: step 3 plan Verifier and confirm jobs.
 - `verify`: review-loop's scoped verify after a fix round.
 - `review`: step 4 correctness review job.
-- `overbuild`: step 4 over-engineering review job.
+- `overbuild`: optional step 4 over-engineering notes; its verdict and findings do not affect approval or the findings file.
 - `preflight`: step 2 preflight job.
 - `planner`: step 3 plan writer (`--slot planner`). tkt-start refuses to start without it unless `--no-preflight` or `--takeover` is given or the state already stores a plan; a later `--slot planner` job and a tkt-plan `verify` that would resume a planner after PLAN-CHECK both refuse without it.
 
@@ -148,7 +148,7 @@ After acting on a job's report, run `delegate ack <id>` so lanestat stops showin
 
 Confirm the remote tip equals the lane's reported SHA (`git log origin/<branch> -1`), read the diff, and run the gate yourself. A file outside the fence with a deleted line, a new file outside it, or a failing check goes back to the lane, or you take the work back.
 
-When CI runs mutation testing on the diff, take its mutant list from the first run, by the workflow doc's commands, as soon as the job that lists the mutants finishes (minutes in; the mutant jobs run much longer), and map each mutant to a catching test or a function-level exemption with its reason before the first fix round; `tkt-build` runs the map beside the first review and merges its needs-test and removed lines into the findings file. Record an unviable mutant (one that doesn't compile) as `unviable`: it needs neither. A viable mutant with neither gets a test before the next push: push it while the first run continues, since the newer push cancels that run and leaves its verdicts unread. Repeat after each code push. Once the run finishes, take each mutant's verdict from `~/.agents/bin/mutant-verdicts <run> --repo <owner/name>`: one line per mutant holding the mutant, a tab, and one of `caught`, `missed`, `timeout`, `unviable`; the `missed` and `timeout` lines are the surviving mutants. When a mutant shard fails, wait for the whole run to finish (`~/.agents/bin/gh-ci wait --run <run> --pr <pr> --repo <owner/name>`) before you push a fix: shards fail together, and a push cancels the shards still running and costs another round. Then fix every missed and timeout mutant in that run in one commit, and push it once. The mapped-test push above is the exception: it goes before any shard verdict exists. `tkt-build` waits up to 2400 s for the head's shards once the review pair starts and adds every head survivor (missed/timeout inside the diff) from the shards to the round-1 findings; a shard still running at the bound is reported as `P3 mutant shards unread`, and review proceeds without it.
+CI runs mutation testing on every ready PR. Once a run finishes, use `~/.agents/bin/mutant-verdicts <run> --repo <owner/name>` to read each mutant's `caught`, `missed`, `timeout` or `unviable` result; missed and timed-out mutants are survivors to fix before the next push. A push can cancel a still-running run, so wait for its shards to finish before relying on their results.
 
 Done when the gate passes on the lane-reported SHA, which matches the remote tip. `tkt-gate` journals a full-gate PASS and updates state; `tkt-ship` checks that state/journal evidence against the PR head. Its Local gate body line is informational only.
 

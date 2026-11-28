@@ -362,7 +362,12 @@ plant_comment() {
 }
 
 start_review() {
-  # start_review ...args: run review-pr start, stdout is the "<role> <id>" lines.
+  # Legacy cases here exercise all three review roles; the dedicated default
+  # run below calls review-pr directly with no --axes override.
+  case " $* " in
+    *" --axes "*|*" --verify "*) ;;
+    *) set -- "$@" --axes standards,spec,overbuild;;
+  esac
   bash "$REVIEW" start "$@"
 }
 
@@ -448,7 +453,70 @@ stale_state() {
   touch -t "$stale_ts" "$TMPDIR/review-pr/$stale_jid" || fail "stale fixture touch"
 }
 
-# --- case: a GitHub 406 does not prevent the clone diff and patch-id
+# --- default review run starts exactly standards and spec without an overbuild model
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M 2>"$T/stderr.txt")" \
+  || fail "default run starts standards and spec without requiring an overbuild model"
+[ "$(cat "$T/state/runs.txt")" = "standards M
+spec M" ] \
+  || fail "default run starts exactly standards and spec: $(cat "$T/state/runs.txt")"
+[ "$(cat "$T/state/watch.txt")" = "watch job-standards job-spec" ] \
+  || fail "default run waits on exactly the standards and spec jobs"
+[ ! -e "$TMPDIR/review-pr/job-overbuild" ] || fail "default run does not start overbuild"
+
+# --- overbuild notes remain in the comment, but never become finding rows
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: CHANGES
+P2 overbuild note: duplicate helper can be removed
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --axes standards,spec,overbuild --model M --overbuild-model M2 >/dev/null 2>&1 \
+  || fail "explicit overbuild review starts"
+collect_out="$(bash "$REVIEW" collect --findings-out "$T/findings.out" job-standards job-spec job-overbuild 2>"$T/stderr.txt")" \
+  || fail "explicit overbuild review collects"
+grep -Fq 'P2 overbuild note: duplicate helper can be removed' "$T/state/comment.md" \
+  || fail "overbuild notes remain in the posted comment"
+! grep -Fq 'P2 overbuild note:' <<<"$collect_out" \
+  || fail "overbuild findings are not printed as finding rows"
+! grep -Fq 'P2 overbuild note:' "$T/findings.out" \
+  || fail "overbuild findings are not written to the findings file"
+
+# --- scoped verify remains available after an approved review with overbuild CHANGES
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+plant_comment "2026-11-04T11:00:00Z" 301 "review-pr: patch-id $EXPECTED_PID, head $OLD_SHA
+
+## standards (test)
+
+VERDICT standards: APPROVE
+
+## spec (test)
+
+VERDICT spec: APPROVE
+
+## overbuild (test)
+
+VERDICT overbuild: CHANGES
+P2 overbuild note: duplicate helper can be removed"
+write_record verify DONE "FIX-OK all blocking findings are repaired
+STATUS: DONE" 0
+printf 'P1 finding: blocking behavior\n' >"$T/verify-findings.txt"
+verify_out="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --verify "$T/verify-findings.txt" \
+  --since "$OLD_SHA" --head "$FAKE_SHA" 2>"$T/verify-stderr.txt")" \
+  || { cat "$T/verify-stderr.txt" >&2; fail "overbuild CHANGES does not block scoped verify"; }
+grep -q '^verify job-verify$' <<<"$verify_out" || fail "scoped verify starts after overbuild CHANGES"
+
+# --- a GitHub 406 does not prevent the clone diff and patch-id
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record standards DONE "VERDICT standards: APPROVE
@@ -1778,15 +1846,14 @@ write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
 run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
   --model M --overbuild-model M2 2>"$T/stderr-run.txt")" || fail "run exits 0 on all APPROVE"
-[ "$(head -5 <<<"$run_out")" = "standards job-standards
+[ "$(head -4 <<<"$run_out")" = "standards job-standards
 spec job-spec
-overbuild job-overbuild
-watch: delegate watch job-standards job-spec job-overbuild
-collect: review-pr collect job-standards job-spec job-overbuild" ] || fail "run prints start's lines first: [$run_out]"
-[ "$(sed -n 6p <<<"$run_out")" = "patch-id $EXPECTED_PID" ] || fail "run prints collect's output after start's lines"
-grep -q "^VERDICT overbuild: APPROVE$" <<<"$run_out" || fail "run prints collect's verdicts"
+watch: delegate watch job-standards job-spec
+collect: review-pr collect job-standards job-spec" ] || fail "run prints the two default jobs first: [$run_out]"
+[ "$(sed -n 5p <<<"$run_out")" = "patch-id $EXPECTED_PID" ] || fail "run prints collect's output after start's lines"
+! grep -q "^VERDICT overbuild:" <<<"$run_out" || fail "default run has no overbuild verdict"
 grep -q "^CI $SHORT pass$" <<<"$run_out" || fail "run prints collect's CI line"
-grep -qx 'watch job-standards job-spec job-overbuild' "$T/state/watch.txt" || fail "run waits on every started job id"
+grep -qx 'watch job-standards job-spec' "$T/state/watch.txt" || fail "run waits on exactly the default job ids"
 [ "$(cat "$T/state/comment-pr.txt")" = "7" ] || fail "run posts the comment through collect"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || fail "run removes its worktrees through collect"
 
@@ -1802,17 +1869,17 @@ STATUS: DONE" 0
 touch "$T/state/fail-watch"
 bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
   --model M --overbuild-model M2 >"$T/stdout-run.txt" 2>"$T/stderr-run.txt" && fail "run with a watch failure exits non-zero"
-grep -Fxq "collect: review-pr collect job-standards job-spec job-overbuild" "$T/stderr-run.txt" || \
+grep -Fxq "collect: review-pr collect job-standards job-spec" "$T/stderr-run.txt" || \
   fail "run with a watch failure prints the collect line"
-grep -q 'job-standards job-spec job-overbuild' "$T/stderr-run.txt" || fail "run with a watch failure prints the ids"
+grep -q 'job-standards job-spec' "$T/stderr-run.txt" || fail "run with a watch failure prints the ids"
 [ ! -e "$T/state/comment.md" ] || fail "run with a watch failure posts no comment"
 [ -f "$TMPDIR/review-pr/job-standards" ] || fail "run with a watch failure keeps state for the resume"
 rm -f "$T/state/fail-watch"
-bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "run with a watch failure resumes with collect"
+bash "$REVIEW" collect job-standards job-spec >/dev/null 2>&1 || fail "run with a watch failure resumes with collect"
 
 # --- case: bad usage exits 2
 bash "$REVIEW" >/dev/null 2>&1; [ "$?" = "2" ] || fail "no args exits 2"
-bash "$REVIEW" start 7 --repo O/N --cwd "$T/clone" --model M >/dev/null 2>&1; [ "$?" = "2" ] || fail "start missing flags exits 2"
+bash "$REVIEW" start 7 --repo O/N --model M >/dev/null 2>&1; [ "$?" = "2" ] || fail "start missing flags exits 2"
 bash "$REVIEW" collect >/dev/null 2>&1; [ "$?" = "2" ] || fail "collect without ids exits 2"
 bash "$REVIEW" 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
   --model M --overbuild-model M2 >/dev/null 2>&1; [ "$?" = "2" ] || fail "old blocking form exits 2"
@@ -2871,13 +2938,13 @@ start_review 7 --repo O/N --cwd "$T/clone" --model M --axes standards,spec >/dev
 [ ! -e "$TMPDIR/review-pr/job-overbuild" ] || fail "axes standards,spec starts no overbuild job"
 bash "$REVIEW" collect job-standards job-spec >/dev/null 2>&1 || fail "axes standards,spec without --overbuild-model collects"
 
-# --- case: default overbuild axis names its missing model for start and run
+# --- explicit overbuild axis still requires its model for start and run
 for entry in start run; do
   reset_state
   if [ "$entry" = start ]; then
-    err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M 2>&1 >/dev/null)"; st=$?
+    err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --axes standards,spec,overbuild 2>&1 >/dev/null)"; st=$?
   else
-    err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M 2>&1 >/dev/null)"; st=$?
+    err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M --axes standards,spec,overbuild 2>&1 >/dev/null)"; st=$?
   fi
   [ "$st" -eq 2 ] || fail "$entry without --overbuild-model exits 2 (got $st)"
   grep -Fq -- "--overbuild-model" <<<"$err" || fail "$entry missing-model error names --overbuild-model"
